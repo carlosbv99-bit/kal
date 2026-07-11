@@ -6,6 +6,14 @@
   const messagesEl = document.getElementById("messages");
   const inputEl = document.getElementById("input");
   const sendBtn = document.getElementById("send");
+  const contextIndicatorEl = document.getElementById("context-indicator");
+  const contextLabelEl = document.getElementById("context-label");
+  const contextDismissBtn = document.getElementById("context-dismiss");
+
+  contextDismissBtn.addEventListener("click", () => {
+    contextIndicatorEl.style.display = "none";
+    vscode.postMessage({ type: "dismiss-context" });
+  });
 
   function appendMessage(text, className) {
     const div = document.createElement("div");
@@ -21,6 +29,7 @@
     if (!text) return;
     appendMessage(text, "msg-user");
     inputEl.value = "";
+    contextIndicatorEl.style.display = "none"; // adjunto de un solo uso, ver chatPanel.ts
     const pending = appendMessage("kal está pensando...", "msg-pending");
     pending.dataset.pending = "true";
     vscode.setState({ lastQuestion: text });
@@ -42,8 +51,10 @@
 
   window.addEventListener("message", (event) => {
     const message = event.data;
-    if (message.type === "prefill") {
-      inputEl.value = message.text + "\n\n";
+    if (message.type === "context-attached") {
+      const label = message.isSelection ? "selección" : "archivo completo";
+      contextLabelEl.textContent = `📎 ${message.relativePath} (${label})`;
+      contextIndicatorEl.style.display = "flex";
       inputEl.focus();
     } else if (message.type === "answer") {
       removePending();

@@ -35,16 +35,38 @@ test("chat() manda goal y model, y devuelve el resultado parseado", async () => 
   assert.equal(result.session_id, "sesion-1");
 });
 
-test("chat() manda model=null y session_id=null cuando no se especifican", async () => {
+test("chat() manda model=null, session_id=null y editor_context=null cuando no se especifican", async () => {
   const fakeFetch = (async (_url: any, init: any) => {
     const body = JSON.parse(init.body);
     assert.equal(body.model, null);
     assert.equal(body.session_id, null);
+    assert.equal(body.editor_context, null);
     return jsonResponse({ session_id: "s", goal: "x", final_answer: "y", status: "success", plan: [], steps: [] });
   }) as typeof fetch;
 
   const client = new KalClient("http://localhost:8000", fakeFetch);
   await client.chat("x");
+});
+
+test("chat() manda editor_context como señal cruda, nunca texto ya formateado", async () => {
+  const fakeFetch = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.editor_context, {
+      relative_path: "src/foo.py",
+      language_id: "python",
+      text: "def foo():\n    pass\n",
+      is_selection: true,
+    });
+    return jsonResponse({ session_id: "s", goal: "x", final_answer: "y", status: "success", plan: [], steps: [] });
+  }) as typeof fetch;
+
+  const client = new KalClient("http://localhost:8000", fakeFetch);
+  await client.chat("x", undefined, undefined, {
+    relativePath: "src/foo.py",
+    languageId: "python",
+    text: "def foo():\n    pass\n",
+    isSelection: true,
+  });
 });
 
 test("chat() manda el session_id cuando se especifica, para continuar la misma conversación", async () => {

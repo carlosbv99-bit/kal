@@ -48,6 +48,33 @@ body {
   font-style: italic;
 }
 
+.context-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  background-color: var(--vscode-editorWidget-background, transparent);
+  border: 1px solid var(--vscode-widget-border, transparent);
+}
+
+#context-dismiss {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+#context-dismiss:hover {
+  opacity: 1;
+}
+
 .input-row {
   display: flex;
   gap: 6px;

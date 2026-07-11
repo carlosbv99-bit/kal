@@ -1,13 +1,13 @@
 /**
  * Parte que sí toca la API real de vscode (captura el editor activo) — no
- * verificable en este entorno sin un VS Code real corriendo. La lógica de
- * formateo en sí vive en editorContextFormat.ts (sin import de vscode,
- * testeable con Node normal, ver test/editorContextFormat.test.ts).
+ * verificable en este entorno sin un VS Code real corriendo. El tipo
+ * EditorSnapshot en sí vive en editorContextFormat.ts (sin import de
+ * vscode, testeable con Node normal).
  */
 import * as vscode from "vscode";
-import { EditorSnapshot, formatEditorContext } from "./editorContextFormat";
+import { EditorSnapshot } from "./editorContextFormat";
 
-export { EditorSnapshot, formatEditorContext } from "./editorContextFormat";
+export { EditorSnapshot } from "./editorContextFormat";
 
 export function captureEditorSnapshot(): EditorSnapshot | null {
   const editor = vscode.window.activeTextEditor;
@@ -25,9 +25,4 @@ export function captureEditorSnapshot(): EditorSnapshot | null {
     text: hasSelection ? doc.getText(selection) : doc.getText(),
     isSelection: hasSelection,
   };
-}
-
-export function buildEditorContext(): string | null {
-  const snapshot = captureEditorSnapshot();
-  return snapshot ? formatEditorContext(snapshot) : null;
 }

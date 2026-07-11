@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agent_core.context_service import ContextService, EditorContextSignals
 from agent_core.llm.agent_loop import AgentLoop
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.planner import PlanningAgentLoop
@@ -52,6 +53,7 @@ class Orchestrator:
         self.tools = tool_registry
         self.self_modification = self_modification_manager
         self.sessions = session_manager
+        self.context_service = ContextService()
         self.llm = OllamaClient()
         self.agent = AgentLoop(llm_client=self.llm, task_executor=self.tasks, memory=self.memory)
         self.planning_agent = PlanningAgentLoop(self.agent)
@@ -96,6 +98,19 @@ class TaskRequest(BaseModel):
     description: str
 
 
+class EditorContextRequest(BaseModel):
+    """
+    Señal cruda del editor (ver agent_core/context_service.py) — el
+    frontend (extensión de VS Code) NUNCA manda texto ya formateado
+    acá, solo estos 4 campos. El Context Service decide cómo se ve en
+    el mensaje final al LLM.
+    """
+    relative_path: str
+    language_id: str
+    text: str
+    is_selection: bool
+
+
 class ChatRequest(BaseModel):
     goal: str
     model: str | None = None
@@ -108,6 +123,7 @@ class ChatRequest(BaseModel):
     # turno, para que nunca quede algo bloqueado "para siempre" sin que el
     # usuario lo vea venir).
     deny_permissions: list[str] | None = None
+    editor_context: EditorContextRequest | None = None
 
 
 class SelfModProposeRequest(BaseModel):
@@ -198,10 +214,20 @@ def chat(req: ChatRequest):
             raise HTTPException(status_code=400, detail=f"Permiso inválido en deny_permissions: {e}")
         orchestrator.sessions.update_denied_permissions(session, denied)
 
+    editor_context = None
+    if req.editor_context is not None:
+        editor_context = EditorContextSignals(
+            relative_path=req.editor_context.relative_path,
+            language_id=req.editor_context.language_id,
+            text=req.editor_context.text,
+            is_selection=req.editor_context.is_selection,
+        )
+    context_bundle = orchestrator.context_service.build(session, editor_context)
+
     try:
         result = orchestrator.planning_agent.run(
             req.goal, model=req.model, use_planner=use_planner,
-            history=session.history_messages(), session_context=session.context_message(),
+            history=context_bundle.history, session_context=context_bundle.session_context,
             denied_permissions=session.denied_permissions,
         )
     except ProviderError as e:

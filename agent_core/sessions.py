@@ -11,6 +11,12 @@ por sesión: el historial de turnos (para continuidad conversacional
 real) y el último artefacto generado (para que "la imagen" tenga a
 qué referirse sin que el usuario repita la ruta).
 
+Este módulo es SOLO almacenamiento — decidir qué de esto entra al
+próximo mensaje al LLM (ventana de turnos, fusión con el contexto del
+editor, etc.) es responsabilidad de agent_core/context_service.py,
+no de `Session` (antes tenía esa lógica mezclada: `history_messages()`/
+`context_message()` devolvían TODO sin ningún límite).
+
 Estado en memoria del proceso — no persiste a disco ni sobrevive un
 reinicio del backend, mismo criterio que error_handling/circuit_breaker.py
 y tool_integration/registry.py: alcanza para una sesión de trabajo, se
@@ -44,32 +50,6 @@ class Session:
     # deny_permissions) y queda "pegajoso" para el resto de la sesión hasta
     # que se reemplace explícitamente (ver agent_core/orchestrator.py).
     denied_permissions: frozenset[Permission] = field(default_factory=frozenset)
-
-    def history_messages(self) -> list[dict]:
-        """Aplana los turnos previos a mensajes user/assistant alternados."""
-        messages: list[dict] = []
-        for turn in self.turns:
-            messages.append({"role": "user", "content": turn.goal})
-            messages.append({"role": "assistant", "content": turn.final_answer})
-        return messages
-
-    def context_message(self) -> dict | None:
-        """
-        Mensaje de sistema describiendo el artefacto activo, o None si
-        todavía no se generó ninguno en esta sesión.
-        """
-        if self.active_artifact is None:
-            return None
-        return {
-            "role": "system",
-            "content": (
-                f"Contexto de esta sesión: el último artefacto activo (generado por vos o "
-                f"subido por el usuario) es {self.active_artifact.modality} en "
-                f"'{self.active_artifact.uri}'. "
-                'Si el usuario se refiere a "la imagen"/"el audio"/"el video" sin '
-                "dar más detalle, probablemente hable de este."
-            ),
-        }
 
 
 class SessionManager:

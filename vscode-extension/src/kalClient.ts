@@ -6,7 +6,13 @@
  * `fetchFn` es inyectable (por defecto el fetch global de Node 22+) para
  * poder testear sin red real — mismo patrón de DI que ya usa el backend
  * Python (ver tool_integration/adapters/browser.py::BrowserTool(driver=...)).
+ *
+ * `editor_context`: señal CRUDA del editor (ver
+ * agent_core/context_service.py) — este cliente nunca la formatea a
+ * texto, solo la reenvía tal cual. Decidir cómo se ve en el prompt
+ * final es responsabilidad del backend, no de esta extensión.
  */
+import { EditorSnapshot } from "./editorContextFormat";
 
 export interface ChatStep {
   tool: string;
@@ -31,13 +37,25 @@ export class KalClient {
     private readonly fetchFn: FetchFn = fetch
   ) {}
 
-  async chat(goal: string, model?: string, sessionId?: string): Promise<ChatResult> {
+  async chat(goal: string, model?: string, sessionId?: string, editorContext?: EditorSnapshot): Promise<ChatResult> {
     let response: Response;
     try {
       response = await this.fetchFn(`${this.baseUrl}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal, model: model || null, session_id: sessionId || null }),
+        body: JSON.stringify({
+          goal,
+          model: model || null,
+          session_id: sessionId || null,
+          editor_context: editorContext
+            ? {
+                relative_path: editorContext.relativePath,
+                language_id: editorContext.languageId,
+                text: editorContext.text,
+                is_selection: editorContext.isSelection,
+              }
+            : null,
+        }),
       });
     } catch (e) {
       throw new Error(

@@ -270,6 +270,14 @@ class AgentConfig(BaseModel):
     max_concurrent_tasks: int = 4
 
 
+class ContextConfig(BaseModel):
+    # Cuántos turnos previos de la sesión se mandan al LLM en cada
+    # llamada — ver agent_core/context_service.py. Antes no había
+    # ningún límite (se mandaba TODO el historial de la sesión);
+    # alcance mecánico, sin resumen todavía.
+    max_recent_turns: int = 8
+
+
 class Settings(BaseModel):
     schema_version: int
     agent: AgentConfig
@@ -277,6 +285,7 @@ class Settings(BaseModel):
     memory: MemoryConfig
     error_handling: ErrorHandlingConfig
     multimodal: MultimodalConfig = MultimodalConfig()
+    context: ContextConfig = ContextConfig()
     sandbox: SandboxConfig
     tool_integration: ToolIntegrationConfig
     permissions: PermissionCascadeConfig = PermissionCascadeConfig()

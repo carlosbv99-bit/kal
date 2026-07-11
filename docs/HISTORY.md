@@ -2318,3 +2318,79 @@ requerido = el workflow nuevo).
 
 Con esto, las 3 fases del plan de comunidad (instalación remota +
 página navegable + curación) quedan completas.
+
+## Context Service — alcance mecánico, sin LLM (2026-07-11)
+
+Discusión de arquitectura sobre cómo se maneja la ventana de contexto:
+el usuario propuso un "Context Engine" completo (capas por tipo de
+información, presupuesto de tokens, resumen automático, contexto de
+editor consciente de símbolos, tracking de intención, Context
+Planner). Acordado: sí a la dirección (contexto como recurso
+gestionado por el kernel, no una feature de un frontend puntual), pero
+secuenciado — no construir las 7 capas de una. Primer corte,
+explícitamente mecánico (sin ninguna llamada a LLM, para no meter el
+riesgo de que un resumen automático distorsione información
+silenciosamente sin poder validarlo en vivo todavía).
+
+Antes de esto, discusión aparte sobre si la integración de VS Code
+debería ser una "Integration Skill" — se corrigió: aplicar parches y
+navegar símbolos necesitan filesystem real (escribir en el proyecto
+abierto del usuario), algo estructuralmente incompatible con el
+sandbox de una skill (Docker efímero, sin acceso al filesystem real
+del host). Esa lógica queda del lado de confianza total de la
+extensión (`applyEdit.ts`), nunca sandboxeada ni instalable por
+terceros sin revisión — un "Integration Skill"/"Connector" con
+permiso de escritura real sería, en la práctica, la superficie de
+ataque más peligrosa que kal tendría.
+
+**Implementado**: `agent_core/context_service.py` (nuevo) —
+`ContextService.build(session, editor_context)` decide qué entra al
+próximo mensaje al LLM: ventana de últimos `settings.context.max_recent_turns`
+(default 8, antes NINGÚN límite — `Session.history_messages()` devolvía
+todo el historial sin recortar) turnos, y fusiona artefacto activo +
+contexto del editor en UN SOLO mensaje `role=system` (nunca dos
+separados — bug real ya documentado, un segundo system hacía que
+qwen3-coder:30b lo ignorara por completo). Vive in-process, mismo
+patrón que `MemoryManager` — NO se expone por el Kernel Bus, las
+skills nunca necesitan construir un prompt de chat.
+
+`agent_core/sessions.py::Session` vuelve a ser solo datos —
+`history_messages()`/`context_message()` se eliminaron (la lógica se
+mudó al servicio). `agent_core/orchestrator.py`: `ChatRequest` gana
+`editor_context` (4 campos: ruta relativa, lenguaje, texto, si es
+selección) — señal CRUDA, nunca texto pre-formateado.
+
+**Extensión de VS Code deja de concatenar texto**: antes,
+`formatEditorContext()` armaba un bloque de texto y lo "prellenaba"
+en el cuadro de entrada del chat (el usuario veía todo el código
+pegado a su pregunta). Ahora `extension.ts` captura la señal cruda
+(`EditorSnapshot`) y se la pasa a `ChatPanel`, que la guarda como
+adjunto de un solo uso y muestra un indicador simple
+("📎 archivo.py (selección)" + botón para descartar) en vez de volcar
+el texto — el mensaje del usuario queda limpio. `kalClient.ts` manda
+la señal cruda como `editor_context` en el POST; el backend decide el
+formato final. `formatEditorContext()`/su test se eliminaron (lógica
+movida a Python); `EditorSnapshot` se conserva (lo sigue usando
+`applyEditFormat.ts` para su propio flujo, sin relación con esto). El
+frontend web no cambia nada — nunca mandó `editor_context`, se
+beneficia igual de la ventana de turnos porque es enteramente del
+lado del servidor.
+
+Bug real menor encontrado al correr los tests de la extensión: `npm
+test` seguía fallando sobre un `editorContextFormat.test.js`
+compilado VIEJO en `out/` después de borrar el `.ts` fuente — `tsc`
+no limpia archivos de salida huérfanos en un build incremental.
+Corregido borrando `out/` antes de recompilar.
+
+Tests nuevos: `tests/test_context_service.py` (9, Python — ventana de
+turnos, fusión en un único mensaje system, formato del contexto de
+editor) + 2 nuevos en `kalClient.test.ts` (TypeScript). `test_sessions.py`
+simplificado a probar solo almacenamiento. Suite completa de Python y
+`npm test` de la extensión confirmados sin regresiones.
+
+**Deliberadamente fuera de esta iteración**: resumen automático de
+sesión (necesita LLM, requiere validación en vivo), memoria de
+proyecto persistente, contexto de editor consciente de símbolos (vía
+las APIs de símbolos de VS Code, no un parser propio), tracking de
+intención, envolver esto como Kernel Bus service (no hace falta —
+las skills no lo necesitan).

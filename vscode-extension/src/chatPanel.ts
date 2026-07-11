@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as vscode from "vscode";
+import { EditorSnapshot } from "./editorContextFormat";
 import { KalClient } from "./kalClient";
 
 /**
@@ -18,6 +19,11 @@ export class ChatPanel {
   // mientras el panel esté abierto, se pierde al cerrarlo (igual que
   // cerrar una pestaña de chat empieza una conversación nueva).
   private sessionId: string | undefined;
+  // Señal cruda del editor, adjunta al PRÓXIMO mensaje que se mande
+  // (un solo uso — mismo comportamiento que el prefill de texto que
+  // reemplaza, ver Context Service: agent_core/context_service.py).
+  // La extensión nunca la formatea a texto, solo la reenvía.
+  private pendingEditorContext: EditorSnapshot | undefined;
 
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, client: KalClient) {
     this.panel = panel;
@@ -30,13 +36,15 @@ export class ChatPanel {
       this.panel.webview.onDidReceiveMessage(async (message) => {
         if (message?.type === "ask" && typeof message.text === "string") {
           await this.handleAsk(message.text);
+        } else if (message?.type === "dismiss-context") {
+          this.pendingEditorContext = undefined;
         }
       }),
       this.panel.onDidDispose(() => this.dispose())
     );
   }
 
-  static createOrShow(extensionUri: vscode.Uri, client: KalClient, prefill?: string): void {
+  static createOrShow(extensionUri: vscode.Uri, client: KalClient, editorSnapshot?: EditorSnapshot): void {
     if (ChatPanel.current) {
       ChatPanel.current.panel.reveal(vscode.ViewColumn.Beside);
     } else {
@@ -53,17 +61,24 @@ export class ChatPanel {
       ChatPanel.current = new ChatPanel(panel, extensionUri, client);
     }
 
-    if (prefill) {
-      ChatPanel.current.panel.webview.postMessage({ type: "prefill", text: prefill });
+    if (editorSnapshot) {
+      ChatPanel.current.pendingEditorContext = editorSnapshot;
+      ChatPanel.current.panel.webview.postMessage({
+        type: "context-attached",
+        relativePath: editorSnapshot.relativePath,
+        isSelection: editorSnapshot.isSelection,
+      });
     }
   }
 
   private async handleAsk(text: string): Promise<void> {
     const config = vscode.workspace.getConfiguration("kal");
     const model = config.get<string>("model") || undefined;
+    const editorContext = this.pendingEditorContext;
+    this.pendingEditorContext = undefined;
 
     try {
-      const result = await this.client.chat(text, model, this.sessionId);
+      const result = await this.client.chat(text, model, this.sessionId, editorContext);
       this.sessionId = result.session_id;
       this.panel.webview.postMessage({ type: "answer", result });
     } catch (e) {
