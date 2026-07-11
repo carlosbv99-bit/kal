@@ -2296,9 +2296,16 @@ es hoy un paso manual, no automatizado.
 exige la instalación remota — cada `skill.yaml` parsea, cada
 `skill.sig` verifica — sobre TODAS las skills del repo, no solo las
 de un PR puntual). `.github/workflows/validate-skills.yml` lo corre
-en cada push/PR que toque `skills/**` (solo instala
-`pyyaml`+`cryptography`, no todo `requirements.txt` — torch/diffusers
-no hacen falta para este chequeo). `CONTRIBUTING.md` (nuevo, en
+en cada push/PR que toque `skills/**` (instala solo las 4 dependencias
+reales de la cadena de imports — `pyyaml`, `python-dotenv`, `pydantic`,
+`cryptography` —, no todo `requirements.txt`; torch/diffusers no hacen
+falta para este chequeo. BUG REAL encontrado al correr el workflow de
+verdad por primera vez: el plan asumía solo pyyaml+cryptography,
+pero `tool_integration/skills.py` importa `utils/logger.py` ->
+`utils/config.py`, que necesita `python-dotenv` y `pydantic` — el
+primer run manual falló con `ModuleNotFoundError: dotenv`, corregido
+verificando antes en un venv aislado local con exactamente esas 4
+dependencias). `CONTRIBUTING.md` (nuevo, en
 inglés): proceso para publicar (fork, firmar con tu propia clave, PR),
 explícito sobre qué prueba una firma verificada (integridad) y qué
 NO prueba (que el autor sea confiable, que el código haga lo que dice).
