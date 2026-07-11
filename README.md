@@ -128,6 +128,7 @@ of independent, trustworthy AI Skills.
 
 ## Getting started
 
+- **[Browse the Skill Market](https://carlosbv99-bit.github.io/kal/)** — see what's available before installing anything.
 - `scripts/run_kal.sh` — run kal locally.
 - `scripts/enable_skill.py` — install a Skill from a local folder.
 - `scripts/install_from_market.py --list` — browse and install a Skill
