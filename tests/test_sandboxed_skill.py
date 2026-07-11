@@ -49,6 +49,19 @@ def _ok_result(modality="text", uri="", metadata=None, output_files=None) -> San
     return SandboxResult(status="success", stdout="", stderr="", exit_code=0, output_files=files)
 
 
+@pytest.fixture(autouse=True)
+def _clean_scan_by_default(monkeypatch):
+    """
+    tool_integration/malware_scan.py::scan_bytes() es fail-closed de
+    verdad (bloquea si ClamAV no está instalado) — el resto de este
+    archivo prueba la lógica de SandboxedSkillTool, no el escaneo en
+    sí (eso vive en tests/test_malware_scan.py), así que por defecto
+    se simula "limpio" sin depender de tener ClamAV real instalado.
+    Los tests puntuales del escaneo lo pisan explícitamente.
+    """
+    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", lambda data, suffix="": None)
+
+
 @pytest.fixture
 def manifest() -> ToolManifest:
     return ToolManifest(name="greet", description="saluda", created_by="system")
@@ -191,6 +204,111 @@ def test_file_artifact_is_persisted_to_artifacts_root(tmp_path, manifest):
     assert saved.exists()
     assert saved.read_bytes() == b"\x89PNG-fake-bytes"
     assert saved.parent == artifacts_root / manifest.name
+
+
+# --- Escaneo de malware (fail-closed) sobre artefactos de skills ---
+
+
+def test_file_artifact_blocked_when_scan_detects_malware(tmp_path, manifest, monkeypatch):
+    from tool_integration.malware_scan import MalwareScanError
+
+    def _boom(data, suffix=""):
+        raise MalwareScanError("ClamAV detectó contenido malicioso: FAKE.TEST-SIGNATURE")
+
+    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", _boom)
+
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "tool.py").write_text("", encoding="utf-8")
+    artifacts_root = tmp_path / "artifacts"
+    fake = FakeSandboxExecutor(_ok_result(
+        modality="image", uri="qr.png", output_files={"qr.png": b"contenido cualquiera"},
+    ))
+    skill_tool = SandboxedSkillTool(
+        manifest=manifest, skill_dir=skill_dir, entry_point="tool:X",
+        image="img", sandbox=fake, artifacts_root=artifacts_root,
+    )
+
+    artifact = skill_tool.execute()
+
+    assert artifact.metadata["status"] == "error"
+    assert "bloqueado" in artifact.metadata["stderr"]
+    assert list(artifacts_root.rglob("*.png")) == []  # nunca se escribió al host
+
+
+def test_file_artifact_blocked_when_clamav_unavailable(tmp_path, manifest, monkeypatch):
+    from tool_integration.malware_scan import MalwareScanError
+
+    def _unavailable(data, suffix=""):
+        raise MalwareScanError("ClamAV no está instalado — no se puede garantizar que este archivo sea seguro")
+
+    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", _unavailable)
+
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "tool.py").write_text("", encoding="utf-8")
+    fake = FakeSandboxExecutor(_ok_result(
+        modality="image", uri="qr.png", output_files={"qr.png": b"contenido cualquiera"},
+    ))
+    skill_tool = SandboxedSkillTool(
+        manifest=manifest, skill_dir=skill_dir, entry_point="tool:X",
+        image="img", sandbox=fake, artifacts_root=tmp_path / "artifacts",
+    )
+
+    artifact = skill_tool.execute()
+
+    assert artifact.metadata["status"] == "error"
+    assert "no está instalado" in artifact.metadata["stderr"]
+
+
+def test_scan_blocked_artifact_is_audited(tmp_path, manifest, monkeypatch):
+    from audit.audit_log import audit_log
+    from tool_integration.malware_scan import MalwareScanError
+
+    monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
+
+    def _boom(data, suffix=""):
+        raise MalwareScanError("detectado")
+
+    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", _boom)
+
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "tool.py").write_text("", encoding="utf-8")
+    fake = FakeSandboxExecutor(_ok_result(
+        modality="image", uri="qr.png", output_files={"qr.png": b"x"},
+    ))
+    skill_tool = SandboxedSkillTool(
+        manifest=manifest, skill_dir=skill_dir, entry_point="tool:X",
+        image="img", sandbox=fake, artifacts_root=tmp_path / "artifacts",
+    )
+
+    skill_tool.execute()
+
+    entries = audit_log.tail(1)
+    assert entries[0]["event_type"] == "artifact_scan_blocked"
+    assert entries[0]["outcome"] == "failure"
+    assert entries[0]["context"] == {"skill": "greet"}
+
+
+def test_text_artifacts_are_never_scanned(tmp_path, manifest, monkeypatch):
+    """system_info/qr_code (metadata pura) no producen un archivo — no
+    hay nada que escanear, y no debería llamarse a scan_bytes."""
+    calls = []
+    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", lambda data, suffix="": calls.append(data))
+
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "tool.py").write_text("", encoding="utf-8")
+    fake = FakeSandboxExecutor(_ok_result(modality="text", metadata={"summary": "hola"}))
+    skill_tool = SandboxedSkillTool(
+        manifest=manifest, skill_dir=skill_dir, entry_point="tool:X",
+        image="img", sandbox=fake, artifacts_root=tmp_path / "artifacts",
+    )
+
+    skill_tool.execute()
+
+    assert calls == []
 
 
 # --- Pipeline completo con Docker real ---

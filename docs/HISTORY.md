@@ -2394,3 +2394,58 @@ proyecto persistente, contexto de editor consciente de símbolos (vía
 las APIs de símbolos de VS Code, no un parser propio), tracking de
 intención, envolver esto como Kernel Bus service (no hace falta —
 las skills no lo necesitan).
+
+## Escaneo de malware en artefactos de skills, fail-closed (2026-07-11)
+
+El usuario planteó, a futuro, un antivirus real que proteja "el
+equipo" (no solo kal) — reconocido explícitamente como un proyecto de
+otra escala (bases de firmas, motores heurísticos, años de esfuerzo
+de equipos dedicados como ClamAV/CrowdStrike), pospuesto para cuando
+exista una comunidad apreciable. Por ahora, alcance acotado: reforzar
+"que kal nunca introduzca ni ejecute algo malicioso en tu máquina".
+
+Investigando el código real (no una recomendación genérica) se
+encontró el hueco concreto:
+`tool_integration/sandboxed_skill.py::_to_artifact()` copiaba
+VERBATIM (sin re-codificar) los bytes que una skill devuelve —
+código de la confianza MÁS BAJA del sistema, potencialmente de un
+tercero del market — al filesystem real del host, sin ningún
+escaneo, listos para que el usuario los abra después. `ImageService`/
+`AudioService` (SDXL-Turbo/Whisper/Piper) quedan fuera a propósito:
+son contenido de primera parte, los bytes los controla la propia
+librería de encoding, no una skill de un tercero.
+
+**Decisión confirmada con el usuario, vía `AskUserQuestion`**:
+fail-closed — si no se puede escanear (ClamAV no instalado), el
+artefacto se bloquea, no se entrega (mismo criterio que la firma no
+verificada en Fase A del market). Consecuencia real explicada de
+antemano: como ClamAV no estaba instalado en esta máquina, el cambio
+habría bloqueado toda skill con salida de archivo hasta instalarlo —
+el usuario lo instaló (`clamav`+`clamav-daemon` vía apt +
+`freshclam` para la base de firmas) como parte de este trabajo.
+
+**Implementado**: `tool_integration/malware_scan.py` (nuevo) —
+`is_clamav_available()`, `scan_bytes(data, suffix)` vía subprocess a
+`clamscan` (no reimplementa detección; usa un motor real y
+mantenido). Empieza con `clamscan` simple (recarga la base de firmas
+en cada invocación) en vez de `clamd` (demonio persistente, más
+rápido) — lo más simple que funciona primero, mismo criterio de todo
+el proyecto; `clamd` queda como optimización futura si la latencia
+por escaneo resulta un problema real de uso.
+`sandboxed_skill.py::_to_artifact()` escanea los bytes de la skill
+ANTES de escribirlos al host — si se detecta algo (o ClamAV no está
+disponible), el artefacto nunca se escribe, se devuelve un error y se
+audita (`EventType` nuevo: `"artifact_scan_blocked"`).
+
+**Verificado con detección real, no solo mockeada**: los tests de
+`scan_bytes()` corrieron contra el ClamAV real recién instalado,
+incluida la cadena de prueba estándar **EICAR** (inocua, pero que
+todo antivirus real reconoce como "virus de prueba") — ClamAV la
+detectó correctamente de punta a punta. 8 tests nuevos en
+`test_malware_scan.py` (4) y `test_sandboxed_skill.py` (4: bloqueo
+por detección, bloqueo por ClamAV ausente simulado, auditoría del
+bloqueo, confirmación de que un artefacto de texto puro nunca dispara
+un escaneo). El resto de `test_sandboxed_skill.py` ganó un fixture
+`autouse` que simula "limpio" por defecto (no depende de tener
+ClamAV real instalado para probar la lógica de `SandboxedSkillTool`
+en sí, que es un concern distinto del escaneo).

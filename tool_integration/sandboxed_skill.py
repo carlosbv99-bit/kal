@@ -40,11 +40,13 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from audit.audit_log import AuditEvent, audit_log
 from kernel_bus.bus import KernelServiceBus, kernel_bus as default_kernel_bus
 from kernel_bus.socket_server import KernelBusSocketServer
 from sandbox.docker_runner import SandboxResult
 from sandbox.executor import SandboxExecutor
 from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from tool_integration.malware_scan import MalwareScanError, scan_bytes
 from tool_integration.permissions import Permission
 from utils.logger import get_logger
 
@@ -218,9 +220,25 @@ class SandboxedSkillTool(Tool):
         # tiene sentido DENTRO del contenedor ya destruido; acá se
         # persiste el contenido real (ya viajó en output_files) a un
         # artefacto propio de esta skill, con una ruta de host real.
+        #
+        # Antes de escribir ESTOS bytes al filesystem real: son la
+        # única fuente de datos arbitrarios de la confianza MÁS BAJA
+        # (una skill de un tercero) que llegan sin re-codificar al
+        # disco real, listos para que el usuario los abra después con
+        # cualquier aplicación — se escanean con ClamAV
+        # (tool_integration/malware_scan.py) primero. Fail-closed: si
+        # no se puede escanear (ClamAV no instalado) o se detecta algo,
+        # el artefacto nunca se escribe.
         if modality != "text" and uri and uri in output_files:
+            data = output_files[uri]
+            try:
+                scan_bytes(data, suffix=Path(uri).suffix)
+            except MalwareScanError as e:
+                detail = f"Artefacto de la skill '{self.manifest.name}' bloqueado: {e}"
+                self._audit_scan_blocked(detail)
+                return self._error(detail)
             final_path = self.artifact_dir / f"{uuid.uuid4()}{Path(uri).suffix}"
-            final_path.write_bytes(output_files[uri])
+            final_path.write_bytes(data)
             uri = str(final_path)
         elif uri.startswith("artifact://"):
             # La skill devolvió tal cual la referencia opaca que recibió
@@ -239,3 +257,13 @@ class SandboxedSkillTool(Tool):
     def _error(message: str) -> Artifact:
         logger.warning(message)
         return Artifact(modality="text", uri="", metadata={"status": "error", "stderr": message})
+
+    def _audit_scan_blocked(self, detail: str) -> None:
+        audit_log.record(
+            AuditEvent(
+                event_type="artifact_scan_blocked",
+                summary=detail,
+                context={"skill": self.manifest.name},
+                outcome="failure",
+            )
+        )
