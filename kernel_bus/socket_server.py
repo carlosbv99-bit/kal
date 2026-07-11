@@ -1,0 +1,176 @@
+"""
+Expone un KernelServiceBus a UNA skill aislada, para UNA ejecución, vía
+un socket Unix — nunca vía red (el contenedor de la skill sigue con
+network_mode="none"). tool_integration/sandboxed_skill.py arranca uno
+de estos por cada `.execute()` de una skill que declare
+`kernel_services` en su skill.yaml, y lo para al terminar (éxito o
+error) — nunca sobrevive más allá de esa única ejecución.
+
+Permisos: `allowed_methods` es la lista plana que la propia skill
+declaró (`kernel_services` en skill.yaml) — un chequeo de membresía
+simple, NO pasa por PermissionCascade (esa cascada es para recursos
+del sistema tipo filesystem/red; esto es más parecido a "qué
+herramientas tiene disponibles un agente", ya un registro explícito
+por diseño). Cualquier pedido a un método no declarado se rechaza
+ANTES de tocar el bus real, auditado.
+
+Límites: `max_requests` y `idle_timeout` acotan cuánto puede insistir
+o cuánto puede tardar una skill — sin esto, una skill en loop podría
+acaparar un servicio compartido (p.ej. el pipeline de generación de
+imágenes) para todas las demás.
+"""
+from __future__ import annotations
+
+import socket
+import threading
+from pathlib import Path
+
+from audit.audit_log import AuditEvent, audit_log
+from kernel_bus.bus import ActionNotFoundError, KernelServiceBus, ServiceNotFoundError
+from kernel_bus.protocol import (
+    INTERNAL_ERROR,
+    INVALID_PARAMS,
+    METHOD_NOT_FOUND,
+    PERMISSION_DENIED,
+    ProtocolError,
+    error_response,
+    parse_request,
+    success_response,
+)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class KernelBusSocketServer:
+    def __init__(
+        self,
+        bus: KernelServiceBus,
+        allowed_methods: list[str],
+        socket_path: Path,
+        skill_name: str,
+        max_requests: int = 20,
+        idle_timeout: float = 30.0,
+    ):
+        self.bus = bus
+        self.allowed_methods = frozenset(allowed_methods)
+        self.socket_path = socket_path
+        self.skill_name = skill_name
+        self.max_requests = max_requests
+        self.idle_timeout = idle_timeout
+        self._server_socket: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        self._server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._server_socket.bind(str(self.socket_path))
+        self._server_socket.listen(1)
+        self._server_socket.settimeout(self.idle_timeout)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._server_socket is not None:
+            try:
+                self._server_socket.close()
+            except OSError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _serve(self) -> None:
+        requests_handled = 0
+        try:
+            while requests_handled < self.max_requests and not self._stop_event.is_set():
+                try:
+                    conn, _ = self._server_socket.accept()
+                except (socket.timeout, OSError):
+                    return
+
+                with conn:
+                    conn.settimeout(self.idle_timeout)
+                    try:
+                        line = self._read_line(conn)
+                    except (socket.timeout, OSError):
+                        continue
+                    if line is None:
+                        continue
+
+                    response = self._handle_line(line)
+                    try:
+                        conn.sendall((response + "\n").encode("utf-8"))
+                    except OSError:
+                        pass
+                    requests_handled += 1
+        finally:
+            # Sin esto, alcanzar max_requests deja el socket ESCUCHANDO
+            # sin nadie del otro lado leyéndolo — una conexión nueva
+            # quedaría colgada en vez de fallar con un error claro
+            # (ECONNREFUSED), ya que el archivo del socket seguiría
+            # existiendo en el filesystem aunque nadie lo atienda.
+            try:
+                self._server_socket.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _read_line(conn: socket.socket) -> str | None:
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return None
+            buf += chunk
+        line, _, _ = buf.partition(b"\n")
+        return line.decode("utf-8")
+
+    def _handle_line(self, line: str) -> str:
+        try:
+            request = parse_request(line)
+        except ProtocolError as e:
+            return error_response(None, INVALID_PARAMS, str(e))
+
+        if request.method not in self.allowed_methods:
+            self._audit_denied(request.method)
+            return error_response(
+                request.id, PERMISSION_DENIED,
+                f"'{request.method}' no está declarado en kernel_services de esta skill",
+            )
+
+        try:
+            result = self.bus.dispatch(request.method, request.params)
+        except (ServiceNotFoundError, ActionNotFoundError) as e:
+            self._audit_call(request.method, "failure", str(e))
+            return error_response(request.id, METHOD_NOT_FOUND, str(e))
+        except Exception as e:
+            logger.warning(f"Servicio '{request.method}' falló para la skill '{self.skill_name}': {e}")
+            self._audit_call(request.method, "failure", str(e))
+            return error_response(request.id, INTERNAL_ERROR, str(e))
+
+        self._audit_call(request.method, "success", "")
+        return success_response(request.id, result)
+
+    def _audit_call(self, method: str, outcome: str, detail: str) -> None:
+        summary = f"Skill '{self.skill_name}' llamó a '{method}'"
+        if detail:
+            summary += f": {detail}"
+        audit_log.record(
+            AuditEvent(
+                event_type="kernel_service_call",
+                summary=summary,
+                context={"skill": self.skill_name, "method": method},
+                outcome=outcome,
+            )
+        )
+
+    def _audit_denied(self, method: str) -> None:
+        audit_log.record(
+            AuditEvent(
+                event_type="kernel_service_denied",
+                summary=f"Skill '{self.skill_name}' intentó llamar a '{method}' sin declararlo en kernel_services",
+                context={"skill": self.skill_name, "method": method},
+                outcome="failure",
+            )
+        )

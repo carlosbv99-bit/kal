@@ -1,0 +1,324 @@
+"""
+Servicios reales expuestos en el Kernel Service Bus (ver
+kernel_bus/__init__.py). Cada servicio es un objeto de Python normal,
+vive en el proceso principal — nunca se serializa ni se envía a un
+contenedor; lo único que cruza la frontera es el resultado (un dict
+JSON-serializable), vía kernel_bus/socket_server.py.
+
+ImageService es, en la práctica, el "Model Manager" que motivó todo
+este bus: antes, cada llamador (image_gen.py) tenía su PROPIA
+instancia de pipeline cacheada — ahora hay una sola, compartida tanto
+por el adaptador de primera parte (llamada Python directa, mismo
+proceso) como por cualquier skill que declare `kernel_services:
+["image.generate"]` (vía el socket).
+
+AudioService/STTService (mismo patrón, agregados 2026-07-11 al
+terminar de desacoplar audio_gen.py/speech_to_text.py) e
+ImageService.inpaint() (misma clase que .generate(), agregado al
+terminar de desacoplar image_editing.py) siguen el mismo criterio: la
+carga perezosa del modelo, movida tal cual desde el adaptador
+correspondiente, ahora compartida entre la llamada Python directa y
+cualquier skill que declare el `kernel_services` correspondiente.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from utils.config import settings
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_VOICES_DIR = Path("data/models/piper")
+
+
+class KernelServiceError(Exception):
+    """Un servicio no pudo completar la acción pedida — nunca deja
+    escapar la excepción original (que podría filtrar detalles internos
+    del host) hacia el llamador, sea Python directo o vía el bus."""
+
+
+class ImageService:
+    """
+    Genera imágenes localmente (SDXL-Turbo, CPU) — misma lógica que
+    tenía tool_integration/adapters/image_gen.py::_generate_locally,
+    ahora compartida. El pipeline se carga una sola vez (primera
+    llamada, de cualquier origen) y se mantiene en memoria.
+
+    También expone `inpaint()` — misma lógica que tenía
+    tool_integration/adapters/image_editing.py::_inpaint, con su PROPIA
+    config (`editing_cfg`, distinta de `cfg`: son dos secciones
+    separadas de settings.multimodal, `image` e `image_editing`) y su
+    propio pipeline lazy (diffusers de inpainting, un modelo COMPLETO,
+    distinto del de generación). Comparten esta clase por ser el mismo
+    dominio ("image"), no la misma config ni el mismo pipeline.
+    """
+
+    def __init__(self, cfg=None, editing_cfg=None):
+        # cfg/editing_cfg inyectables: mismo motivo que en el resto del
+        # proyecto — un test que monkeypatchea settings.multimodal.image
+        # o settings.multimodal.image_editing ANTES de instanciar el
+        # Tool correspondiente sigue funcionando exactamente igual. La
+        # instancia compartida real de producción (usada por el Kernel
+        # Service Bus) es una instancia aparte, registrada una sola vez
+        # al arrancar — ver
+        # tool_integration/registry.py::_register_default_static_tools().
+        self.cfg = cfg or settings.multimodal.image
+        self.editing_cfg = editing_cfg or settings.multimodal.image_editing
+        self._pipeline = None
+        self._inpaint_pipeline = None
+        Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.editing_cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
+
+    def _get_pipeline(self):
+        if self._pipeline is None:
+            import torch
+            from diffusers import AutoPipelineForText2Image
+
+            logger.info(f"Cargando modelo de generación de imágenes: {self.cfg.model} (puede tardar la primera vez)")
+            self._pipeline = AutoPipelineForText2Image.from_pretrained(
+                self.cfg.model,
+                torch_dtype=torch.float32,  # float16 no es fiable en CPU
+            )
+            self._pipeline.to("cpu")
+        return self._pipeline
+
+    def generate(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        if not prompt:
+            raise KernelServiceError("'prompt' es requerido")
+
+        pipeline = self._get_pipeline()
+
+        logger.info(f"Generando imagen ({self.cfg.num_inference_steps} pasos): {prompt!r}")
+        result = pipeline(
+            prompt=prompt,
+            num_inference_steps=kwargs.get("num_inference_steps", self.cfg.num_inference_steps),
+            guidance_scale=kwargs.get("guidance_scale", self.cfg.guidance_scale),
+            height=kwargs.get("height", self.cfg.height),
+            width=kwargs.get("width", self.cfg.width),
+        )
+        image = result.images[0]
+
+        artifact_id = str(uuid4())
+        path = Path(self.cfg.artifact_dir) / f"{artifact_id}.png"
+        image.save(path)
+
+        return {
+            "artifact": f"artifact://image/{artifact_id}",
+            "path": str(path),
+            "metadata": {
+                "prompt": prompt,
+                "model": self.cfg.model,
+                "num_inference_steps": self.cfg.num_inference_steps,
+            },
+        }
+
+    def _get_inpaint_pipeline(self):
+        if self._inpaint_pipeline is None:
+            import torch
+            from diffusers import AutoPipelineForInpainting
+
+            logger.info(
+                f"Cargando modelo de inpainting: {self.editing_cfg.inpaint_model} "
+                "(puede tardar la primera vez, ~5.5GB de descarga)"
+            )
+            self._inpaint_pipeline = AutoPipelineForInpainting.from_pretrained(
+                self.editing_cfg.inpaint_model,
+                torch_dtype=torch.float32,  # float16 no es fiable en CPU
+                safety_checker=None,
+                requires_safety_checker=False,
+            )
+            self._inpaint_pipeline.to("cpu")
+        return self._inpaint_pipeline
+
+    def inpaint(self, image_path: str, box: list[int], prompt: str, **kwargs: Any) -> dict[str, Any]:
+        if not box or len(box) != 4:
+            raise KernelServiceError("'box' es requerido, con exactamente 4 valores [izquierda, arriba, derecha, abajo]")
+        if not prompt:
+            raise KernelServiceError("'prompt' es requerido, describiendo qué debe aparecer en 'box'")
+
+        from PIL import Image, ImageDraw
+
+        pipeline = self._get_inpaint_pipeline()
+
+        with Image.open(image_path) as source:
+            img = source.convert("RGB")
+
+        mask = Image.new("L", img.size, 0)  # negro = mantener, blanco = regenerar
+        ImageDraw.Draw(mask).rectangle(tuple(box), fill=255)
+
+        logger.info(f"Inpainting ({self.editing_cfg.inpaint_num_inference_steps} pasos): {prompt!r}")
+        result = pipeline(
+            prompt=prompt,
+            image=img,
+            mask_image=mask,
+            height=img.height,
+            width=img.width,
+            num_inference_steps=self.editing_cfg.inpaint_num_inference_steps,
+            guidance_scale=self.editing_cfg.inpaint_guidance_scale,
+        )
+        edited = result.images[0]
+
+        artifact_id = str(uuid4())
+        path = Path(self.editing_cfg.artifact_dir) / f"{artifact_id}.png"
+        edited.save(path)
+
+        return {
+            "artifact": f"artifact://image/{artifact_id}",
+            "path": str(path),
+            "metadata": {
+                "operation": "inpaint",
+                "source_path": image_path,
+                "prompt": prompt,
+                "box": box,
+                "model": self.editing_cfg.inpaint_model,
+            },
+        }
+
+
+class AudioService:
+    """
+    Sintetiza voz localmente (piper-tts, CPU) — misma lógica que tenía
+    tool_integration/adapters/audio_gen.py::_generate_locally (incluidos
+    los 3 bugs reales ya corregidos ahí: parámetros del WAV explícitos,
+    voice.synthesize() como generador de chunks, formato de AudioChunk
+    no confirmado de antemano). Solo el backend "local" — "api" (OpenAI
+    TTS) se queda en el adaptador, nunca pasa por el kernel (mismo
+    criterio que ImageGenerationTool._generate_via_api).
+    """
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg or settings.multimodal.audio
+        self._voice = None
+        Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
+        _VOICES_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_voice_files(self) -> tuple[Path, Path]:
+        model_path = _VOICES_DIR / f"{self.cfg.voice_model}.onnx"
+        config_path = _VOICES_DIR / f"{self.cfg.voice_model}.onnx.json"
+
+        if model_path.exists() and config_path.exists():
+            return model_path, config_path
+
+        logger.info(f"Descargando modelo de voz de piper: {self.cfg.voice_model} (primera vez, requiere red)")
+        from huggingface_hub import hf_hub_download
+
+        # Convención de subcarpetas de rhasspy/piper-voices:
+        # <idioma>/<idioma_país>/<voz>/<calidad>/.
+        parts = self.cfg.voice_model.split("-")
+        if len(parts) != 3:
+            raise KernelServiceError(
+                f"voice_model '{self.cfg.voice_model}' no tiene el formato esperado "
+                "'<idioma_país>-<voz>-<calidad>' (p.ej. 'es_ES-davefx-medium')"
+            )
+        lang_full, voice_name, quality = parts
+        lang_short = lang_full.split("_")[0]
+        subfolder = f"{lang_short}/{lang_full}/{voice_name}/{quality}"
+
+        downloaded_model = hf_hub_download(
+            repo_id="rhasspy/piper-voices", filename=f"{self.cfg.voice_model}.onnx", subfolder=subfolder
+        )
+        downloaded_config = hf_hub_download(
+            repo_id="rhasspy/piper-voices", filename=f"{self.cfg.voice_model}.onnx.json", subfolder=subfolder
+        )
+        return Path(downloaded_model), Path(downloaded_config)
+
+    def _get_voice(self):
+        if self._voice is None:
+            from piper.voice import PiperVoice
+
+            model_path, config_path = self._ensure_voice_files()
+            logger.info(f"Cargando voz de piper: {model_path.name}")
+            self._voice = PiperVoice.load(str(model_path), config_path=str(config_path), use_cuda=False)
+        return self._voice
+
+    def synthesize(self, text: str, **kwargs: Any) -> dict[str, Any]:
+        if not text:
+            raise KernelServiceError("'text' es requerido")
+
+        import wave
+
+        voice = self._get_voice()
+
+        artifact_id = str(uuid4())
+        path = Path(self.cfg.artifact_dir) / f"{artifact_id}.wav"
+
+        sample_rate = getattr(getattr(voice, "config", None), "sample_rate", 22050)
+
+        logger.info(f"Sintetizando audio ({len(text)} caracteres) con voz {self.cfg.voice_model}")
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)  # PCM de 16 bits
+            wav_file.setframerate(sample_rate)
+            for chunk in voice.synthesize(text):
+                wav_file.writeframes(self._audio_chunk_to_pcm_bytes(chunk))
+
+        return {
+            "artifact": f"artifact://audio/{artifact_id}",
+            "path": str(path),
+            "metadata": {"text": text, "voice_model": self.cfg.voice_model},
+        }
+
+    @staticmethod
+    def _audio_chunk_to_pcm_bytes(chunk) -> bytes:
+        import numpy as np
+
+        if hasattr(chunk, "audio_int16_bytes"):
+            return chunk.audio_int16_bytes
+
+        if hasattr(chunk, "audio_int16_array"):
+            return chunk.audio_int16_array.astype(np.int16).tobytes()
+
+        if hasattr(chunk, "audio_float_array"):
+            return (chunk.audio_float_array * 32767).astype(np.int16).tobytes()
+
+        if isinstance(chunk, np.ndarray):
+            if np.issubdtype(chunk.dtype, np.floating):
+                return (chunk * 32767).astype(np.int16).tobytes()
+            return chunk.astype(np.int16).tobytes()
+
+        available = [a for a in dir(chunk) if not a.startswith("_")]
+        raise KernelServiceError(
+            f"No se reconoce el formato de AudioChunk de piper-tts (tipo {type(chunk).__name__}). "
+            f"Atributos/métodos disponibles: {available}."
+        )
+
+
+class STTService:
+    """
+    Transcribe audio localmente (faster-whisper, CPU) — misma lógica
+    que tenía tool_integration/adapters/speech_to_text.py::execute.
+    Sin backend "api" (el adaptador tampoco lo tenía).
+    """
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg or settings.multimodal.stt
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None:
+            from faster_whisper import WhisperModel
+
+            logger.info(f"Cargando modelo de Whisper: {self.cfg.model_size} (puede tardar la primera vez)")
+            self._model = WhisperModel(self.cfg.model_size, device="cpu", compute_type="int8")
+        return self._model
+
+    def transcribe(self, audio_path: str, **kwargs: Any) -> dict[str, Any]:
+        if not Path(audio_path).exists():
+            raise KernelServiceError(f"No existe el archivo de audio: {audio_path}")
+
+        model = self._get_model()
+        logger.info(f"Transcribiendo audio: {audio_path}")
+        segments, info = model.transcribe(audio_path, language=self.cfg.language)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+
+        return {
+            "metadata": {
+                "summary": text,
+                "audio_path": audio_path,
+                "detected_language": info.language,
+                "model_size": self.cfg.model_size,
+            },
+        }

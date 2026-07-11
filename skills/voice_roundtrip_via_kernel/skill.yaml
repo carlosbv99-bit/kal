@@ -1,0 +1,25 @@
+name: voice_roundtrip_via_kernel
+description: "Convierte un texto a voz y lo vuelve a transcribir a texto, encadenando dos servicios del Kernel Service Bus en una sola ejecución (demuestra pasar un artefacto entre llamadas del kernel sin ver nunca una ruta real de host)."
+version: "0.1.0"
+entry_point: "tool:VoiceRoundtripViaKernelTool"
+# Skill de REFERENCIA: a diferencia de image_via_kernel/audio_via_kernel
+# (que solo PRODUCEN un artefacto), esta CONSUME uno como entrada de una
+# segunda llamada — ejercita la resolución de artefactos de entrada de
+# kernel_bus/bus.py::KernelServiceBus._resolve_input_artifacts(). El
+# "artifact://audio/<uuid>" que devuelve audio.synthesize se pasa tal
+# cual como audio_path de stt.transcribe; el kernel lo resuelve a la
+# ruta real de host, la skill nunca la ve.
+enabled: true
+permissions: []
+requirements: []
+kernel_services:
+  - "audio.synthesize"
+  - "stt.transcribe"
+parameters_schema:
+  type: object
+  properties:
+    text:
+      type: string
+      description: "Texto a sintetizar y luego transcribir de vuelta"
+  required:
+    - text

@@ -1,0 +1,22 @@
+name: audio_via_kernel
+description: "Genera un audio (texto a voz) a partir de un texto, pidiéndoselo al Kernel Service Bus (no carga ningún modelo propio)."
+version: "0.1.0"
+entry_point: "tool:AudioViaKernelTool"
+# Skill de REFERENCIA para el Kernel Service Bus (ver kernel_bus/__init__.py
+# y tool_integration/kernel_client.py) — espejo directo de
+# skills/image_via_kernel/, aplicado a audio.synthesize. requirements
+# vacío a propósito: no necesita NADA más que stdlib, todo el trabajo
+# pesado (piper-tts) ocurre del lado del kernel.
+enabled: true
+permissions: []
+requirements: []
+kernel_services:
+  - "audio.synthesize"
+parameters_schema:
+  type: object
+  properties:
+    text:
+      type: string
+      description: "Texto a convertir en audio"
+  required:
+    - text

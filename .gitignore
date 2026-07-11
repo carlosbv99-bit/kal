@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.env
+data/
+logs/
+*.db
+.pytest_cache/
+.venv/
+venv/
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+
+# Backups/exports locales, nunca versionados (139MB+, no pertenecen al repo)
+/kal1.zip
+/dist/
+
+# Estado de runtime de Claude Code (local a esta máquina/sesión)
+.claude/

@@ -1,0 +1,59 @@
+# --- Core ---
+pydantic>=2.6
+pydantic-settings>=2.2
+PyYAML>=6.0
+python-dotenv>=1.0
+requests>=2.31          # usado directamente por agent_core/llm/ollama_client.py
+
+# --- Web / API ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9  # requisito de FastAPI para UploadFile/Form (POST /uploads)
+
+# --- Memoria ---
+# Mediano plazo
+sqlalchemy>=2.0
+# Largo plazo
+chromadb>=0.4
+sentence-transformers>=3.0    # embeddings locales, sin API externa
+# qdrant-client>=1.8  # alternativa para producción
+
+# --- Sandbox ---
+docker>=7.0
+
+# --- Firmas digitales de herramientas dinámicas ---
+cryptography>=42.0
+
+# --- Multimodal (100% local, sin GPU, sin API keys) ---
+diffusers>=0.27          # generación de imágenes (sd-turbo)
+accelerate>=0.30         # carga eficiente de modelos de diffusers
+piper-tts>=1.2           # texto a voz local vía ONNX, eficiente en CPU
+huggingface_hub>=0.23    # descarga de modelos (embeddings, sd-turbo, voces de piper)
+moviepy>=1.0.3           # composición de video (ver NOTA en video_gen.py sobre v1 vs v2)
+# NOTA: video_gen.py también requiere el binario `ffmpeg` del sistema,
+# no instalable vía pip: `sudo apt install ffmpeg`
+
+# --- Navegador (browser agent) ---
+playwright>=1.40
+# NOTA: además del paquete pip, hace falta instalar el binario de Chromium
+# una vez: `playwright install chromium` (mismo patrón que ffmpeg en
+# video_gen.py — no es instalable solo con pip).
+
+# --- Speech-to-Text (100% local, sin API keys) ---
+faster-whisper>=1.0     # Whisper vía CTranslate2, más liviano/rápido en CPU que openai-whisper
+
+# --- Edición de imágenes (100% local, sin API keys) ---
+rembg>=2.0               # eliminar fondo (modelo u2net, se descarga la 1a vez)
+# NOTA: se evaluó `realesrgan` para upscale con IA real — su dependencia
+# núcleo `basicsr` no instala en este entorno (incompatible con
+# torchvision recientes). Por eso el upscale de image_editing.py usa un
+# resize Lanczos (Pillow), no super-resolución con IA — ver docstring
+# de ese adaptador.
+
+# --- Utilidades ---
+tenacity>=8.2          # reintentos con backoff
+structlog>=24.1         # logging estructurado
+
+# --- Testing ---
+pytest>=8.0
+pytest-asyncio>=0.23

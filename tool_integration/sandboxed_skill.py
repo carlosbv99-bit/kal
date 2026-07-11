@@ -1,0 +1,241 @@
+"""
+Tool que ejecuta una skill de terceros (skills/<nombre>/) de verdad
+aislada — cada llamada a execute() corre DENTRO de un contenedor Docker
+efímero (sandbox/skill_runner.py), nunca en el proceso principal.
+
+Antes de esto, tool_integration/skills.py::load_skills() instanciaba la
+clase real de la skill y la registraba tal cual — cualquier .execute()
+posterior corría en el mismo proceso que el resto de kal, sin ningún
+confinamiento (la única barrera era el enabled:false por defecto del
+manifiesto, revisado por un humano antes de activarla). Este Tool
+reemplaza esa instancia real: el registry nunca vuelve a tocar el
+código de la skill directamente.
+
+Reutiliza el mismo mapeo permiso->network_mode que
+tool_integration/registry.py::DynamicSandboxedTool, y el mismo
+SandboxExecutor (sandbox/executor.py) — pero vía execute_trusted(), no
+execute(), porque el runner (sandbox/skill_runner.py) es código de
+primera parte que necesita os/importlib, y el denylist de
+code_analysis/ está pensado para código de un tercero no confiable, no
+para nuestra propia infraestructura de ejecución.
+
+BUG REAL ENCONTRADO PROBANDO ESTO CON DOCKER DE VERDAD: toda skill
+(como skills/system_info/tool.py) hace
+`from tool_integration.base_tool import Artifact, Tool, ToolManifest`
+— pero el contenedor solo tenía montado el código de la skill, nunca
+el paquete `tool_integration` del propio kal. El import fallaba con
+`ModuleNotFoundError` en CUALQUIER skill real, no solo en casos raros.
+Fix: se copian `base_tool.py`/`permissions.py` (ambos sin dependencias
+riesgosas — solo `dataclasses`/`abc`/`enum` de stdlib) como parte fija
+de `workspace_files` en cada ejecución, bajo `/workspace/tool_integration/`.
+`kernel_client.py` viaja de la misma forma, para las skills que
+declaran `kernel_services` (ver Kernel Service Bus,
+kernel_bus/__init__.py).
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+
+from kernel_bus.bus import KernelServiceBus, kernel_bus as default_kernel_bus
+from kernel_bus.socket_server import KernelBusSocketServer
+from sandbox.docker_runner import SandboxResult
+from sandbox.executor import SandboxExecutor
+from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from tool_integration.permissions import Permission
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_RUNNER_PATH = Path(__file__).resolve().parent.parent / "sandbox" / "skill_runner.py"
+_TOOL_INTEGRATION_DIR = Path(__file__).resolve().parent
+
+_DEFAULT_ARTIFACTS_ROOT = Path("data") / "artifacts" / "skills"
+
+# Nombre reservado: ver sandbox/skill_runner.py — va DENTRO de output/
+# para viajar de vuelta por el mismo mecanismo que un archivo real de
+# la skill (SandboxResult.output_files), sin necesitar un canal aparte.
+_RESULT_FILENAME = "_output.json"
+
+# Debe coincidir con tool_integration/kernel_client.py::SOCKET_PATH
+# (la mitad "container_path" del extra_mount de abajo).
+_KERNEL_SOCKET_CONTAINER_DIR = "/workspace/.kal"
+
+# BUG REAL ENCONTRADO EN USO: el timeout por defecto del sandbox
+# (config.yaml: sandbox.timeout_seconds, 30s) alcanza de sobra para
+# run_code, pero una skill que llama a un servicio del kernel (p.ej.
+# "image.generate") puede tardar bastante más — el contenedor se mataba
+# por timeout mientras esperaba la respuesta del socket, aunque el
+# servicio nunca falló. Se sube el límite SOLO para ejecuciones que
+# declaran kernel_services, nunca para el resto de las skills.
+# Subido de 300 a 600 al agregar image.inpaint (modelo de difusión
+# COMPLETO, no distilado — "del orden de minutos" él solo, ver
+# tool_integration/adapters/image_editing.py) y las skills compuestas
+# que encadenan dos llamadas de modelo en una misma ejecución
+# (voice_roundtrip_via_kernel, image_inpaint_via_kernel).
+_KERNEL_SERVICE_TIMEOUT_SECONDS = 600
+
+
+def _kal_runtime_files() -> dict[str, str]:
+    """
+    `tool_integration.base_tool`/`permissions`/`kernel_client` tal como
+    existen en ESTE repo (no una copia editable por la skill) — toda
+    skill subclasea `Tool`/usa `Artifact`/`ToolManifest` de acá, así que
+    el contenedor necesita este paquete disponible para poder ni
+    siquiera importar el módulo de la skill. Los tres archivos son de
+    confianza (sin red, sin filesystem — `kernel_client.py` solo sabe
+    hablar por el socket ya montado, nunca importa nada de
+    `kernel_bus`) — no es código de la skill, es infraestructura fija
+    de kal.
+    """
+    return {
+        "tool_integration/__init__.py": "",
+        "tool_integration/base_tool.py": (_TOOL_INTEGRATION_DIR / "base_tool.py").read_text(encoding="utf-8"),
+        "tool_integration/permissions.py": (_TOOL_INTEGRATION_DIR / "permissions.py").read_text(encoding="utf-8"),
+        "tool_integration/kernel_client.py": (_TOOL_INTEGRATION_DIR / "kernel_client.py").read_text(encoding="utf-8"),
+    }
+
+
+class SandboxedSkillTool(Tool):
+    def __init__(
+        self,
+        manifest: ToolManifest,
+        skill_dir: Path,
+        entry_point: str,
+        image: str,
+        sandbox: SandboxExecutor | None = None,
+        artifacts_root: Path | None = None,
+        kernel_services: list[str] | None = None,
+        kernel_bus_instance: KernelServiceBus | None = None,
+    ):
+        self.manifest = manifest
+        self.skill_dir = Path(skill_dir)
+        self.entry_point = entry_point
+        self.image = image
+        self.sandbox = sandbox or SandboxExecutor()
+        self.artifact_dir = (artifacts_root or _DEFAULT_ARTIFACTS_ROOT) / manifest.name
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        # Métodos del Kernel Service Bus que esta skill puede llamar
+        # (p.ej. ["image.generate"]) — ver kernel_bus/__init__.py.
+        # kernel_bus_instance inyectable para tests (evita depender del
+        # bus real/ImageService real, que carga un modelo pesado).
+        self.kernel_services = kernel_services or []
+        self.kernel_bus = kernel_bus_instance or default_kernel_bus
+
+    def execute(self, **kwargs) -> Artifact:
+        workspace_files = _kal_runtime_files()
+        workspace_files.update(self._collect_skill_files())
+        workspace_files["_input.json"] = json.dumps({"entry_point": self.entry_point, "kwargs": kwargs})
+
+        network_mode = "bridge" if Permission.NETWORK in self.manifest.permissions else None
+
+        socket_server: KernelBusSocketServer | None = None
+        socket_tempdir: str | None = None
+        extra_mounts: dict[str, str] | None = None
+        if self.kernel_services:
+            socket_tempdir = tempfile.mkdtemp(prefix="kal-kernel-bus-")
+            socket_server = KernelBusSocketServer(
+                bus=self.kernel_bus,
+                allowed_methods=self.kernel_services,
+                socket_path=Path(socket_tempdir) / "kernel.sock",
+                skill_name=self.manifest.name,
+            )
+            socket_server.start()
+            extra_mounts = {socket_tempdir: _KERNEL_SOCKET_CONTAINER_DIR}
+
+        try:
+            result = self.sandbox.execute_trusted(
+                _RUNNER_PATH.read_text(encoding="utf-8"),
+                workspace_files=workspace_files,
+                network_mode=network_mode,
+                image=self.image,
+                output_dir="output",
+                context={"skill": self.manifest.name},
+                granted_permissions=self.manifest.permissions,
+                extra_mounts=extra_mounts,
+                timeout_seconds=_KERNEL_SERVICE_TIMEOUT_SECONDS if self.kernel_services else None,
+            )
+        finally:
+            # Pase lo que pase adentro del contenedor, el socket nunca
+            # debe sobrevivir más allá de ESTA ejecución.
+            if socket_server is not None:
+                socket_server.stop()
+            if socket_tempdir is not None:
+                shutil.rmtree(socket_tempdir, ignore_errors=True)
+
+        return self._to_artifact(result)
+
+    def _collect_skill_files(self) -> dict[str, str | bytes]:
+        """
+        Copia todo el contenido de la carpeta de la skill (código +
+        posibles archivos de datos que traiga empaquetados), excepto el
+        manifiesto y artefactos de bytecode — el manifiesto no le sirve
+        de nada al runner (ya se leyó en load_skills()) y __pycache__
+        puede tener .pyc de una versión de Python distinta a la de la
+        imagen del contenedor.
+        """
+        files: dict[str, str | bytes] = {}
+        for path in self.skill_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.name == "skill.yaml" or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            rel = path.relative_to(self.skill_dir).as_posix()
+            try:
+                files[f"skill/{rel}"] = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                files[f"skill/{rel}"] = path.read_bytes()
+        return files
+
+    def _to_artifact(self, result: SandboxResult) -> Artifact:
+        if result.status != "success":
+            return self._error(
+                result.stderr or f"la skill '{self.manifest.name}' falló en el sandbox (status={result.status})"
+            )
+
+        output_files = dict(result.output_files)
+        raw_result = output_files.pop(_RESULT_FILENAME, None)
+        if raw_result is None:
+            return self._error(f"la skill '{self.manifest.name}' no devolvió resultado (falta {_RESULT_FILENAME})")
+
+        try:
+            payload = json.loads(raw_result.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            return self._error(f"resultado de la skill '{self.manifest.name}' no es JSON válido: {e}")
+
+        if not payload.get("ok"):
+            return self._error(payload.get("error") or f"error desconocido en la skill '{self.manifest.name}'")
+
+        modality = payload.get("modality", "text")
+        uri = payload.get("uri", "")
+        metadata = payload.get("metadata", {})
+
+        # La skill devolvió un nombre de archivo relativo a su propia
+        # carpeta de salida (KAL_SKILL_OUTPUT_DIR) — ese nombre solo
+        # tiene sentido DENTRO del contenedor ya destruido; acá se
+        # persiste el contenido real (ya viajó en output_files) a un
+        # artefacto propio de esta skill, con una ruta de host real.
+        if modality != "text" and uri and uri in output_files:
+            final_path = self.artifact_dir / f"{uuid.uuid4()}{Path(uri).suffix}"
+            final_path.write_bytes(output_files[uri])
+            uri = str(final_path)
+        elif uri.startswith("artifact://"):
+            # La skill devolvió tal cual la referencia opaca que recibió
+            # de un servicio del Kernel Service Bus (p.ej.
+            # "artifact://image/<uuid>" de ImageService.generate(), ver
+            # kernel_bus/bus.py) — el archivo real ya existe en el host
+            # (lo generó el servicio, no la skill), solo hace falta
+            # resolver la referencia a la ruta real.
+            resolved = self.kernel_bus.resolve_artifact(uri)
+            if resolved is not None:
+                uri = resolved
+
+        return Artifact(modality=modality, uri=uri, metadata=metadata)
+
+    @staticmethod
+    def _error(message: str) -> Artifact:
+        logger.warning(message)
+        return Artifact(modality="text", uri="", metadata={"status": "error", "stderr": message})

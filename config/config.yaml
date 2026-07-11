@@ -1,0 +1,253 @@
+schema_version: 1
+
+agent:
+  name: "kal"
+  max_concurrent_tasks: 4
+
+llm:
+  base_url: "http://localhost:11434"
+  # qwen3-coder:30b (MoE: 30B totales pero activa pocos por token, por eso
+  # no es más lento que un modelo denso más chico en CPU). Reemplazó a
+  # qwen2.5-coder:14b tras comparación empírica en vivo (misma pregunta,
+  # misma máquina):
+  #   - "explicame este código" (con código ya en el mensaje): 96s,
+  #     0 llamadas a herramientas, explicación correcta (antes: ~97-150s
+  #     con qwen2.5-coder:14b, y a veces 1 llamada de herramienta de más).
+  #   - código que sí necesita ejecutarse ("ejecutá esto: print(sum(range(1,11)))"):
+  #     7.4s, llamó a run_code correctamente, resultado correcto (55).
+  #   - "hola": 1s, 0 llamadas a herramientas, respuesta directa.
+  # Sigue las instrucciones del SYSTEM_PROMPT sobre cuándo NO usar
+  # herramientas notablemente mejor que qwen2.5-coder:14b, sin sacrificar
+  # el uso correcto de herramientas cuando sí hacen falta.
+  default_model: "qwen3-coder:30b"
+  timeout_seconds: 120
+  max_agent_steps: 8                    # tope de iteraciones del loop antes de forzar una respuesta final
+  # Descomponer el objetivo en subtareas antes de ejecutar (ver
+  # agent_core/llm/planner.py). BUG REAL ENCONTRADO EN USO: con el modelo
+  # anterior (qwen2.5-coder:14b), el planner tendía a sobre-descomponer
+  # preguntas simples/conversacionales en pasos artificiales que terminaban
+  # llamando herramientas irrelevantes (navegador, generación de audio,
+  # etc.) — comparado en vivo: la misma pregunta con planner no terminaba
+  # ni en 90s y navegaba a dominios al azar; sin planner, respondía bien en
+  # ~97s con como mucho una llamada de herramienta de más. Se mantiene en
+  # false incluso con el modelo nuevo (no reevaluado todavía) —
+  # overrideable por request (ChatRequest.use_planner).
+  planning_enabled: false
+  # BUG REAL ENCONTRADO EN USO: con generación de imagen/audio/video corriendo
+  # en la misma máquina, Ollama puede quedar momentáneamente sin responder
+  # (recargando el modelo en VRAM/RAM) y un solo ConnectionError transitorio en
+  # un paso intermedio rompía TODA la tarea, aunque Ollama estuviera bien un
+  # segundo antes y un segundo después (ver agent_core/llm/ollama_client.py).
+  connection_retries: 2          # reintentos ante ConnectionError (no ante timeout ni error HTTP)
+  retry_backoff_seconds: 2.0     # pausa entre reintentos
+  # BUG REAL ENCONTRADO EN USO: "genera una raqueta de tenis" generó la
+  # imagen correcta una vez y después 3 imágenes más de paisajes sin
+  # relación en el mismo turno, sin llegar nunca a una respuesta final
+  # (agotó max_agent_steps). El modelo no ve el resultado visual, así
+  # que no es un reintento por calidad — pierde el hilo. La instrucción
+  # de prompt sola no alcanzó (ya estaba activa cuando pasó esto). Tope
+  # estructural: más allá de esta cantidad de llamadas a la MISMA
+  # herramienta en un turno, se rechaza sin ejecutar (cada generación
+  # real cuesta minutos de cómputo acá, no es gratis dejarlo correr).
+  max_tool_repeats: 3
+
+memory:
+  short_term:
+    max_tokens: 8000
+    ttl_seconds: null          # vive solo mientras dura la tarea activa
+
+  mid_term:
+    backend: sqlite
+    ttl_days: 30
+    consolidation_interval_hours: 6   # cada cuánto se resume corto -> mediano
+
+  long_term:
+    backend: chroma
+    mode: embedded              # embedded (sin red, local) | http (vía docker-compose)
+    persist_path: "data/long_term/chroma_persist"
+    http_host: vector_store
+    http_port: 8000
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    promotion:
+      min_repetitions: 3        # nº de veces que un patrón debe repetirse
+      min_relevance_score: 0.75  # antes de promoverse a largo plazo
+
+error_handling:
+  max_repair_attempts: 3          # circuit breaker: tope antes de escalar a humano
+  strategies:
+    SyntaxError: auto_fix
+    RuntimeError: rollback_and_retry
+    ImportError: install_missing_module
+    ValidationError: reject_without_retry   # código rechazado por el denylist: determinista, nunca se reintenta
+
+multimodal:
+  image:
+    backend: local                       # local (diffusers, CPU) | api (OpenAI Images)
+    # SDXL-Turbo: destilado igual que sd-turbo (1-4 pasos, sin CFG), pero
+    # arquitectura SDXL — mejor calidad, nativo a 1024x1024. Mucho más
+    # pesado (~14GB de descarga fp32) y más lento por imagen en CPU que
+    # sd-turbo. Para volver al modelo liviano/rápido anterior: cambiar
+    # model a "stabilityai/sd-turbo" y height/width a 512.
+    model: "stabilityai/sdxl-turbo"
+    num_inference_steps: 2
+    guidance_scale: 0.0                   # sdxl-turbo tampoco usa CFG, debe ir en 0
+    height: 1024
+    width: 1024
+    artifact_dir: "data/artifacts/images"
+    # backend: api -> requiere IMAGE_GEN_API_KEY en .env (ver .env.example)
+    api_model: "dall-e-3"
+    api_size: "1024x1024"
+
+  audio:
+    backend: local                       # local (piper-tts, ONNX/CPU) | api (OpenAI TTS)
+    voice_model: "es_ES-davefx-medium"    # nombre de voz de piper; se descarga la 1a vez
+    artifact_dir: "data/artifacts/audio"
+    # backend: api -> requiere AUDIO_GEN_API_KEY en .env (ver .env.example)
+    api_model: "tts-1-hd"
+    api_voice: "alloy"
+
+  video:
+    # No hay generación de video real viable localmente sin GPU. Esto
+    # es una COMPOSICIÓN: imágenes por escena (image backend de arriba)
+    # + narración (audio backend de arriba) + ffmpeg para unir con
+    # efecto de paneo simple (Ken Burns), no un modelo generativo de video.
+    fps: 24
+    seconds_per_scene: 4
+    artifact_dir: "data/artifacts/video"
+
+  stt:
+    backend: local                       # solo local por ahora (faster-whisper, CPU)
+    model_size: "tiny"                    # ~75MB; base/small/medium/large: más precisos, más pesados
+    language: null                        # null = auto-detección de idioma
+
+  image_editing:
+    artifact_dir: "data/artifacts/images_edited"
+    # Inpainting real con IA ("inpaint"): modelo de difusión COMPLETO
+    # (no distilado como sd-turbo) — mucho más lento en CPU, minutos por
+    # edición, no segundos. Se descarga (~5.5GB) la primera vez que se usa.
+    inpaint_model: "runwayml/stable-diffusion-inpainting"
+    inpaint_num_inference_steps: 25
+    inpaint_guidance_scale: 7.5
+
+  composition:
+    # Combinar imágenes ya generadas (overlay / side_by_side) — 100%
+    # Pillow, sin modelo nuevo. Ver tool_integration/adapters/image_composition.py.
+    artifact_dir: "data/artifacts/images_composed"
+
+  uploads:
+    # Imágenes que el usuario sube desde la interfaz (POST /uploads),
+    # no generadas por kal. Se convierten en el artefacto activo de la
+    # sesión automáticamente. max_size_mb evita que un archivo enorme
+    # se reciba sin límite.
+    artifact_dir: "data/artifacts/uploads"
+    max_size_mb: 20
+
+sandbox:
+  network_mode: none
+  memory_limit_mb: 512
+  cpu_limit: 1.0
+  timeout_seconds: 30
+  pids_limit: 64
+  filesystem: read_only_except_workspace
+
+tool_integration:
+  allow_dynamic_tool_creation: true
+  # Nombres de permiso (ver tool_integration/permissions.py::Permission) que
+  # disparan aprobación humana obligatoria antes de activar una herramienta.
+  # De estos, solo "network" y "filesystem_write" tienen enforcement real
+  # hoy (ver sandbox/executor.py); el resto siempre se rechaza en tiempo de
+  # ejecución por no tener motor todavía (deny-by-default honesto), pero
+  # igual quedan listados aquí para que la aprobación humana sea consistente
+  # el día que un motor real los soporte.
+  require_human_approval_for:
+    - filesystem_write
+    - network
+    - camera
+    - microphone
+    - clipboard
+    - browser
+    - docker
+    - gpu
+    - core_module_modification   # agent_core/ y error_handling/ SIEMPRE
+
+# Cascada de permisos de varios niveles (ver tool_integration/permissions.py::
+# PermissionCascade), inspirada en la cascada de 5 niveles de OpenClaw
+# (global -> proveedor -> agente -> sesión -> sandbox) pero adaptada a lo
+# que ya existe en kal: global (acá) -> nivel de confianza (acá) -> sesión
+# (por conversación, ver POST /chat: deny_permissions) -> manifiesto de la
+# herramienta (ya existente). El resultado efectivo es la intersección de
+# los 4 niveles — "más restrictivo gana". Sin esto, el único chequeo de
+# permisos que existía era UNSUPPORTED_RUNTIME_PERMISSIONS de arriba (que
+# sigue igual, es un gate distinto e independiente: "¿se puede confinar
+# esto técnicamente?" vs. "¿este contexto concreto puede pedirlo?").
+permissions:
+  # Techo del sistema entero: nadie por debajo puede otorgar un permiso
+  # listado acá, pase lo que pase. Vacío por defecto — no hay ninguna
+  # prohibición global todavía, cada instalación la ajusta a su criterio.
+  globally_denied: []
+  # Techo por CÓMO se registró la herramienta (nunca por lo que la propia
+  # herramienta/skill se autodeclare) — ver
+  # tool_integration/permissions.py::trust_tier_for().
+  trust_tier_caps:
+    # Adaptadores de primera parte (image_gen.py, browser.py, etc.),
+    # instanciados directo en tool_integration/registry.py — el mismo
+    # nivel de confianza que ya tenían antes de que existiera esta cascada.
+    system:
+      - filesystem_read
+      - filesystem_write
+      - network
+      - browser
+      - gpu
+      - camera
+      - microphone
+      - clipboard
+      - docker
+    # Herramientas dinámicas que el propio agente propone
+    # (tool_integration/registry.py::propose_dynamic_tool). Ya alineado con
+    # require_human_approval_for de arriba: no bloquea nada que hoy no pase
+    # igual por aprobación humana antes de activarse.
+    agent:
+      - filesystem_read
+      - filesystem_write
+      - network
+    # Skills de terceros (tool_integration/skills.py, aisladas en Docker
+    # vía SandboxedSkillTool) — deliberadamente el techo más bajo. Una
+    # skill que declara requires_network=True en su propio manifest NO
+    # alcanza red de verdad hasta que esta lista lo permita explícitamente
+    # acá — el manifest de la skill nunca es autoridad suficiente por sí
+    # solo, justo el punto que motivó esta cascada.
+    skill:
+      - filesystem_read
+
+self_modification:
+  # Opt-in explícito. Hasta 2026-07-11 este flag existía pero
+  # SelfModificationManager.propose() nunca lo leía — quedaba siempre
+  # activo sin importar este valor (bug real, ver README). Ahora si se
+  # pone en false, propose() rechaza cualquier intento de entrada, antes
+  # de tocar disco o correr un solo test.
+  enabled: false
+  scope: "peripheral_only"   # nunca "core" — ver agent_core/orchestrator.py
+  requires_human_review:
+    - "agent_core/*"
+    - "error_handling/*"
+    - "sandbox/*"
+  auto_rollback_on_regression: true
+
+audit:
+  log_path: "logs/audit.log"
+  immutable: true
+
+signing:
+  key_dir: "data/keys"   # clave Ed25519 local con la que kal firma cada versión de herramienta dinámica que activa
+
+browser:
+  headless: true
+  timeout_seconds: 30
+  # DENY-BY-DEFAULT: lista vacía a propósito. BrowserTool queda registrada
+  # y disponible para el agente, pero rechaza CUALQUIER navegación hasta que
+  # agregues acá los dominios en los que confiás (p.ej. "wikipedia.org").
+  # Coincide con el mismo principio que sandbox.network_mode: "none" — nada
+  # de red abierta por default en ningún rincón del proyecto.
+  allowed_domains: []
+  artifact_dir: "data/artifacts/browser"
+  user_agent: "kal-browser-agent/1.0"

@@ -1,0 +1,75 @@
+body {
+  font-family: var(--vscode-font-family);
+  color: var(--vscode-foreground);
+  background-color: var(--vscode-editor-background);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  margin: 0;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.msg {
+  margin-bottom: 12px;
+  padding: 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg-user {
+  background-color: var(--vscode-input-background);
+}
+
+.msg-agent {
+  background-color: var(--vscode-editorWidget-background, transparent);
+  border: 1px solid var(--vscode-widget-border, transparent);
+}
+
+.msg-error {
+  color: var(--vscode-errorForeground);
+}
+
+.msg-plan {
+  font-size: 0.9em;
+  opacity: 0.8;
+  margin-bottom: 6px;
+}
+
+.msg-pending {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.input-row {
+  display: flex;
+  gap: 6px;
+}
+
+#input {
+  flex: 1;
+  resize: vertical;
+  background-color: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  font-family: inherit;
+}
+
+#send {
+  background-color: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+#send:hover {
+  background-color: var(--vscode-button-hoverBackground);
+}

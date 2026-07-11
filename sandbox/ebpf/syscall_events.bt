@@ -1,0 +1,90 @@
+#!/usr/bin/env bpftrace
+/*
+ * Fase E2 (diseño del esquema de eventos + integración con la
+ * auditoría): misma observación que sandbox/ebpf/prototype_syscalls.bt
+ * (validado en la Fase E1 — ver README.md, overhead indetectable,
+ * cross-validación exitosa contra tests/test_sandbox_escape_resistance.py),
+ * pero emitiendo una línea JSON por evento en vez de texto libre, para
+ * que sandbox/ebpf/event_consumer.py la pueda parsear de forma
+ * confiable (no regex sobre texto humano).
+ *
+ * Se deja prototype_syscalls.bt intacto a propósito — es el artefacto
+ * ya validado con una corrida real; este es un script nuevo, no una
+ * edición de ese, para no arriesgar romper algo que ya funcionó sin
+ * poder volver a probarlo (Claude no tiene sudo en esta máquina).
+ *
+ * Simplificación aceptada (documentada, no escondida): no se escapan
+ * comillas/caracteres especiales al construir el JSON a mano — comm y
+ * filename son nombres de proceso/binario, en la práctica nunca
+ * contienen comillas; si esto cambiara, revisarlo en la Fase E7.
+ *
+ * Uso: sudo bpftrace sandbox/ebpf/syscall_events.bt [pid_opcional]
+ * (mismas reglas de filtrado y misma limitación de UID compartido con
+ * el host que prototype_syscalls.bt — ver el docstring de ese archivo).
+ *
+ * BUG REAL ENCONTRADO EN LA EVALUACIÓN DE E4 (2026-07-10, con el
+ * usuario corriendo esto en vivo): filtrar solo por `comm == "python"`
+ * dejaba invisible al proceso PRINCIPAL de kal — corre como
+ * `.venv/bin/python3 .venv/bin/uvicorn ...`, así que su `comm` real es
+ * "python3", no "python" (confirmado con
+ * `ps -eo pid,comm,cmd | grep uvicorn`). Las skills SANDBOXEADAS sí
+ * aparecían porque sandbox/docker_runner.py invoca literalmente el
+ * binario "python" dentro del contenedor (sin el 3) — por eso el
+ * hueco no se notó hasta evaluar con el proceso principal de verdad,
+ * no solo con ejecuciones de skills. Fix: aceptar ambos nombres.
+ */
+
+tracepoint:syscalls:sys_enter_connect
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    $sa = (struct sockaddr *)args->uservaddr;
+    if ($sa->sa_family == 2) {  // AF_INET, ver nota en prototype_syscalls.bt
+        $sin = (struct sockaddr_in *)args->uservaddr;
+        $port = (($sin->sin_port & 0xff) << 8) | ($sin->sin_port >> 8);
+        printf(
+            "{\"syscall\":\"connect\",\"pid\":%d,\"comm\":\"%s\",\"family\":2,\"ip\":\"%s\",\"port\":%d}\n",
+            pid, comm, ntop($sin->sin_addr.s_addr), $port
+        );
+    } else {
+        printf(
+            "{\"syscall\":\"connect\",\"pid\":%d,\"comm\":\"%s\",\"family\":%d,\"ip\":\"\",\"port\":0}\n",
+            pid, comm, $sa->sa_family
+        );
+    }
+}
+
+tracepoint:syscalls:sys_enter_setuid
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    printf(
+        "{\"syscall\":\"setuid\",\"pid\":%d,\"comm\":\"%s\",\"requested_uid\":%d}\n",
+        pid, comm, args->uid
+    );
+}
+
+tracepoint:syscalls:sys_enter_setresuid
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    printf(
+        "{\"syscall\":\"setresuid\",\"pid\":%d,\"comm\":\"%s\",\"ruid\":%d,\"euid\":%d,\"suid\":%d}\n",
+        pid, comm, args->ruid, args->euid, args->suid
+    );
+}
+
+tracepoint:syscalls:sys_enter_ptrace
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    printf(
+        "{\"syscall\":\"ptrace\",\"pid\":%d,\"comm\":\"%s\",\"request\":%d,\"target_pid\":%d}\n",
+        pid, comm, args->request, args->pid
+    );
+}
+
+tracepoint:sched:sched_process_exec
+/$1 == 0 || pid == $1/
+{
+    printf(
+        "{\"syscall\":\"execve\",\"pid\":%d,\"filename\":\"%s\"}\n",
+        pid, str(args->filename)
+    );
+}

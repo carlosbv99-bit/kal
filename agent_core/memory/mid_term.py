@@ -1,0 +1,150 @@
+"""
+Memoria de mediano plazo: episodios recientes con TTL.
+
+Guarda resúmenes de tareas, pares error->reparación, resultados
+intermedios. Backend por defecto: SQLite (ver config.yaml,
+memory.mid_term.backend). Cambiar a Postgres implica implementar
+otra clase con la misma interfaz MemoryBackend, no tocar consumidores.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from pathlib import Path
+
+from agent_core.memory.base import MemoryBackend, MemoryConfidence, MemoryItem
+from utils.config import settings
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+DB_PATH = Path("data/mid_term/memory.db")
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+class MidTermMemory(MemoryBackend):
+    def __init__(self, db_path: Path = DB_PATH):
+        self.ttl_seconds = settings.memory.mid_term.ttl_days * 86400
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_items (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                metadata TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                relevance_score REAL DEFAULT 0.0,
+                repetitions INTEGER DEFAULT 1,
+                confidence TEXT DEFAULT 'temporal'
+            )
+            """
+        )
+        self.conn.commit()
+        try:
+            # Migración para bases de datos creadas antes de que existiera
+            # esta columna (data/mid_term/memory.db ya existente).
+            self.conn.execute(
+                "ALTER TABLE memory_items ADD COLUMN confidence TEXT DEFAULT 'temporal'"
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # la columna ya existe
+
+    def store(self, item: MemoryItem) -> None:
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO memory_items
+                (id, content, metadata, created_at, relevance_score, repetitions, confidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.content,
+                json.dumps(item.metadata),
+                item.created_at,
+                item.relevance_score,
+                item.repetitions,
+                item.confidence.value,
+            ),
+        )
+        self.conn.commit()
+
+    def retrieve(self, query: str, top_k: int = 5) -> list[MemoryItem]:
+        # TODO: búsqueda por similitud de texto (FTS5) en vez de LIKE simple.
+        cursor = self.conn.execute(
+            """
+            SELECT id, content, metadata, created_at, relevance_score, repetitions, confidence
+            FROM memory_items
+            WHERE content LIKE ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (f"%{query}%", top_k),
+        )
+        return [self._row_to_item(row) for row in cursor.fetchall()]
+
+    def get_by_id(self, item_id: str) -> MemoryItem | None:
+        """
+        Lookup exacto por id, a diferencia de retrieve() que busca por
+        coincidencia de texto (LIKE). Necesario para checkpoints (ver
+        error_handling/strategies.py:RuntimeErrorStrategy) y para
+        verify()/pin() de MemoryManager, donde se necesita recuperar un
+        item específico por su clave, no por similitud de contenido.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT id, content, metadata, created_at, relevance_score, repetitions, confidence
+            FROM memory_items WHERE id = ?
+            """,
+            (item_id,),
+        )
+        row = cursor.fetchone()
+        return self._row_to_item(row) if row is not None else None
+
+    def forget(self, item_id: str) -> None:
+        self.conn.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
+        self.conn.commit()
+
+    def purge_expired(self) -> int:
+        """
+        Job periódico: elimina items que superaron el TTL configurado.
+        Excluye confidence='permanente': un item pinneado explícitamente
+        por un humano nunca se purga por TTL, sin importar su antigüedad.
+        """
+        cutoff = time.time() - self.ttl_seconds
+        cursor = self.conn.execute(
+            "DELETE FROM memory_items WHERE created_at < ? AND confidence != ?",
+            (cutoff, MemoryConfidence.PERMANENTE.value),
+        )
+        self.conn.commit()
+        logger.info(f"mid_term: purgados {cursor.rowcount} items expirados")
+        return cursor.rowcount
+
+    def candidates_for_promotion(self) -> list[MemoryItem]:
+        """
+        Devuelve items que cumplen el umbral de promoción a largo plazo,
+        definido en config.yaml (memory.long_term.promotion). La promoción
+        efectiva la orquesta agent_core/orchestrator.py, no este módulo.
+        """
+        cfg = settings.memory.long_term.promotion
+        cursor = self.conn.execute(
+            """
+            SELECT id, content, metadata, created_at, relevance_score, repetitions, confidence
+            FROM memory_items
+            WHERE repetitions >= ? AND relevance_score >= ?
+            """,
+            (cfg.min_repetitions, cfg.min_relevance_score),
+        )
+        return [self._row_to_item(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _row_to_item(row) -> MemoryItem:
+        return MemoryItem(
+            id=row[0], content=row[1], metadata=json.loads(row[2]),
+            created_at=row[3], relevance_score=row[4], repetitions=row[5],
+            confidence=MemoryConfidence(row[6] or "temporal"),
+        )

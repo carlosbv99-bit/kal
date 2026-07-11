@@ -1,0 +1,650 @@
+"""
+Tests de agent_core/llm/agent_loop.py.
+
+Usan un OllamaClient falso (respuestas guionadas) y un TaskExecutor /
+MemoryManager falsos — lo que se prueba aquí es la LÓGICA del loop
+ReAct (cuándo se detiene, cómo despacha herramientas, cómo maneja
+errores), no la integración real con Ollama ni con Docker. Esa
+integración real vive en test_agent_loop_integration.py y requiere
+Ollama corriendo de verdad.
+"""
+from __future__ import annotations
+
+from agent_core.llm.agent_loop import AgentLoop, AgentTool, _agent_tool_from_tool
+from agent_core.llm.ollama_client import OllamaError
+from agent_core.llm.provider import ChatResponse, ToolCall
+from tool_integration.base_tool import Artifact
+from tool_integration.permissions import Permission
+
+
+class FakeOllamaClient:
+    """Devuelve una secuencia guionada de respuestas, una por cada llamada a .chat()."""
+
+    def __init__(self, responses: list[ChatResponse]):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def chat(self, messages, model=None, tools=None):
+        self.calls.append({"messages": [dict(m) for m in messages], "model": model, "tools": tools})
+        if not self.responses:
+            raise AssertionError("FakeOllamaClient se quedó sin respuestas guionadas")
+        return self.responses.pop(0)
+
+
+class FakeTask:
+    def __init__(self, status, result=None, error=None):
+        self.status = status
+        self.result = result
+        self.error = error
+
+
+class FakeTaskExecutor:
+    def __init__(self, results: list[FakeTask] | None = None):
+        self.results = results or []
+        self.submitted = []
+        self.run_calls = []
+
+    def submit(self, description):
+        self.submitted.append(description)
+        return object()
+
+    def run_sandboxed(self, task, code, **kwargs):
+        self.run_calls.append(code)
+        if self.results:
+            return self.results.pop(0)
+        from task_execution.task import TaskStatus
+        return FakeTask(status=TaskStatus.SUCCESS, result="ok")
+
+
+class FakeMemoryManager:
+    def __init__(self):
+        self.remembered = []
+
+    def remember(self, content, metadata=None):
+        self.remembered.append(content)
+
+        class Item:
+            id = "fake-id"
+
+        return Item()
+
+    def recall(self, query, top_k=3):
+        return {"short_term": [], "mid_term": [], "long_term": []}
+
+
+def _loop(llm_responses, task_executor=None, memory=None, tools=None) -> tuple[AgentLoop, FakeOllamaClient]:
+    fake_llm = FakeOllamaClient(llm_responses)
+    loop = AgentLoop(
+        llm_client=fake_llm,
+        task_executor=task_executor or FakeTaskExecutor(),
+        memory=memory or FakeMemoryManager(),
+        tools=tools,
+    )
+    return loop, fake_llm
+
+
+def test_direct_answer_without_tool_calls():
+    loop, fake_llm = _loop([ChatResponse(content="La respuesta es 4.")])
+
+    result = loop.run("¿Cuánto es 2+2?")
+
+    assert result.status == "success"
+    assert result.final_answer == "La respuesta es 4."
+    assert result.steps == []
+    assert len(fake_llm.calls) == 1
+
+
+def test_single_tool_call_then_final_answer():
+    task_executor = FakeTaskExecutor()
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "print(4)"})]),
+        ChatResponse(content="El resultado es 4."),
+    ]
+    loop, fake_llm = _loop(responses, task_executor=task_executor)
+
+    result = loop.run("Calcula 2+2 con código")
+
+    assert result.status == "success"
+    assert result.final_answer == "El resultado es 4."
+    assert len(result.steps) == 1
+    assert result.steps[0].tool_name == "run_code"
+    assert task_executor.run_calls == ["print(4)"]
+    # La segunda llamada a Ollama debe incluir el resultado de la herramienta
+    assert fake_llm.calls[1]["messages"][-1]["role"] == "tool"
+
+
+def test_multiple_sequential_tool_calls():
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="remember", arguments={"content": "dato importante"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="recall", arguments={"query": "dato"})]),
+        ChatResponse(content="Listo, ya lo recordé y lo busqué."),
+    ]
+    memory = FakeMemoryManager()
+    loop, _ = _loop(responses, memory=memory)
+
+    result = loop.run("Recuerda esto y luego búscalo")
+
+    assert result.status == "success"
+    assert len(result.steps) == 2
+    assert memory.remembered == ["dato importante"]
+
+
+def test_unknown_tool_call_returns_error_observation_not_crash():
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="herramienta_inventada", arguments={})]),
+        ChatResponse(content="No pude usar esa herramienta."),
+    ]
+    loop, _ = _loop(responses)
+
+    result = loop.run("usa una herramienta que no existe")
+
+    assert result.status == "success"  # el loop no crashea
+    assert "no existe" in result.steps[0].observation.lower()
+
+
+def test_tool_with_wrong_arguments_returns_error_observation():
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"argumento_incorrecto": "x"})]),
+        ChatResponse(content="Ajusto mi enfoque."),
+    ]
+    loop, _ = _loop(responses)
+
+    result = loop.run("prueba con argumentos incorrectos")
+
+    assert result.status == "success"
+    assert "argumentos inválidos" in result.steps[0].observation.lower()
+
+
+def test_tool_handler_exception_is_caught_not_propagated():
+    def broken_handler(**kwargs):
+        raise RuntimeError("boom interno")
+
+    tools = [
+        AgentTool(
+            name="rota",
+            description="una herramienta que siempre falla",
+            parameters_schema={"type": "object", "properties": {}},
+            handler=broken_handler,
+        )
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="rota", arguments={})]),
+        ChatResponse(content="Reporto el fallo."),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("usa la herramienta rota")
+
+    assert result.status == "success"
+    assert "boom interno" in result.steps[0].observation
+
+
+# --- Cascada de permisos (tool_integration/permissions.py::PermissionCascade) ---
+
+
+def test_tool_requiring_permission_outside_its_trust_tier_is_never_called():
+    calls = []
+
+    def handler(**kwargs):
+        calls.append(kwargs)
+        return "no debería llegar acá"
+
+    tools = [
+        AgentTool(
+            name="skill_con_red", description="una skill que pide red",
+            parameters_schema={"type": "object", "properties": {}}, handler=handler,
+            permissions=frozenset({Permission.NETWORK}), trust_tier="skill",  # tier "skill" no cubre network por default
+        )
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="skill_con_red", arguments={})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("usa la skill con red")
+
+    assert calls == []  # el handler NUNCA se llamó
+    assert "ERROR" in result.steps[0].observation
+    assert "network" in result.steps[0].observation
+
+
+def test_permission_denial_is_audited(tmp_path, monkeypatch):
+    from audit.audit_log import audit_log
+
+    monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
+    tools = [
+        AgentTool(
+            name="skill_con_red", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: "x", permissions=frozenset({Permission.NETWORK}), trust_tier="skill",
+        )
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="skill_con_red", arguments={})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    loop.run("usa la skill con red")
+
+    entries = audit_log.tail(5)
+    assert entries[0]["event_type"] == "permission_denied"
+    assert entries[0]["outcome"] == "failure"
+
+
+def test_session_denied_permissions_blocks_even_when_tier_would_allow():
+    calls = []
+
+    def handler(**kwargs):
+        calls.append(kwargs)
+        return "ejecutada"
+
+    tools = [
+        AgentTool(
+            name="adaptador_con_red", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=handler, permissions=frozenset({Permission.NETWORK}), trust_tier="system",  # system SÍ cubre network
+        )
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="adaptador_con_red", arguments={})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("usa el adaptador", denied_permissions=frozenset({Permission.NETWORK}))
+
+    assert calls == []
+    assert "ERROR" in result.steps[0].observation
+
+
+def test_tool_without_special_permissions_runs_normally_through_cascade():
+    """La cascada no debe romper el caso normal: una herramienta sin
+    permisos declarados (default de la mayoría de los AgentTool de test)
+    sigue funcionando exactamente igual que antes de que existiera."""
+    tools = [
+        AgentTool(
+            name="simple", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: "ejecutada",
+        )
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="simple", arguments={})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("usa la herramienta simple")
+
+    assert result.steps[0].observation == "ejecutada"
+
+
+def test_max_steps_exceeded_stops_the_loop():
+    # El modelo pide una herramienta indefinidamente, nunca da respuesta final
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "print(1)"})])
+        for _ in range(10)
+    ]
+    loop, fake_llm = _loop(responses)
+
+    result = loop.run("nunca termines", max_steps=3)
+
+    assert result.status == "max_steps_exceeded"
+    assert len(result.steps) == 3
+    assert len(fake_llm.calls) == 3  # se detuvo exactamente en el límite, no siguió de más
+
+
+# --- max_tool_repeats: BUG REAL ENCONTRADO EN USO (2026-07-10) ---
+# "genera una raqueta de tenis" generó la imagen correcta una vez y
+# después 3 imágenes más de paisajes sin relación en el mismo turno,
+# sin llegar nunca a una respuesta final. La instrucción de prompt
+# sola no alcanzó — este es el tope estructural que no depende de que
+# el modelo la respete.
+
+
+def _counting_tool(calls: list):
+    return AgentTool(
+        name="image_generation", description="d", parameters_schema={"type": "object", "properties": {}},
+        handler=lambda **kw: calls.append(kw) or "imagen generada",
+    )
+
+
+def test_tool_call_beyond_max_tool_repeats_is_rejected_without_executing():
+    calls: list = []
+    tools = [_counting_tool(calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": f"v{i}"})])
+        for i in range(5)
+    ] + [ChatResponse(content="listo")]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("generá una imagen", max_steps=10, max_tool_repeats=2)
+
+    # Se ejecutó de verdad solo 2 veces (el límite) — nunca 3, 4 o 5,
+    # aunque el modelo (guionado acá) haya insistido esa cantidad de veces.
+    assert len(calls) == 2
+    assert "ERROR" in result.steps[2].observation
+    assert "image_generation" in result.steps[2].observation
+    assert result.status == "success"  # el modelo igual pudo terminar bien tras el rechazo
+
+
+def test_tool_calls_up_to_the_limit_all_execute_normally():
+    calls: list = []
+    tools = [_counting_tool(calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": f"v{i}"})])
+        for i in range(3)
+    ] + [ChatResponse(content="listo")]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("generá 3 variantes", max_steps=10, max_tool_repeats=3)
+
+    assert len(calls) == 3
+    assert all("ERROR" not in s.observation for s in result.steps)
+
+
+def test_max_tool_repeats_counts_independently_per_tool_name():
+    image_calls: list = []
+    other_calls: list = []
+    tools = [
+        _counting_tool(image_calls),
+        AgentTool(
+            name="run_code", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: other_calls.append(kw) or "ok",
+        ),
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("hacé varias cosas", max_steps=10, max_tool_repeats=2)
+
+    # Las 2 llamadas a image_generation no consumen el cupo de run_code.
+    assert len(image_calls) == 2
+    assert len(other_calls) == 1
+    assert all("ERROR" not in s.observation for s in result.steps)
+
+
+def test_default_max_tool_repeats_comes_from_settings(monkeypatch):
+    from utils.config import settings
+
+    monkeypatch.setattr(settings.llm, "max_tool_repeats", 1)
+    calls: list = []
+    tools = [_counting_tool(calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={})])
+        for _ in range(3)
+    ] + [ChatResponse(content="listo")]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("generá una imagen", max_steps=10)  # sin max_tool_repeats explícito
+
+    assert len(calls) == 1
+
+
+def test_ollama_error_stops_loop_cleanly():
+    class FailingClient:
+        def chat(self, messages, model=None, tools=None):
+            raise OllamaError("no se pudo conectar")
+
+    loop = AgentLoop(llm_client=FailingClient(), task_executor=FakeTaskExecutor(), memory=FakeMemoryManager())
+
+    result = loop.run("cualquier cosa")
+
+    assert result.status == "llm_error"
+    assert "no se pudo conectar" in result.final_answer
+
+
+def test_failed_code_execution_reports_error_in_observation():
+    from task_execution.task import TaskStatus
+
+    task_executor = FakeTaskExecutor(results=[FakeTask(status=TaskStatus.FAILED, error="ValueError: boom")])
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "raise ValueError('boom')"})]),
+        ChatResponse(content="El código falló."),
+    ]
+    loop, _ = _loop(responses, task_executor=task_executor)
+
+    result = loop.run("ejecuta código que falla")
+
+    assert "ERROR" in result.steps[0].observation
+    assert "boom" in result.steps[0].observation
+
+
+def test_custom_tools_override_defaults():
+    custom_tool = AgentTool(
+        name="solo_esta",
+        description="la única herramienta disponible",
+        parameters_schema={"type": "object", "properties": {}},
+        handler=lambda: "ejecutada",
+    )
+    loop, fake_llm = _loop(
+        [ChatResponse(content="", tool_calls=[ToolCall(name="solo_esta", arguments={})]), ChatResponse(content="listo")],
+        tools=[custom_tool],
+    )
+
+    loop.run("usa la única herramienta")
+
+    schemas_sent = fake_llm.calls[0]["tools"]
+    tool_names_sent = [s["function"]["name"] for s in schemas_sent]
+    assert tool_names_sent == ["solo_esta"]  # no se filtraron los tools default
+
+
+# --- Fallback: modelos que no completan tool_calls nativo (bug real de producción) ---
+
+
+def test_plain_json_in_content_is_detected_and_dispatched():
+    """
+    Bug real encontrado con qwen2.5-coder:14b vía Ollama: en vez de
+    poblar message.tool_calls, el modelo imita el formato como texto
+    plano en content. Sin el fallback, esto se mostraba tal cual al
+    usuario sin ejecutar nada.
+    """
+    task_executor = FakeTaskExecutor()
+    responses = [
+        ChatResponse(content='{"name": "run_code", "arguments": {"code": "print(15 * 23)"}}'),
+        ChatResponse(content="El resultado es 345."),
+    ]
+    loop, _ = _loop(responses, task_executor=task_executor)
+
+    result = loop.run("calcula 15*23")
+
+    assert result.status == "success"
+    assert result.final_answer == "El resultado es 345."
+    assert len(result.steps) == 1
+    assert result.steps[0].tool_name == "run_code"
+    assert task_executor.run_calls == ["print(15 * 23)"]
+
+
+def test_json_wrapped_in_markdown_fence_is_detected():
+    responses = [
+        ChatResponse(content='Voy a usar esto:\n```json\n{"name": "run_code", "arguments": {"code": "print(1)"}}\n```'),
+        ChatResponse(content="Listo."),
+    ]
+    task_executor = FakeTaskExecutor()
+    loop, _ = _loop(responses, task_executor=task_executor)
+
+    result = loop.run("prueba con fence")
+
+    assert len(result.steps) == 1
+    assert task_executor.run_calls == ["print(1)"]
+
+
+def test_json_with_unknown_tool_name_is_not_treated_as_tool_call():
+    """
+    Un JSON en el texto que no coincide con ninguna herramienta real no
+    debe dispararse como tool call — se trata como respuesta final
+    normal, para no generar falsos positivos.
+    """
+    responses = [ChatResponse(content='{"name": "herramienta_que_no_existe", "arguments": {}}')]
+    loop, _ = _loop(responses)
+
+    result = loop.run("algo")
+
+    assert result.status == "success"
+    assert result.steps == []
+    assert "herramienta_que_no_existe" in result.final_answer
+
+
+def test_plain_text_final_answer_without_any_json_still_works():
+    """Confirma que el fallback no interfiere con respuestas normales sin JSON."""
+    responses = [ChatResponse(content="No necesito ninguna herramienta para responder esto.")]
+    loop, _ = _loop(responses)
+
+    result = loop.run("pregunta simple")
+
+    assert result.status == "success"
+    assert result.final_answer == "No necesito ninguna herramienta para responder esto."
+    assert result.steps == []
+
+
+def test_native_tool_calls_still_take_priority_over_fallback_parsing():
+    """
+    Si el modelo SÍ completa tool_calls nativo, no debería ni evaluarse
+    el contenido como fallback — evita procesar dos veces si content
+    coincidentemente también pareciera JSON.
+    """
+    task_executor = FakeTaskExecutor()
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "print('nativo')"})]),
+        ChatResponse(content="Usé el camino nativo."),
+    ]
+    loop, _ = _loop(responses, task_executor=task_executor)
+
+    result = loop.run("algo")
+
+    assert task_executor.run_calls == ["print('nativo')"]
+
+
+# --- Continuidad conversacional: history y session_context (agent_core/sessions.py) ---
+
+
+def test_without_history_or_session_context_behavior_is_unchanged():
+    loop, fake_llm = _loop([ChatResponse(content="respuesta")])
+
+    loop.run("hola")
+
+    sent_messages = fake_llm.calls[0]["messages"]
+    assert len(sent_messages) == 2  # solo system + user, como antes de esta feature
+
+
+def test_history_messages_are_included_before_the_new_goal():
+    loop, fake_llm = _loop([ChatResponse(content="respuesta")])
+    history = [
+        {"role": "user", "content": "primer mensaje"},
+        {"role": "assistant", "content": "primera respuesta"},
+    ]
+
+    loop.run("segundo mensaje", history=history)
+
+    sent_messages = fake_llm.calls[0]["messages"]
+    assert sent_messages[1] == history[0]
+    assert sent_messages[2] == history[1]
+    assert sent_messages[3] == {"role": "user", "content": "segundo mensaje"}
+
+
+def test_session_context_is_merged_into_the_single_system_message():
+    """
+    Bug real encontrado en uso: mandarlo como un SEGUNDO mensaje
+    role="system" separado hacía que qwen3-coder:30b lo ignorara por
+    completo (confirmado con Ollama real) — fundirlo en el ÚNICO
+    mensaje system es lo que el modelo sí respeta.
+    """
+    loop, fake_llm = _loop([ChatResponse(content="respuesta")])
+    context = {"role": "system", "content": "Contexto de esta sesión: el último artefacto..."}
+
+    loop.run("hazle el fondo azul", session_context=context)
+
+    sent_messages = fake_llm.calls[0]["messages"]
+    assert len(sent_messages) == 2  # UN solo system + el user, no tres mensajes
+    assert sent_messages[0]["role"] == "system"
+    assert context["content"] in sent_messages[0]["content"]
+    assert sent_messages[1] == {"role": "user", "content": "hazle el fondo azul"}
+
+
+def test_session_context_comes_before_history_which_comes_before_the_goal():
+    loop, fake_llm = _loop([ChatResponse(content="respuesta")])
+    context = {"role": "system", "content": "contexto"}
+    history = [{"role": "user", "content": "turno anterior"}, {"role": "assistant", "content": "respuesta anterior"}]
+
+    loop.run("turno nuevo", history=history, session_context=context)
+
+    sent_messages = fake_llm.calls[0]["messages"]
+    assert len(sent_messages) == 4  # system (con contexto fundido) + 2 de historial + goal
+    assert sent_messages[0]["role"] == "system"
+    assert "contexto" in sent_messages[0]["content"]
+    assert sent_messages[1]["content"] == "turno anterior"
+    assert sent_messages[2]["content"] == "respuesta anterior"
+    assert sent_messages[3]["content"] == "turno nuevo"
+
+
+# --- Artefacto activo: AgentStep.artifact / AgentTool.last_artifact ---
+
+
+def test_agent_tool_from_tool_captures_the_raw_artifact_on_last_artifact():
+    """
+    _agent_tool_from_tool() es el único lugar donde una Tool real (no un
+    AgentTool de test) se envuelve para el loop — confirma que además
+    de aplanar el Artifact a texto (como ya hacía), guarda el Artifact
+    crudo en last_artifact para que run() pueda trackear "qué generó
+    este paso" sin cambiar la firma de handler.
+    """
+
+    class FakeImageTool:
+        class manifest:
+            description = "genera una imagen"
+            parameters_schema = {"type": "object", "properties": {}}
+            permissions = frozenset()
+
+        def execute(self, **kwargs):
+            return Artifact(modality="image", uri="logo.png")
+
+    agent_tool = _agent_tool_from_tool("generate_image", FakeImageTool())
+
+    assert agent_tool.last_artifact is None  # todavía no se llamó
+    observation = agent_tool.handler()
+
+    assert agent_tool.last_artifact == Artifact(modality="image", uri="logo.png")
+    assert observation == "image: archivo generado en logo.png"
+
+
+def test_agent_step_captures_the_artifact_produced_by_its_tool():
+    artifact = Artifact(modality="image", uri="logo.png")
+    tool = AgentTool(name="generate_image", description="", parameters_schema={"type": "object", "properties": {}}, handler=None)
+
+    def handler(**kwargs):
+        tool.last_artifact = artifact
+        return "image: archivo generado en logo.png"
+
+    tool.handler = handler
+    loop, _ = _loop(
+        [
+            ChatResponse(content="", tool_calls=[ToolCall(name="generate_image", arguments={})]),
+            ChatResponse(content="Listo, generé la imagen."),
+        ],
+        tools=[tool],
+    )
+
+    result = loop.run("hazme un logo")
+
+    assert result.steps[0].artifact == artifact
+
+
+def test_agent_step_artifact_is_none_for_tools_that_never_set_it():
+    """Los AgentTool de test de siempre (handler que devuelve un string
+    plano, sin tocar last_artifact) no deben romper nada — el step
+    simplemente queda con artifact=None, como antes de esta feature."""
+    loop, _ = _loop(
+        [
+            ChatResponse(content="", tool_calls=[ToolCall(name="solo_esta", arguments={})]),
+            ChatResponse(content="listo"),
+        ],
+        tools=[AgentTool(name="solo_esta", description="d", parameters_schema={"type": "object", "properties": {}}, handler=lambda: "ejecutada")],
+    )
+
+    result = loop.run("algo")
+
+    assert result.steps[0].artifact is None

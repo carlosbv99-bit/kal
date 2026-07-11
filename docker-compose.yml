@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  agent:
+    build: .
+    ports:
+      # Solo loopback del host: sin esto, Docker bindea "8000:8000" a
+      # 0.0.0.0 por defecto, exponiendo la API del agente (incluida
+      # /self-modification/apply) a cualquier dispositivo de la LAN, no
+      # solo a esta máquina (hallazgo de la revisión de seguridad de
+      # 2026-07-09). El token administrativo (ver utils/admin_token.py)
+      # es una segunda capa por si este binding cambia en el futuro.
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    volumes:
+      - ./config:/app/config:ro          # config solo lectura
+      - ./data:/app/data                  # persistencia memoria mediano/largo plazo
+      - ./logs:/app/logs
+    depends_on:
+      - vector_store
+    networks:
+      - agent_net
+    # El agente NO tiene acceso directo al socket de Docker.
+    # La ejecución de sandbox se delega al servicio `sandbox_runner`
+    # vía una API interna, para que un fallo en el agente no implique
+    # acceso directo al daemon de Docker del host.
+
+  sandbox_runner:
+    build:
+      context: .
+      dockerfile: sandbox/Dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # solo este servicio lo toca
+    environment:
+      - SANDBOX_NETWORK_MODE=none
+      - SANDBOX_MEMORY_LIMIT=512m
+      - SANDBOX_CPU_LIMIT=1.0
+      - SANDBOX_TIMEOUT_SECONDS=30
+      - SANDBOX_PIDS_LIMIT=64
+    networks:
+      - agent_net
+    # Este servicio es el único con privilegios para lanzar contenedores
+    # efímeros. Superficie de ataque aislada del resto del sistema.
+
+  vector_store:
+    image: chromadb/chroma:latest
+    volumes:
+      - ./data/long_term:/chroma/chroma
+    networks:
+      - agent_net
+    # Sin puertos expuestos al host: solo accesible desde agent_net
+
+networks:
+  agent_net:
+    driver: bridge
+    internal: false  # true en producción si no se necesita salida a internet

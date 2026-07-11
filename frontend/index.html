@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>kal — sala de control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wordmark">
+    <span class="wordmark-mark">k</span><span class="wordmark-rest">al</span>
+  </div>
+  <div class="status-strip" id="status-strip" aria-live="polite">
+    <div class="status-lamp" data-key="audit_chain_verified">
+      <span class="lamp"></span><span class="status-label">cadena de auditoría</span>
+    </div>
+    <div class="status-lamp" data-key="sandbox_network_mode">
+      <span class="lamp"></span><span class="status-label">red del sandbox</span>
+    </div>
+    <div class="status-lamp" data-key="open_circuit_breakers">
+      <span class="lamp"></span><span class="status-label">circuitos abiertos</span>
+    </div>
+    <div class="status-lamp" data-key="pending_approvals">
+      <span class="lamp"></span><span class="status-label">aprobaciones pendientes</span>
+    </div>
+    <div class="status-lamp" data-key="llm_available">
+      <span class="lamp"></span><span class="status-label">LLM</span>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <section class="chat-panel">
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="chat-empty" id="chat-empty">
+        <p>Decile a kal qué necesitás. Cada acción real (código, memoria, generación de contenido) queda auditada — mirá el panel de la derecha mientras trabaja.</p>
+      </div>
+    </div>
+
+    <div class="pending-indicator" id="pending-indicator" hidden>
+      <span>kal está trabajando</span>
+      <span class="msg-pending-dot"></span>
+      <button type="button" class="msg-cancel-btn" id="pending-cancel-btn">Cancelar</button>
+    </div>
+
+    <form class="chat-input-row" id="chat-form">
+      <select id="model-select" class="model-select" title="Modelo"></select>
+      <label class="upload-btn" title="Subir una imagen propia">
+        📎<input type="file" id="image-upload-input" accept="image/png,image/jpeg,image/webp" hidden />
+      </label>
+      <textarea id="chat-input" class="chat-input" placeholder="Escribí un objetivo para kal…" rows="1"></textarea>
+      <button type="submit" class="send-btn" id="send-btn">Enviar</button>
+    </form>
+  </section>
+
+  <aside class="dash-panel">
+    <nav class="dash-tabs" id="dash-tabs">
+      <button class="dash-tab active" data-tab="tasks">Tareas</button>
+      <button class="dash-tab" data-tab="memory">Memoria</button>
+      <button class="dash-tab" data-tab="tools">Herramientas</button>
+      <button class="dash-tab" data-tab="selfmod">Self-mod</button>
+      <button class="dash-tab" data-tab="audit">Auditoría</button>
+    </nav>
+
+    <div class="dash-body">
+
+      <div class="dash-view active" data-view="tasks">
+        <div class="dash-view-header">
+          <span>Tareas recientes</span>
+          <button class="mini-btn" data-refresh="tasks">↻</button>
+        </div>
+        <div class="dash-list" id="tasks-list"></div>
+      </div>
+
+      <div class="dash-view" data-view="memory">
+        <div class="dash-view-header"><span>Buscar en memoria</span></div>
+        <form class="memory-search-row" id="memory-search-form">
+          <input type="text" id="memory-query" placeholder="Buscar…" />
+          <button type="submit" class="mini-btn">Buscar</button>
+        </form>
+        <div class="dash-list" id="memory-results"></div>
+      </div>
+
+      <div class="dash-view" data-view="tools">
+        <div class="dash-view-header">
+          <span>Herramientas</span>
+          <button class="mini-btn" data-refresh="tools">↻</button>
+        </div>
+        <div class="dash-subhead">Activas</div>
+        <div class="dash-list" id="tools-active-list"></div>
+        <div class="dash-subhead">Pendientes de aprobación</div>
+        <div class="dash-list" id="tools-pending-list"></div>
+      </div>
+
+      <div class="dash-view" data-view="selfmod">
+        <div class="dash-view-header">
+          <span>Propuestas de auto-modificación</span>
+          <button class="mini-btn" data-refresh="selfmod">↻</button>
+        </div>
+        <div class="dash-list" id="selfmod-list"></div>
+      </div>
+
+      <div class="dash-view" data-view="audit">
+        <div class="dash-view-header">
+          <span>Registro de auditoría</span>
+          <button class="mini-btn" data-refresh="audit">↻</button>
+        </div>
+        <div class="dash-list dash-list-mono" id="audit-list"></div>
+      </div>
+
+    </div>
+  </aside>
+
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
