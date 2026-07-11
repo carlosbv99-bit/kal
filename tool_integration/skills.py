@@ -326,13 +326,18 @@ def set_skill_enabled(skill_dir: Path, enabled: bool) -> None:
     manifest_path.write_text(new_text, encoding="utf-8")
 
 
-def audit_skill_enable_change(manifest_name: str, skill_dir_name: str, enabled: bool) -> None:
-    """Rastro auditado de una decisión humana explícita vía scripts/enable_skill.py."""
+def audit_skill_enable_change(manifest_name: str, skill_dir_name: str, enabled: bool, source: str = "local") -> None:
+    """
+    Rastro auditado de una decisión humana explícita vía
+    scripts/enable_skill.py (source="local") o
+    scripts/install_from_market.py (source="market", Fase A del plan
+    de comunidad) — mismo evento, con el origen como contexto extra.
+    """
     audit_log.record(
         AuditEvent(
             event_type="skill_enabled" if enabled else "skill_disabled",
-            summary=f"Skill '{manifest_name}' {'habilitada' if enabled else 'deshabilitada'} manualmente vía scripts/enable_skill.py",
-            context={"skill": manifest_name, "skill_dir": skill_dir_name},
+            summary=f"Skill '{manifest_name}' {'habilitada' if enabled else 'deshabilitada'} manualmente ({source})",
+            context={"skill": manifest_name, "skill_dir": skill_dir_name, "source": source},
             outcome="success",
         )
     )

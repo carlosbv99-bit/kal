@@ -11,8 +11,8 @@ vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
 
-# Backups/exports locales, nunca versionados (139MB+, no pertenecen al repo)
-/kal1.zip
+# Backups/exports locales, nunca versionados (100MB+, no pertenecen al repo)
+/kal*.zip
 /dist/
 
 # Estado de runtime de Claude Code (local a esta máquina/sesión)

@@ -1,0 +1,9 @@
+{
+  "algorithm": "ed25519",
+  "author_public_key": "501dd3d39eec529af642bf736a9c87a6f2de58e292726762f311002cbe38fbad",
+  "signature": "0294a33065822ac234bdf8d013a4605cc70a0aebac437c1d75c7a62417bff9ab444ed1775412d87a3c0909e0b9a1a600947a776517e341bafb16d137e0c12705",
+  "files": {
+    "skill.yaml": "d08185195e03cb83fed8551b86d5c94238b639b90060899e17bfc6d3568784bb",
+    "tool.py": "53caeb6680d4f79ff3ef67463f16cb4a1734e082ccafbacf55d6dbd937101723"
+  }
+}
