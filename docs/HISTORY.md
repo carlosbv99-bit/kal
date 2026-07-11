@@ -2267,3 +2267,47 @@ HTML en la descripción; manifiesto roto se ignora sin tumbar la página
 entera). Generado `docs/index.html` real sobre las 6 skills reales del
 proyecto — las 6 muestran "signature verified" (ya estaban firmadas
 desde Fase A). Suite completa: 543 passed, 0 regresiones (535+8).
+
+GitHub Pages activado de verdad vía `gh api -X POST repos/.../pages`
+(`branch=main`, `path=/docs`) — build confirmado, y
+**https://carlosbv99-bit.github.io/kal/** responde HTTP 200 con las 6
+skills reales. Linkeado desde `README.md`.
+
+## Fase C del plan de comunidad: curación de quién puede publicar (2026-07-11)
+
+Cierre de las 3 fases. Hallazgo antes de plantear el plan: el repo no
+tenía protección de rama, ni workflow de CI, ni `CONTRIBUTING.md` — un
+solo colaborador (`carlosbv99-bit`, admin). La "curación" ya existía
+DE HECHO (nadie más tiene permiso de escritura), pero sin ninguna
+regla escrita ni automatizada.
+
+**Decisión confirmada con el usuario, vía `AskUserQuestion`**: la
+protección de rama nueva NO incluye al mantenedor único — sigue
+pusheando directo a `main` igual que en toda la sesión. La regla de
+"PR + CI obligatorio" aplica solo a futuros colaboradores externos
+(que de todas formas solo pueden llegar vía PR, GitHub ya lo impide
+por permisos). **No se agregó revisión de PR obligatoria** (segunda
+persona) — no tiene sentido forzarlo con un solo mantenedor real hoy,
+sería fricción sin beneficio; documentado honestamente en
+`CONTRIBUTING.md` que la revisión de CONTENIDO (no solo integridad)
+es hoy un paso manual, no automatizado.
+
+**Implementado**: `scripts/validate_skills.py` (mismo chequeo que ya
+exige la instalación remota — cada `skill.yaml` parsea, cada
+`skill.sig` verifica — sobre TODAS las skills del repo, no solo las
+de un PR puntual). `.github/workflows/validate-skills.yml` lo corre
+en cada push/PR que toque `skills/**` (solo instala
+`pyyaml`+`cryptography`, no todo `requirements.txt` — torch/diffusers
+no hacen falta para este chequeo). `CONTRIBUTING.md` (nuevo, en
+inglés): proceso para publicar (fork, firmar con tu propia clave, PR),
+explícito sobre qué prueba una firma verificada (integridad) y qué
+NO prueba (que el autor sea confiable, que el código haga lo que dice).
+
+8 tests nuevos en `test_validate_skills.py`, incluido uno que corre el
+chequeo real sobre `skills/` del proyecto (confirma que el propio repo
+ya pasaría el CI que se está agregando). Protección de rama activada
+sobre `main` vía `gh api` (`enforce_admins: false`, status check
+requerido = el workflow nuevo).
+
+Con esto, las 3 fases del plan de comunidad (instalación remota +
+página navegable + curación) quedan completas.
