@@ -549,7 +549,7 @@ def test_audit_skill_enable_change_records_enabled_event(tmp_path, monkeypatch):
     entries = audit_log.tail(1)
     assert entries[0]["event_type"] == "skill_enabled"
     assert entries[0]["outcome"] == "success"
-    assert entries[0]["context"] == {"skill": "greeter", "skill_dir": "greeter_dir"}
+    assert entries[0]["context"] == {"skill": "greeter", "skill_dir": "greeter_dir", "source": "local"}
 
 
 def test_audit_skill_enable_change_records_disabled_event(tmp_path, monkeypatch):
@@ -563,3 +563,15 @@ def test_audit_skill_enable_change_records_disabled_event(tmp_path, monkeypatch)
     entries = audit_log.tail(1)
     assert entries[0]["event_type"] == "skill_disabled"
     assert entries[0]["outcome"] == "success"
+
+
+def test_audit_skill_enable_change_records_market_source(tmp_path, monkeypatch):
+    from audit.audit_log import audit_log
+    from tool_integration.skills import audit_skill_enable_change
+
+    monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
+
+    audit_skill_enable_change("greeter", "greeter_dir", True, source="market")
+
+    entries = audit_log.tail(1)
+    assert entries[0]["context"]["source"] == "market"
