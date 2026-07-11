@@ -48,6 +48,7 @@ EventType = Literal[
     "syscall_policy_violation",
     "skill_enabled",
     "skill_disabled",
+    "artifact_scan_blocked",
 ]
 
 
