@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kal — Skill Market</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 0 1.5rem 4rem;
+    background: #0d1117; color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  header { max-width: 860px; margin: 0 auto; padding: 3rem 0 2rem; }
+  h1 { font-size: 2.2rem; margin: 0 0 0.5rem; color: #e6edf3; }
+  .tagline { font-size: 1.05rem; color: #8b949e; max-width: 620px; line-height: 1.5; }
+  .install-hint { color: #8b949e; }
+  code { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 0.15rem 0.4rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main.grid { max-width: 860px; margin: 0 auto; display: grid; gap: 1rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 1.25rem 1.5rem; }
+  .card h2 { margin: 0 0 0.4rem; font-size: 1.25rem; color: #e6edf3; }
+  .version { color: #8b949e; font-size: 0.85rem; font-weight: normal; }
+  .description { color: #c9d1d9; margin: 0 0 0.75rem; }
+  .badges { margin-bottom: 0.75rem; }
+  .badge { display: inline-block; font-size: 0.78rem; border-radius: 999px; padding: 0.2rem 0.7rem; margin-right: 0.4rem; }
+  .badge.verified { background: #0f3d21; color: #7ee2a8; border: 1px solid #1a5c34; }
+  .badge.unsigned { background: #3d2c0f; color: #e2b77e; border: 1px solid #5c451a; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0 0 0.9rem; font-size: 0.88rem; }
+  dt { color: #8b949e; }
+  dd { margin: 0; }
+  pre.install { margin: 0; }
+  pre.install code { display: block; padding: 0.5rem 0.75rem; overflow-x: auto; }
+  .empty { color: #8b949e; }
+  footer { max-width: 860px; margin: 2.5rem auto 0; color: #8b949e; font-size: 0.85rem; }
+  footer a { color: #7ee2a8; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kal — Skill Market</h1>
+  <p class="tagline">
+    Sandboxed capabilities for the Kal microkernel. Every skill listed
+    here is signature-verified before install — installing from this
+    market never proceeds on an unsigned or altered package.
+  </p>
+  <p class="install-hint">Install any of these with:<br><code>python3 scripts/install_from_market.py &lt;name&gt;</code></p>
+</header>
+<main class="grid">
+<article class="card">
+  <h2>audio_via_kernel <span class="version">v0.1.0</span></h2>
+  <p class="description">Genera un audio (texto a voz) a partir de un texto, pidiéndoselo al Kernel Service Bus (no carga ningún modelo propio).</p>
+  <div class="badges"><span class="badge verified">&check; signature verified</span></div>
+  <dl>
+    <dt>Permissions</dt><dd>(none)</dd>
+    <dt>Requirements</dt><dd>(none, stdlib only)</dd>
+    <dt>Kernel services</dt><dd>audio.synthesize</dd>
+  </dl>
+  <pre class="install"><code>python3 scripts/install_from_market.py audio_via_kernel</code></pre>
+</article>
+<article class="card">
+  <h2>image_inpaint_via_kernel <span class="version">v0.1.0</span></h2>
+  <p class="description">Genera una imagen a partir de un prompt y luego rellena/reemplaza una región de ella con IA (inpainting), encadenando dos acciones del servicio &#x27;image&#x27; del Kernel Service Bus en una sola ejecución.</p>
+  <div class="badges"><span class="badge verified">&check; signature verified</span></div>
+  <dl>
+    <dt>Permissions</dt><dd>(none)</dd>
+    <dt>Requirements</dt><dd>(none, stdlib only)</dd>
+    <dt>Kernel services</dt><dd>image.generate, image.inpaint</dd>
+  </dl>
+  <pre class="install"><code>python3 scripts/install_from_market.py image_inpaint_via_kernel</code></pre>
+</article>
+<article class="card">
+  <h2>image_via_kernel <span class="version">v0.1.0</span></h2>
+  <p class="description">Genera una imagen a partir de un prompt de texto, pidiéndoselo al Kernel Service Bus (no carga ningún modelo propio).</p>
+  <div class="badges"><span class="badge verified">&check; signature verified</span></div>
+  <dl>
+    <dt>Permissions</dt><dd>(none)</dd>
+    <dt>Requirements</dt><dd>(none, stdlib only)</dd>
+    <dt>Kernel services</dt><dd>image.generate</dd>
+  </dl>
+  <pre class="install"><code>python3 scripts/install_from_market.py image_via_kernel</code></pre>
+</article>
+<article class="card">
+  <h2>qr_code <span class="version">v0.1.0</span></h2>
+  <p class="description">Genera una imagen PNG de código QR a partir de un texto (URL, mensaje, etc.).</p>
+  <div class="badges"><span class="badge verified">&check; signature verified</span></div>
+  <dl>
+    <dt>Permissions</dt><dd>(none)</dd>
+    <dt>Requirements</dt><dd>qrcode==7.4.2, pillow==11.0.0</dd>
+    <dt>Kernel services</dt><dd>(none)</dd>
+  </dl>
+  <pre class="install"><code>python3 scripts/install_from_market.py qr_code</code></pre>
+</article>
+<article class="card">
+  <h2>system_info <span class="version">v0.1.0</span></h2>
+  <p class="description">Reporta información básica del sistema donde corre kal (SO, versión de Python, espacio en disco).</p>
+  <div class="badges"><span class="badge verified">&check; signature verified</span></div>
+  <dl>
+    <dt>Permissions</dt><dd>(none)</dd>
+    <dt>Requirements</dt><dd>(none, stdlib only)</dd>
+    <dt>Kernel services</dt><dd>(none)</dd>
+  </dl>
+  <pre class="install"><code>python3 scripts/install_from_market.py system_info</code></pre>
+</article>
+<article class="card">
+  <h2>voice_roundtrip_via_kernel <span class="version">v0.1.0</span></h2>
+  <p class="description">Convierte un texto a voz y lo vuelve a transcribir a texto, encadenando dos servicios del Kernel Service Bus en una sola ejecución (demuestra pasar un artefacto entre llamadas del kernel sin ver nunca una ruta real de host).</p>
+  <div class="badges"><span class="badge verified">&check; signature verified</span></div>
+  <dl>
+    <dt>Permissions</dt><dd>(none)</dd>
+    <dt>Requirements</dt><dd>(none, stdlib only)</dd>
+    <dt>Kernel services</dt><dd>audio.synthesize, stt.transcribe</dd>
+  </dl>
+  <pre class="install"><code>python3 scripts/install_from_market.py voice_roundtrip_via_kernel</code></pre>
+</article>
+</main>
+<footer>
+  <p>6 skill(s) published · <a href="https://github.com/carlosbv99-bit/kal">Source</a> · <a href="https://github.com/carlosbv99-bit/kal/blob/main/README.md">About Kal</a></p>
+</footer>
+</body>
+</html>

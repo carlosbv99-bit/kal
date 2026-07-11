@@ -2222,3 +2222,48 @@ verificado con un smoke test manual completo sobre un market Git local
 sintético (nunca sobre `skills/` real durante la prueba): `--list`,
 rechazo sin firma, instalación exitosa firmada, y rechazo por "ya
 existe" en una segunda instalación.
+
+Además de la Fase A, esta sesión reestructuró la documentación del
+proyecto: `README.md` pasó a ser un pitch corto en inglés (arquitectura
+real, estado verificado contra el código, no aspiracional) para
+atraer desarrolladores externos — este archivo (`docs/HISTORY.md`) es
+donde se preserva el diario de ingeniería completo que antes vivía en
+el README. Ver memoria `technical_docs_readme_vs_history_split` para
+el detalle de esa decisión, incluida una revisión de una propuesta
+inicial del usuario que tenía varios componentes de arquitectura
+inventados (corregidos antes de publicar).
+
+## Fase B del plan de comunidad: página navegable del market (2026-07-11)
+
+Continuación directa de Fase A. Mismo principio de "sin backend
+nuevo": GitHub Pages sirve contenido estático directamente desde
+`/docs` en `main` (donde ya vivía este archivo) — sin rama `gh-pages`
+separada, sin servidor.
+
+`scripts/generate_market_page.py` (nuevo): `render_market_html()`
+recorre `skills/*/skill.yaml` (reusa `parse_manifest()`,
+`tool_integration/skills.py`) y calcula el estado de firma de cada una
+con `verify_skill_signature()` (ya existente) — genera un único
+`docs/index.html` autocontenido (CSS inline, sin JS, sin dependencias
+nuevas, ni Jinja2: alcanza con f-strings de Python). A diferencia de
+`load_skills()`, NO filtra por `enabled` — el catálogo del market
+muestra todo lo publicado en el repo, `enabled` es una decisión de
+instalación local de cada usuario, no una propiedad del catálogo.
+Cada tarjeta muestra nombre/versión/descripción/permisos/requirements/
+kernel services/insignia de firma, más el comando exacto de
+instalación.
+
+**Alcance deliberado**: se genera a mano (`python3
+scripts/generate_market_page.py`), no automáticamente en cada push vía
+GitHub Actions — mismo criterio de "validar barato antes de
+automatizar" de todo el plan de comunidad. Si el catálogo crece y esto
+se vuelve tedioso, un workflow de CI es un paso posterior simple.
+
+8 tests nuevos en `tests/test_generate_market_page.py` (placeholder
+con cero skills; insignia "unsigned" vs "signature verified" — el
+test tuvo que corregirse para no confundir la palabra "unsigned" en la
+propia hoja de estilos CSS con el badge real; escape de caracteres
+HTML en la descripción; manifiesto roto se ignora sin tumbar la página
+entera). Generado `docs/index.html` real sobre las 6 skills reales del
+proyecto — las 6 muestran "signature verified" (ya estaban firmadas
+desde Fase A). Suite completa: 543 passed, 0 regresiones (535+8).
