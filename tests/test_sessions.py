@@ -37,39 +37,15 @@ def test_get_or_create_with_unknown_id_degrades_gracefully_instead_of_failing():
     assert session.turns == []
 
 
-def test_record_turn_appends_to_history():
+def test_record_turn_appends_to_turns():
     manager = SessionManager()
     session = manager.get_or_create(None)
 
     manager.record_turn(session, goal="hazme un logo", final_answer="Listo, generé el logo.")
     manager.record_turn(session, goal="hazle el fondo azul", final_answer="Fondo cambiado a azul.")
 
-    assert session.history_messages() == [
-        {"role": "user", "content": "hazme un logo"},
-        {"role": "assistant", "content": "Listo, generé el logo."},
-        {"role": "user", "content": "hazle el fondo azul"},
-        {"role": "assistant", "content": "Fondo cambiado a azul."},
-    ]
-
-
-def test_context_message_is_none_without_an_active_artifact():
-    manager = SessionManager()
-    session = manager.get_or_create(None)
-
-    assert session.context_message() is None
-
-
-def test_context_message_describes_the_active_artifact():
-    manager = SessionManager()
-    session = manager.get_or_create(None)
-    artifact = Artifact(modality="image", uri="data/artifacts/images/logo.png")
-
-    manager.update_active_artifact(session, artifact)
-
-    message = session.context_message()
-    assert message["role"] == "system"
-    assert "image" in message["content"]
-    assert "data/artifacts/images/logo.png" in message["content"]
+    assert [t.goal for t in session.turns] == ["hazme un logo", "hazle el fondo azul"]
+    assert [t.final_answer for t in session.turns] == ["Listo, generé el logo.", "Fondo cambiado a azul."]
 
 
 def test_update_active_artifact_replaces_the_previous_one():
@@ -89,8 +65,8 @@ def test_different_sessions_are_isolated_from_each_other():
 
     manager.record_turn(session_a, goal="a", final_answer="respuesta a")
 
-    assert session_a.history_messages() != []
-    assert session_b.history_messages() == []
+    assert session_a.turns != []
+    assert session_b.turns == []
 
 
 def test_new_session_has_no_denied_permissions_by_default():

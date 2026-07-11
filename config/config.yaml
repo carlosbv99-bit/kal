@@ -4,6 +4,11 @@ agent:
   name: "kal"
   max_concurrent_tasks: 4
 
+context:
+  # Cuántos turnos previos de la sesión se mandan al LLM en cada
+  # llamada — ver agent_core/context_service.py.
+  max_recent_turns: 8
+
 llm:
   base_url: "http://localhost:11434"
   # qwen3-coder:30b (MoE: 30B totales pero activa pocos por token, por eso
