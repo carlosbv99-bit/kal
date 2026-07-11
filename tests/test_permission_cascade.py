@@ -1,0 +1,103 @@
+"""
+Tests de tool_integration/permission_cascade.py — la cascada de
+permisos de varios niveles (global -> nivel de confianza -> sesión ->
+manifiesto de la herramienta), y de trust_tier_for(), que decide el
+nivel de confianza por el TIPO del wrapper registrado, nunca por
+manifest.created_by (autodeclarado por la propia herramienta/skill).
+
+Separado deliberadamente de tests/test_tool_permissions.py: ese archivo
+prueba tool_integration/permissions.py, que se copia tal cual dentro de
+cada contenedor de skill y por eso debe seguir siendo 100% stdlib —
+este módulo (permission_cascade.py) SÍ depende de utils.config y nunca
+se envía a un contenedor.
+"""
+from __future__ import annotations
+
+from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from tool_integration.permission_cascade import PermissionCascade, trust_tier_for
+from tool_integration.permissions import Permission
+from tool_integration.registry import DynamicSandboxedTool
+from tool_integration.sandboxed_skill import SandboxedSkillTool
+
+
+# --- trust_tier_for() — la señal de confianza viene del TIPO del wrapper,
+# nunca de manifest.created_by (que la propia herramienta/skill autodeclara) ---
+
+
+class _PlainTool(Tool):
+    manifest = ToolManifest(name="plain", description="d", created_by="system")
+
+    def execute(self, **kwargs) -> Artifact:
+        return Artifact(modality="text", uri="", metadata={})
+
+
+def test_static_first_party_tool_is_system_tier():
+    assert trust_tier_for(_PlainTool()) == "system"
+
+
+def test_dynamic_tool_is_agent_tier_regardless_of_created_by():
+    manifest = ToolManifest(name="d", description="d", created_by="system")  # autodeclarado, no debería importar
+    tool = DynamicSandboxedTool(manifest, "print(1)", sandbox=object())
+    assert trust_tier_for(tool) == "agent"
+
+
+def test_skill_tool_is_skill_tier_regardless_of_created_by(tmp_path):
+    manifest = ToolManifest(name="s", description="d", created_by="system")  # ídem: autodeclarado
+    tool = SandboxedSkillTool(
+        manifest=manifest, skill_dir=tmp_path, entry_point="tool:X",
+        image="img", sandbox=object(), artifacts_root=tmp_path / "artifacts",
+    )
+    assert trust_tier_for(tool) == "skill"
+
+
+# --- PermissionCascade ---
+
+
+class _FakeCascadeConfig:
+    def __init__(self, globally_denied=(), trust_tier_caps=None):
+        self.globally_denied = list(globally_denied)
+        self.trust_tier_caps = trust_tier_caps or {
+            "system": [p.value for p in Permission],
+            "agent": ["filesystem_read", "filesystem_write", "network"],
+            "skill": ["filesystem_read"],
+        }
+
+
+def test_cascade_allows_when_every_level_covers_it():
+    cascade = PermissionCascade(_FakeCascadeConfig())
+    missing = cascade.missing_permissions(frozenset({Permission.FILESYSTEM_READ}), "system")
+    assert missing == frozenset()
+
+
+def test_cascade_denies_when_trust_tier_does_not_cover_it():
+    cascade = PermissionCascade(_FakeCascadeConfig())
+    missing = cascade.missing_permissions(frozenset({Permission.NETWORK}), "skill")
+    assert missing == frozenset({Permission.NETWORK})
+
+
+def test_cascade_globally_denied_wins_even_for_system_tier():
+    cascade = PermissionCascade(_FakeCascadeConfig(globally_denied=["network"]))
+    missing = cascade.missing_permissions(frozenset({Permission.NETWORK}), "system")
+    assert missing == frozenset({Permission.NETWORK})
+
+
+def test_cascade_session_denied_wins_even_when_tier_allows_it():
+    cascade = PermissionCascade(_FakeCascadeConfig())
+    missing = cascade.missing_permissions(
+        frozenset({Permission.NETWORK}), "system", session_denied=frozenset({Permission.NETWORK}),
+    )
+    assert missing == frozenset({Permission.NETWORK})
+
+
+def test_cascade_unknown_trust_tier_denies_everything():
+    cascade = PermissionCascade(_FakeCascadeConfig())
+    missing = cascade.missing_permissions(frozenset({Permission.FILESYSTEM_READ}), "tier_que_no_existe")
+    assert missing == frozenset({Permission.FILESYSTEM_READ})
+
+
+def test_cascade_only_reports_what_was_actually_requested():
+    """Un tier restrictivo no debería 'inventar' permisos que la
+    herramienta ni pidió."""
+    cascade = PermissionCascade(_FakeCascadeConfig())
+    missing = cascade.missing_permissions(frozenset({Permission.FILESYSTEM_READ}), "skill")
+    assert missing == frozenset()  # skill SÍ cubre filesystem_read

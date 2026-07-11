@@ -1,0 +1,15 @@
+name: system_info
+description: "Reporta información básica del sistema donde corre kal (SO, versión de Python, espacio en disco)."
+version: "0.1.0"
+entry_point: "tool:SystemInfoTool"
+# Skill de ejemplo/plantilla: enabled=true a propósito, sin superficie de
+# ataque real (solo lectura de platform/shutil.disk_usage, sin filesystem
+# write, sin red, sin credenciales). Cualquier skill nueva que agregues
+# debería arrancar en enabled: false (deny-by-default) hasta que la
+# revises y decidas habilitarla a mano.
+enabled: true
+permissions: []
+# Sin argumentos: system_info no necesita nada del llamador.
+parameters_schema:
+  type: object
+  properties: {}

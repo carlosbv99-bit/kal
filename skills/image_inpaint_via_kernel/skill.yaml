@@ -1,0 +1,34 @@
+name: image_inpaint_via_kernel
+description: "Genera una imagen a partir de un prompt y luego rellena/reemplaza una región de ella con IA (inpainting), encadenando dos acciones del servicio 'image' del Kernel Service Bus en una sola ejecución."
+version: "0.1.0"
+entry_point: "tool:ImageInpaintViaKernelTool"
+# Skill de REFERENCIA: igual que voice_roundtrip_via_kernel, pero para
+# el dominio "image" — ejercita tanto image.generate (ya validado por
+# skills/image_via_kernel/) como image.inpaint (nuevo), encadenando el
+# artifact:// de la primera llamada como entrada de la segunda. Sin
+# ninguna dependencia de ML propia (ni torch ni diffusers).
+enabled: true
+permissions: []
+requirements: []
+kernel_services:
+  - "image.generate"
+  - "image.inpaint"
+parameters_schema:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: "Descripción de la imagen base a generar"
+    inpaint_prompt:
+      type: string
+      description: "Qué debe aparecer en la región reemplazada"
+    box:
+      type: array
+      description: "[izquierda, arriba, derecha, abajo] en píxeles, región a reemplazar. Default: un rectángulo centrado razonable para una imagen de 1024x1024."
+      items:
+        type: integer
+      minItems: 4
+      maxItems: 4
+  required:
+    - prompt
+    - inpaint_prompt
