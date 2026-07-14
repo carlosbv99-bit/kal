@@ -17,11 +17,30 @@ proyecto + correr pytest en subproceso) a propósito: usar un
 target_path/proposal_id/nombre de herramienta inexistente alcanza para
 confirmar que la request llegó a la lógica real (un error 400/404 de
 negocio, nunca 401) sin pagar el costo de una corrida real.
+
+`/integrations/vscode/install` no tiene un identificador inexistente
+que la haga fallar barato (no depende de ningún id) — en vez de
+correrla de verdad (instalaría la extensión posta), el módulo
+`agent_core.vscode_integration.install_extension` se mockea acá mismo
+para el test de "token correcto llega a la lógica real".
+
+`/settings/llm` tampoco depende de un id — sin mockear
+`update_llm_settings`, escribiría de verdad en el config.yaml/.env
+reales del proyecto solo para probar el gate, así que se mockea igual
+que install_extension. `/settings/llm/ollama/pull` igual: sin mockear
+`pull_ollama_model`, intentaría descargar un modelo real de varios GB.
+`/settings/llm/activate-profile` NO necesita mockearse — activar un
+perfil "groq" inexistente ya falla barato (400 de negocio, nunca
+escribe nada), mismo criterio que target_path/proposal_id inexistente
+en self-modification. `/filesystem-access/{id}/approve` y `/deny`
+tampoco necesitan mockearse, mismo motivo: un id inexistente falla
+barato.
 """
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from agent_core import orchestrator
 from agent_core.orchestrator import _ADMIN_TOKEN, app
 
 client = TestClient(app)
@@ -36,6 +55,12 @@ _GATED_REQUESTS = [
     ),
     ("POST", "/self-modification/apply", {"proposal_id": "no-existe", "approved_by": "alguien"}),
     ("POST", "/diagnostics/invariante_inexistente/self-repair", {}),
+    ("POST", "/integrations/vscode/install", {}),
+    ("POST", "/settings/llm", {"provider": "ollama"}),
+    ("POST", "/settings/llm/ollama/pull", {"model": "qwen2.5-coder:14b"}),
+    ("POST", "/settings/llm/activate-profile", {"name": "groq"}),
+    ("POST", "/filesystem-access/no-existe/approve", {"level": "once"}),
+    ("POST", "/filesystem-access/no-existe/deny", {}),
 ]
 
 
@@ -51,7 +76,15 @@ def test_gated_endpoints_reject_wrong_token():
         assert response.status_code == 401, f"{method} {path} debería rechazar con token incorrecto"
 
 
-def test_gated_endpoints_accept_correct_token_and_reach_real_logic():
+def test_gated_endpoints_accept_correct_token_and_reach_real_logic(monkeypatch):
+    # Sin esto, /integrations/vscode/install correría de verdad (compilaría
+    # y trataría de instalar la extensión) solo para confirmar el gate.
+    monkeypatch.setattr(orchestrator, "install_extension", lambda: "ok (mockeado)")
+    # Sin esto, /settings/llm escribiría de verdad en config.yaml/.env
+    # reales del proyecto solo para confirmar el gate.
+    monkeypatch.setattr(orchestrator, "update_llm_settings", lambda **kwargs: None)
+    monkeypatch.setattr(orchestrator, "pull_ollama_model", lambda model: None)
+
     headers = {"X-Kal-Admin-Token": _ADMIN_TOKEN}
     for method, path, body in _GATED_REQUESTS:
         response = client.request(method, path, json=body, headers=headers)
@@ -62,3 +95,56 @@ def test_ungated_endpoint_still_works_without_any_token():
     """/health nunca debería exigir el token — no es una acción sensible."""
     response = client.get("/health")
     assert response.status_code == 200
+
+
+def test_filesystem_access_report_outcome_never_requires_a_token():
+    """
+    Deliberadamente SIN token: el Kernel ya auto-permitió esta acción
+    por política (auto_allow) antes de que la extensión escribiera algo
+    de verdad — este endpoint solo deja constancia auditada de qué pasó,
+    nunca decide ni ejecuta nada.
+    """
+    response = client.post(
+        "/filesystem-access/algun-id/report-outcome",
+        json={"outcome": "written", "files_written": ["index.html"]},
+    )
+    assert response.status_code == 200
+
+
+# --- GET /admin-token: auto-provisión SOLO para loopback ---
+#
+# FRICCIÓN REAL ENCONTRADA EN USO: pedirle a un usuario no-programador
+# que copie el token de una terminal era impracticable. Si el pedido
+# viene de la MISMA máquina (loopback), se lo entrega solo — quien ya
+# está en esa máquina podría leer data/keys/admin_token del disco
+# igual, así que esto no le da ninguna capacidad nueva a un atacante
+# remoto. TestClient por default simula un cliente "testclient", no
+# loopback — hay que pasar `client=("127.0.0.1", puerto)` a propósito
+# para simular el caso real que se quiere permitir.
+
+
+def test_admin_token_endpoint_rejects_non_loopback_by_default():
+    # TestClient sin `client=` simula un peer que NO es loopback.
+    response = client.get("/admin-token")
+    assert response.status_code == 403
+
+
+def test_admin_token_endpoint_serves_the_real_token_from_loopback_ipv4():
+    loopback_client = TestClient(app, client=("127.0.0.1", 54321))
+    response = loopback_client.get("/admin-token")
+    assert response.status_code == 200
+    assert response.json() == {"token": _ADMIN_TOKEN}
+
+
+def test_admin_token_endpoint_serves_the_real_token_from_loopback_ipv6():
+    loopback_client = TestClient(app, client=("::1", 54321))
+    response = loopback_client.get("/admin-token")
+    assert response.status_code == 200
+    assert response.json() == {"token": _ADMIN_TOKEN}
+
+
+def test_admin_token_endpoint_rejects_a_real_lan_address():
+    """El caso real que el token protege: alguien en la LAN, no en la propia máquina."""
+    lan_client = TestClient(app, client=("192.168.1.50", 54321))
+    response = lan_client.get("/admin-token")
+    assert response.status_code == 403

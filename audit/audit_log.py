@@ -49,6 +49,12 @@ EventType = Literal[
     "skill_enabled",
     "skill_disabled",
     "artifact_scan_blocked",
+    "vscode_extension_installed",
+    "kernel_bus_line_too_long",
+    "filesystem_access_requested",
+    "filesystem_access_granted",
+    "filesystem_access_denied",
+    "filesystem_access_escalated",
 ]
 
 

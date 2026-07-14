@@ -10,7 +10,24 @@ context:
   max_recent_turns: 8
 
 llm:
-  base_url: "http://localhost:11434"
+  # "ollama" (default): 100% local, sin red. "openai_compatible": usa
+  # agent_core/llm/openai_compatible_client.py contra CUALQUIER API con
+  # formato OpenAI — requiere LLM_API_KEY en .env (ver .env.example).
+  # Pensado para usuarios sin hardware para un modelo local grande (kal
+  # se distribuye a hardware muy distinto, no es un proyecto de uso
+  # personal). Ejemplos reales (base_url tiene que ser la URL COMPLETA
+  # que pide cada proveedor, no se le agrega nada por detrás):
+  #   Qwen (DashScope, modo compatible):
+  #     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #     default_model: "qwen-plus"
+  #   Grok / xAI:
+  #     base_url: "https://api.x.ai/v1"
+  #     default_model: "grok-3"
+  #   OpenAI:
+  #     base_url: "https://api.openai.com/v1"
+  #     default_model: "gpt-4o-mini"
+  provider: "openai_compatible"
+  base_url: "https://api.groq.com/openai/v1"
   # qwen3-coder:30b (MoE: 30B totales pero activa pocos por token, por eso
   # no es más lento que un modelo denso más chico en CPU). Reemplazó a
   # qwen2.5-coder:14b tras comparación empírica en vivo (misma pregunta,
@@ -24,7 +41,7 @@ llm:
   # Sigue las instrucciones del SYSTEM_PROMPT sobre cuándo NO usar
   # herramientas notablemente mejor que qwen2.5-coder:14b, sin sacrificar
   # el uso correcto de herramientas cuando sí hacen falta.
-  default_model: "qwen3-coder:30b"
+  default_model: "meta-llama/llama-4-scout-17b-16e-instruct"
   timeout_seconds: 120
   max_agent_steps: 8                    # tope de iteraciones del loop antes de forzar una respuesta final
   # Descomponer el objetivo en subtareas antes de ejecutar (ver
@@ -147,6 +164,18 @@ multimodal:
     artifact_dir: "data/artifacts/uploads"
     max_size_mb: 20
 
+# BUG REAL ENCONTRADO EN USO: en una máquina sin GPU, los pipelines de
+# imagen/audio/STT de arriba se quedan cargados en RAM para siempre
+# tras el primer uso, compitiendo con Ollama por la misma RAM del
+# sistema (Ollama quedaba con "Connection refused" justo después de
+# generar una imagen). Ver kernel_bus/resource_broker.py.
+resource_broker:
+  # Libera un pipeline si nadie lo usó en este tiempo.
+  idle_timeout_seconds: 300
+  # Si la RAM disponible del sistema cae debajo de esto, libera TODOS
+  # los pipelines cargados de inmediato, sin esperar el timeout.
+  min_available_ram_mb: 2048
+
 sandbox:
   network_mode: none
   memory_limit_mb: 512
@@ -223,6 +252,24 @@ permissions:
     # solo, justo el punto que motivó esta cascada.
     skill:
       - filesystem_read
+
+# Permission Manager de filesystem (ver
+# tool_integration/filesystem_access_manager.py) — ORTOGONAL a
+# `permissions:` de arriba: aquella decide si una herramienta puede
+# pedir tocar el filesystem en absoluto; esto decide si UNA ACCIÓN
+# CONCRETA (create/read/modify/delete/rename) en UN ALCANCE CONCRETO
+# (workspace/home/external) se auto-permite o necesita un humano.
+# Fail-safe: cualquier combinación no listada en auto_allow requiere
+# aprobación explícita, nunca al revés.
+filesystem_access:
+  auto_allow:
+    # Crear/modificar dentro del workspace abierto (VS Code) — el único
+    # caso que ejercita hoy el agente IDE. Borrar/renombrar ahí, y
+    # cualquier acción fuera del workspace (home/external), siempre
+    # requieren aprobación humana.
+    workspace:
+      - create
+      - modify
 
 self_modification:
   # Opt-in explícito. Hasta 2026-07-11 este flag existía pero
