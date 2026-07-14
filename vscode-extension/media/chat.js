@@ -38,7 +38,7 @@
 
   sendBtn.addEventListener("click", send);
   inputEl.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+    if (ev.key === "Enter" && !ev.shiftKey) {
       ev.preventDefault();
       send();
     }

@@ -107,6 +107,80 @@ def test_editor_context_code_block_is_closed():
     assert bundle.session_context["content"].rstrip().endswith("```")
 
 
+def test_vscode_client_adds_the_code_only_instruction():
+    """
+    Distinción real entre facetas (2026-07-11): la interfaz web sigue
+    generando imagen/audio/video por default; la extensión de VS Code
+    (client="vscode") necesita la instrucción explícita de responder
+    con código, no con imágenes, para pedidos de "página web"/app/etc.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+
+    assert bundle.session_context["role"] == "system"
+    assert "agente de programación dentro de VS Code" in bundle.session_context["content"]
+
+
+def test_vscode_client_instruction_tells_the_model_to_use_propose_project_files():
+    """
+    BUG REAL ENCONTRADO EN USO: con propose_project_files ya disponible
+    en el toolset, el modelo seguía mostrando el código en texto y
+    pidiéndole al usuario que lo copie a mano — tener la herramienta
+    ofrecida no bastó, hizo falta instruirlo explícitamente a preferirla
+    sobre responder solo en texto.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+
+    assert "propose_project_files" in bundle.session_context["content"]
+
+
+def test_vscode_client_instruction_tells_the_model_to_use_a_subfolder_per_distinct_project():
+    """
+    BUG REAL ENCONTRADO EN USO: dos pedidos de proyectos distintos en la
+    misma conversación (una página para una barbería, después otra para
+    una panadería) proponían archivos sueltos en la raíz del proyecto
+    (index.html/estilos.css/script.js para ambos) — se mezclaban entre
+    sí, sin ninguna separación.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+
+    assert "subcarpeta" in bundle.session_context["content"]
+
+
+def test_web_client_never_gets_the_vscode_instruction():
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client=None)
+
+    assert bundle.session_context is None  # sin artefacto/editor context, nada que agregar
+
+
+def test_vscode_instruction_is_fused_with_artifact_and_editor_context_in_one_message():
+    service = ContextService()
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+    manager.update_active_artifact(session, Artifact(modality="image", uri="logo.png"))
+    editor_context = EditorContextSignals(
+        relative_path="src/foo.py", language_id="python", text="x = 1", is_selection=False,
+    )
+
+    bundle = service.build(session, editor_context, client="vscode")
+
+    assert bundle.session_context["role"] == "system"
+    assert "agente de programación dentro de VS Code" in bundle.session_context["content"]
+    assert "logo.png" in bundle.session_context["content"]
+    assert "src/foo.py" in bundle.session_context["content"]
+
+
 def test_artifact_and_editor_context_are_fused_into_a_single_system_message():
     """
     BUG REAL ya documentado en agent_core/llm/agent_loop.py::run(): un

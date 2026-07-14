@@ -113,6 +113,62 @@ def test_single_tool_call_then_final_answer():
     assert fake_llm.calls[1]["messages"][-1]["role"] == "tool"
 
 
+def test_reconstructed_tool_call_arguments_are_a_json_string_not_a_raw_object():
+    """
+    BUG REAL ENCONTRADO EN USO: Groq (a diferencia de Ollama, tolerante)
+    valida ESTRICTO el formato OpenAI — tool_calls[].function.arguments
+    tiene que ser un string con JSON adentro, nunca el objeto ya
+    parseado. Sin serializarlo, cualquier tarea de más de un paso
+    contra un proveedor en la nube rompía con 400 en el segundo turno
+    ("arguments: value must be a string"), confirmado en vivo contra el
+    agente IDE de VS Code.
+    """
+    import json
+
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "print(4)"})]),
+        ChatResponse(content="El resultado es 4."),
+    ]
+    loop, fake_llm = _loop(responses, task_executor=FakeTaskExecutor())
+
+    loop.run("Calcula 2+2 con código")
+
+    assistant_message = fake_llm.calls[1]["messages"][-2]
+    assert assistant_message["role"] == "assistant"
+    sent_arguments = assistant_message["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(sent_arguments, str)
+    assert json.loads(sent_arguments) == {"code": "print(4)"}
+
+
+def test_a_missing_tool_call_id_is_generated_and_correlated_with_the_tool_message():
+    """
+    BUG REAL ENCONTRADO EN USO: Groq exige 'id' en cada tool_call del
+    mensaje assistant Y el 'tool_call_id' correspondiente en el mensaje
+    role="tool" que le responde — sin esto rechazaba con 400
+    ("property 'id' is missing") cualquier turno posterior a una
+    llamada a herramienta. Ollama no siempre manda un id (ToolCall.id
+    queda None) — agent_loop.py debe generar uno y usarlo consistente
+    en ambos mensajes.
+    """
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "print(4)"})]),
+        ChatResponse(content="El resultado es 4."),
+    ]
+    loop, fake_llm = _loop(responses, task_executor=FakeTaskExecutor())
+
+    loop.run("Calcula 2+2 con código")
+
+    sent_messages = fake_llm.calls[1]["messages"]
+    assistant_message = sent_messages[-2]
+    tool_message = sent_messages[-1]
+
+    generated_id = assistant_message["tool_calls"][0]["id"]
+    assert generated_id  # no vacío, no None
+    assert assistant_message["tool_calls"][0]["type"] == "function"
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == generated_id
+
+
 def test_multiple_sequential_tool_calls():
     responses = [
         ChatResponse(content="", tool_calls=[ToolCall(name="remember", arguments={"content": "dato importante"})]),
@@ -431,6 +487,196 @@ def test_custom_tools_override_defaults():
     schemas_sent = fake_llm.calls[0]["tools"]
     tool_names_sent = [s["function"]["name"] for s in schemas_sent]
     assert tool_names_sent == ["solo_esta"]  # no se filtraron los tools default
+
+
+# --- Restricción estructural de herramientas por cliente (client="vscode") ---
+#
+# BUG REAL ENCONTRADO EN USO, dos veces con reglas de prompt distintas: pedido
+# "creá la página web para una panadería" desde la extensión de VS Code generó
+# fotos de panadería (herramienta de imágenes) en vez de código — una regla de
+# SYSTEM_PROMPT pidiéndole explícitamente que no llamara a imagen/audio/video
+# para este tipo de pedido NO evitó que lo hiciera. Fix real: las herramientas
+# multimedia ni siquiera se incluyen en el toolset que ve el modelo cuando
+# client="vscode" (mismo criterio que max_tool_repeats: estructural, no una
+# petición que el modelo puede ignorar).
+
+
+def test_vscode_client_excludes_multimedia_tools_from_the_registry_build():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)  # tools=None: usa el registry real
+
+    loop.run("hola", client="vscode")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert tool_names_sent.isdisjoint(
+        {"image_generation", "audio_generation", "video_composition", "image_editing",
+         "image_composition", "speech_to_text", "image_via_kernel", "audio_via_kernel",
+         "voice_roundtrip_via_kernel", "image_inpaint_via_kernel"}
+    )
+    assert "run_code" in tool_names_sent  # las herramientas de código siguen disponibles
+
+
+def test_web_client_still_gets_multimedia_tools():
+    """Sin client (o client="web"), la interfaz web sigue generando
+    imagen/audio/video como siempre — esta restricción es solo para la
+    faceta de agente IDE."""
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "image_generation" in tool_names_sent
+
+
+def test_vscode_client_rejects_a_hallucinated_multimedia_tool_call_as_unknown():
+    """Defensa en profundidad: si el modelo de todos modos "alucina" un
+    tool_call para una herramienta excluida (no debería, ya que ni
+    siquiera está en la lista que se le mandó), se rechaza como
+    herramienta desconocida — nunca se ejecuta de verdad."""
+    loop, fake_llm = _loop(
+        [
+            ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "x"})]),
+            ChatResponse(content="listo"),
+        ],
+        tools=None,
+    )
+
+    result = loop.run("creá la página web para una panadería", client="vscode")
+
+    assert "no existe" in result.steps[0].observation.lower() or "desconocid" in result.steps[0].observation.lower()
+
+
+# --- propose_project_files: exclusión inversa (solo VS Code) ---
+#
+# El backend nunca escribe el archivo real (no conoce el workspace de
+# VS Code) — ofrecerle esta herramienta al cliente web solo generaría
+# una propuesta que nadie puede aplicar nunca.
+
+
+def test_web_client_never_gets_the_propose_project_files_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "propose_project_files" not in tool_names_sent
+
+
+def test_vscode_client_gets_the_propose_project_files_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola", client="vscode")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "propose_project_files" in tool_names_sent
+
+
+def test_a_raw_json_array_of_files_is_detected_as_a_propose_project_files_call():
+    """
+    BUG REAL ENCONTRADO EN USO: el modelo a veces "imitaba" la llamada a
+    propose_project_files como un array JSON crudo de archivos en el
+    texto, sin envolverlo en {"name", "arguments"} como el resto de los
+    tool calls imitados — se mostraba tal cual al usuario (con los
+    saltos de línea escapados como "\\n" literal, pareciendo "todo el
+    código en una sola línea") en vez de proponerse de verdad.
+    """
+    responses = [
+        ChatResponse(
+            content='Te propongo:\n```json\n[{"path": "index.html", "content": "<html>\\n</html>"}]\n```'
+        ),
+        ChatResponse(content="Listo, creé el archivo."),
+    ]
+    loop, fake_llm = _loop(responses, tools=None)
+
+    result = loop.run("creá una página web", client="vscode")
+
+    assert result.status == "success"
+    assert len(result.steps) == 1
+    assert result.steps[0].tool_name == "propose_project_files"
+    assert result.steps[0].arguments == {"files": [{"path": "index.html", "content": "<html>\n</html>"}]}
+
+
+def test_a_raw_json_array_with_a_literal_unescaped_newline_is_still_detected():
+    """
+    BUG REAL ENCONTRADO EN USO proponiendo un proyecto Android real: el
+    modelo escribió código Java multilínea con saltos de línea LITERALES
+    dentro del valor de "content" en vez de escaparlos como \\n —
+    técnicamente JSON inválido, perdía la propuesta entera antes de este
+    fix (ver json_extraction.py::extract_json_array, strict=False).
+    """
+    raw_content_with_real_newline = '[{"path": "a.java", "content": "linea1\nlinea2"}]'
+    responses = [
+        ChatResponse(content=f"Te propongo:\n```json\n{raw_content_with_real_newline}\n```"),
+        ChatResponse(content="Listo."),
+    ]
+    loop, _ = _loop(responses, tools=None)
+
+    result = loop.run("creá un proyecto android", client="vscode")
+
+    assert result.status == "success"
+    assert result.steps[0].tool_name == "propose_project_files"
+    assert result.steps[0].arguments == {"files": [{"path": "a.java", "content": "linea1\nlinea2"}]}
+
+
+def test_a_raw_json_array_is_ignored_when_propose_project_files_is_not_offered():
+    """Sin client="vscode", propose_project_files ni siquiera está en el
+    toolset — un array JSON en el texto no debe dispararse como tool call."""
+    responses = [ChatResponse(content='[{"path": "index.html", "content": "<html></html>"}]')]
+    loop, _ = _loop(responses, tools=None)
+
+    result = loop.run("creá una página web")  # sin client="vscode"
+
+    assert result.status == "success"
+    assert result.steps == []
+
+
+# --- _artifact_to_observation(): rama "project_files" ---
+
+
+def test_project_files_artifact_summarizes_without_leaking_full_content():
+    """
+    El modelo no necesita releer el contenido completo de los archivos
+    propuestos (eso infla el historial sin necesidad) — la vista previa
+    real la ve el USUARIO del lado de la extensión de VS Code.
+    """
+
+    class FakeProposeTool:
+        class manifest:
+            description = "propone archivos"
+            parameters_schema = {"type": "object", "properties": {}}
+            permissions = frozenset()
+
+        def execute(self, **kwargs):
+            return Artifact(
+                modality="project_files",
+                uri="",
+                metadata={"status": "proposed", "request_id": "abc", "files": [{"path": "index.html", "content": "<html>mucho contenido</html>"}]},
+            )
+
+    agent_tool = _agent_tool_from_tool("propose_project_files", FakeProposeTool())
+
+    observation = agent_tool.handler()
+
+    assert "index.html" in observation
+    assert "mucho contenido" not in observation
+    assert "1 archivo" in observation
+
+
+def test_project_files_artifact_requiring_approval_is_a_clear_error():
+    class FakeProposeTool:
+        class manifest:
+            description = "propone archivos"
+            parameters_schema = {"type": "object", "properties": {}}
+            permissions = frozenset()
+
+        def execute(self, **kwargs):
+            return Artifact(modality="project_files", uri="", metadata={"status": "requires_approval", "files": []})
+
+    agent_tool = _agent_tool_from_tool("propose_project_files", FakeProposeTool())
+
+    observation = agent_tool.handler()
+
+    assert "ERROR" in observation
+    assert "aprobación" in observation
 
 
 # --- Fallback: modelos que no completan tool_calls nativo (bug real de producción) ---

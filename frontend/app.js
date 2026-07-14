@@ -4,19 +4,41 @@
 const API = "";
 
 // Token administrativo (self-modification, aprobación/rollback de
-// herramientas, autorreparación) — ver utils/admin_token.py y
-// agent_core/orchestrator.py. Se toma una vez de la URL
-// (?admin_token=... impresa en el log del backend al arrancar) y se
-// guarda en localStorage para no tener que repetirlo en cada visita.
+// herramientas, configuración del modelo, etc.) — ver
+// utils/admin_token.py y agent_core/orchestrator.py.
 const ADMIN_TOKEN_STORAGE_KEY = "kal_admin_token";
-(function persistAdminTokenFromUrl() {
+
+function persistAdminTokenFromUrl() {
   const fromUrl = new URLSearchParams(window.location.search).get("admin_token");
   if (fromUrl) localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, fromUrl);
-})();
+}
+
+// FRICCIÓN REAL ENCONTRADA EN USO: pedirle a un usuario no-programador
+// que copie el token de una terminal era impracticable. Si el
+// navegador corre en la MISMA máquina que kal (el caso normal), el
+// backend lo entrega solo (GET /admin-token, responde SOLO a loopback
+// — ver orchestrator.py) y listo, nadie copia nada a mano. Si ya hay
+// un token guardado (de la URL de arriba, o de una visita anterior),
+// no se pisa. Si kal corre en otra máquina de la LAN, esto no
+// devuelve nada (403) y sigue haciendo falta el prompt() de api() más
+// abajo — que es exactamente el caso que el token protege.
+async function ensureAdminToken() {
+  persistAdminTokenFromUrl();
+  if (localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)) return;
+  try {
+    const res = await fetch(API + "/admin-token");
+    if (res.ok) {
+      const data = await res.json();
+      localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, data.token);
+    }
+  } catch (e) {
+    // Sin red/backend todavía — no es fatal, el prompt() de api() sigue de respaldo.
+  }
+}
 
 // ---------- Utilidades ----------
 
-async function api(path, options = {}) {
+async function api(path, options = {}, _isRetry = false) {
   const adminToken = localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY);
   const res = await fetch(API + path, {
     headers: {
@@ -25,6 +47,21 @@ async function api(path, options = {}) {
     },
     ...options,
   });
+  if (res.status === 401 && !_isRetry) {
+    // Sin esto, el usuario tiene que ir a buscar la URL con
+    // ?admin_token=... a mano — fricción real, encontrada en uso
+    // repetidas veces. Le pedimos el token acá mismo, lo guardamos, y
+    // reintentamos la MISMA acción una sola vez (nunca en loop).
+    const pasted = window.prompt(
+      "Esta acción necesita el token administrativo de kal.\n" +
+      "Se imprime en la terminal donde corre ./scripts/run_kal.sh (buscá 'Token administrativo').\n" +
+      "Pegalo acá:"
+    );
+    if (pasted) {
+      localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, pasted.trim());
+      return api(path, options, true);
+    }
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
@@ -74,25 +111,111 @@ function setLamp(key, state) {
 
 // ---------- Modelos ----------
 
+// El selector junta TODAS las fuentes disponibles a la vez — Ollama
+// local + cada perfil en la nube guardado que responda de verdad
+// ahora mismo (nunca uno roto, ver GET /settings/llm/sources) — no
+// solo la del proveedor ACTIVO. Elegir cualquier modelo activa su
+// fuente automáticamente (ver el listener de "change" más abajo).
 async function loadModels() {
   const select = document.getElementById("model-select");
+  select.innerHTML = "";
+
+  let defaultModel = null;
+  let currentProvider = null;
   try {
-    const data = await api("/models");
-    select.innerHTML = "";
-    for (const name of data.models) {
+    const settings = await api("/settings/llm");
+    defaultModel = settings.default_model;
+    currentProvider = settings.provider;
+  } catch (e) { /* no crítico para armar la lista */ }
+
+  let sourcesData;
+  try {
+    sourcesData = await api("/settings/llm/sources");
+  } catch (e) {
+    select.appendChild(el("option", null, "No se pudo cargar ningún modelo — ver pestaña Modelo"));
+    return;
+  }
+
+  const sources = sourcesData.sources || [];
+  if (sources.length === 0) {
+    select.appendChild(el("option", null, "Sin modelos disponibles — ver pestaña Modelo"));
+    return;
+  }
+
+  for (const source of sources) {
+    const group = document.createElement("optgroup");
+    group.label = source.label;
+    for (const name of source.models) {
       const opt = el("option", null, name);
       opt.value = name;
-      if (name === data.default) opt.selected = true;
-      select.appendChild(opt);
+      opt.dataset.source = source.name;
+      group.appendChild(opt);
     }
-    if (data.models.length === 0) {
-      select.appendChild(el("option", null, "sin modelos"));
+    select.appendChild(group);
+  }
+
+  // Buscar el modelo por defecto actual en los modelos disponibles
+  // Si no está disponible, seleccionar el primer modelo del proveedor actual
+  let modelToSelect = defaultModel;
+  if (defaultModel) {
+    const match = Array.from(select.options).find((opt) => opt.value === defaultModel);
+    if (!match) {
+      // El modelo por defecto no está disponible, buscar uno compatible
+      if (currentProvider === "ollama") {
+        // Buscar en el grupo de Ollama
+        const ollamaGroup = Array.from(select.children).find(child => child.label === "Local (Ollama)");
+        if (ollamaGroup && ollamaGroup.children.length > 0) {
+          modelToSelect = ollamaGroup.children[0].value;
+        }
+      } else {
+        // Buscar en el grupo del proveedor en la nube actual
+        const currentProfileGroup = Array.from(select.children).find(child => 
+          child.label !== "Local (Ollama)" && child.children.length > 0
+        );
+        if (currentProfileGroup) {
+          modelToSelect = currentProfileGroup.children[0].value;
+        }
+      }
     }
-  } catch (e) {
-    select.innerHTML = "";
-    select.appendChild(el("option", null, "ollama no disponible"));
+  } else if (sources.length > 0) {
+    // Si no hay modelo por defecto, tomar el primer modelo disponible
+    if (sources[0].models && sources[0].models.length > 0) {
+      modelToSelect = sources[0].models[0];
+    }
+  }
+
+  // Seleccionar el modelo adecuado
+  if (modelToSelect) {
+    const optionToSelect = Array.from(select.options).find((opt) => opt.value === modelToSelect);
+    if (optionToSelect) {
+      optionToSelect.selected = true;
+    }
   }
 }
+
+document.getElementById("model-select").addEventListener("change", async (ev) => {
+  const source = ev.target.selectedOptions[0]?.dataset.source;
+  const modelName = ev.target.value;
+  if (!source) return;
+  
+  if (source === "ollama") {
+    // Para Ollama, verificar que el modelo no sea un modelo de nube
+    if (modelName.endsWith(":cloud")) {
+      alert(`El modelo ${modelName} requiere una sesión de Ollama en la nube. Inicia sesión con 'ollama login' primero.`);
+      // Restaurar el modelo anterior
+      await loadModels();
+      return;
+    }
+    
+    await api("/settings/llm", { method: "POST", body: JSON.stringify({ provider: "ollama", default_model: modelName }) });
+  } else {
+    // Para proveedores en la nube, activamos el perfil y luego actualizamos el modelo
+    await api("/settings/llm/activate-profile", { method: "POST", body: JSON.stringify({ name: source }) });
+    await api("/settings/llm", { method: "POST", body: JSON.stringify({ default_model: modelName }) });
+  }
+  
+  await refreshStatus();
+});
 
 // ---------- Chat ----------
 
@@ -322,6 +445,8 @@ function refreshDashTab(tab) {
   if (tab === "tools") return refreshTools();
   if (tab === "selfmod") return refreshSelfMod();
   if (tab === "audit") return refreshAudit();
+  if (tab === "integrations") return refreshIntegrations();
+  if (tab === "modelo") return refreshModelSettings();
 }
 
 // ---------- Tareas ----------
@@ -528,9 +653,243 @@ async function refreshAudit() {
   }
 }
 
+// ---------- Integraciones de IDE ----------
+// v1 escopado a VS Code únicamente (ver agent_core/vscode_integration.py):
+// no instala VS Code mismo, solo la extensión de kal sobre un VS Code que
+// ya asumimos instalado.
+
+async function refreshIntegrations() {
+  const list = document.getElementById("integrations-list");
+  list.innerHTML = "";
+
+  let status;
+  try {
+    status = await api("/integrations/vscode/status");
+  } catch (e) {
+    list.appendChild(el("div", "dash-empty", "No se pudo consultar el estado de la integración."));
+    return;
+  }
+
+  const card = el("div", "dash-item");
+  const title = el("div", "dash-item-title");
+  title.appendChild(el("span", "integration-card-name", "VS Code"));
+  title.appendChild(
+    status.installed
+      ? el("span", "badge badge-success", "instalado")
+      : el("span", "badge badge-warn", "no instalado")
+  );
+  card.appendChild(title);
+
+  if (!status.code_cli_available) {
+    card.appendChild(el("div", "dash-item-meta", "No se encontró el comando 'code' en el PATH — instalalo desde VS Code: Ctrl+Shift+P → \"Shell Command: Install code command in PATH\"."));
+  }
+
+  const installBtn = el("button", "mini-btn integration-install-btn", status.installed ? "Reinstalar" : "Instalar");
+  installBtn.disabled = !status.code_cli_available;
+  installBtn.addEventListener("click", async () => {
+    installBtn.disabled = true;
+    installBtn.textContent = "Instalando…";
+    try {
+      await api("/integrations/vscode/install", { method: "POST" });
+      refreshIntegrations();
+    } catch (e) {
+      alert("No se pudo instalar la extensión: " + e.message);
+      installBtn.disabled = false;
+      installBtn.textContent = status.installed ? "Reinstalar" : "Instalar";
+    }
+  });
+  card.appendChild(installBtn);
+
+  list.appendChild(card);
+}
+
+// ---------- Modelo del agente (local u en la nube) ----------
+// kal se distribuye a usuarios con hardware muy distinto — esta pestaña
+// tiene DOS acciones nada más: descargar un modelo Ollama local nuevo, y
+// configurar la API key de un proveedor en la nube (Qwen, Grok/xAI,
+// OpenAI...). Elegir CUÁL modelo usar en cada momento ya lo resuelve el
+// selector de la barra de chat (arriba a la izquierda, ver #model-select)
+// — acá nunca se elige "el modelo por defecto" a mano, eso es lo que en
+// el futuro va a decidir kal mismo según la tarea.
+
+// "Groq" (api.groq.com) y "Grok" (xAI, api.x.ai) son DOS empresas y
+// APIs distintas — confusión real
+// encontrada en uso: una API key que empieza con "gsk_..." es de Groq,
+// nunca de xAI (esas empiezan con "xai-...").
+const CLOUD_PROVIDER_PRESETS = {
+  qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  grok: "https://api.x.ai/v1",
+  groq: "https://api.groq.com/openai/v1",
+  openai: "https://api.openai.com/v1",
+  custom: "",
+};
+
+// Nombre corto de PERFIL guardado (ver agent_core/llm_settings.py::
+// save_cloud_profile) — es lo que va a aparecer como grupo en el
+// selector de modelo del chat, así que tiene que ser corto, a
+// diferencia del texto largo/aclaratorio de las opciones del <select>
+// de arriba. "custom" no tiene uno fijo — se pide en el campo de al lado.
+const CLOUD_PROVIDER_PROFILE_NAMES = {
+  qwen: "Qwen",
+  grok: "Grok (xAI)",
+  groq: "Groq",
+  openai: "OpenAI",
+};
+
+const modelActiveProviderStatus = document.getElementById("model-active-provider-status");
+const modelActivateOllamaBtn = document.getElementById("model-activate-ollama-btn");
+const modelLocalList = document.getElementById("model-local-list");
+const modelPullForm = document.getElementById("model-pull-form");
+const modelPullNameInput = document.getElementById("model-pull-name");
+const modelPullBtn = document.getElementById("model-pull-btn");
+const modelPullFeedback = document.getElementById("model-pull-feedback");
+const modelCloudForm = document.getElementById("model-cloud-form");
+const modelCloudPresetSelect = document.getElementById("model-cloud-preset");
+const modelCloudCustomUrlRow = document.getElementById("model-cloud-custom-url-row");
+const modelCloudCustomNameInput = document.getElementById("model-cloud-custom-name");
+const modelCloudCustomUrlInput = document.getElementById("model-cloud-custom-url");
+const modelApiKeyInput = document.getElementById("model-api-key");
+const modelApiKeyToggle = document.getElementById("model-api-key-toggle");
+const modelApiKeyStatus = document.getElementById("model-api-key-status");
+const modelSettingsFeedback = document.getElementById("model-settings-feedback");
+
+modelApiKeyToggle.addEventListener("click", () => {
+  modelApiKeyInput.type = modelApiKeyInput.type === "password" ? "text" : "password";
+});
+
+modelCloudPresetSelect.addEventListener("change", () => {
+  modelCloudCustomUrlRow.hidden = modelCloudPresetSelect.value !== "custom";
+});
+
+modelActivateOllamaBtn.addEventListener("click", async () => {
+  // BUG REAL ENCONTRADO EN USO: sin este botón, no había forma de
+  // volver a Ollama local desde la interfaz una vez activado un
+  // proveedor en la nube que dejó de responder (p.ej. sin créditos) —
+  // el selector de modelo de la barra de chat quedaba inutilizable
+  // sin ninguna salida.
+  modelActivateOllamaBtn.disabled = true;
+  modelSettingsFeedback.textContent = "Activando Ollama local…";
+  try {
+    await api("/settings/llm", { method: "POST", body: JSON.stringify({ provider: "ollama" }) });
+    modelSettingsFeedback.textContent = "Ollama local activado.";
+    await refreshModelSettings();
+    await loadModels();
+  } catch (e) {
+    modelSettingsFeedback.textContent = "Error: " + e.message;
+  } finally {
+    modelActivateOllamaBtn.disabled = false;
+  }
+});
+
+async function refreshModelSettings() {
+  modelSettingsFeedback.textContent = "";
+  modelPullFeedback.textContent = "";
+  // Se recalcula acá también (no solo en el "change" del select) para
+  // que nunca quede visible de más si se reabre la pestaña en un
+  // estado raro.
+  modelCloudCustomUrlRow.hidden = modelCloudPresetSelect.value !== "custom";
+
+  let settings;
+  try {
+    settings = await api("/settings/llm");
+  } catch (e) {
+    modelActiveProviderStatus.textContent = "No se pudo cargar la configuración del modelo.";
+    return;
+  }
+  
+  // Mostrar información detallada del proveedor y modelo activo
+  if (settings.provider === "ollama") {
+    modelActiveProviderStatus.textContent = `Proveedor activo: Local (Ollama), Modelo: ${settings.default_model}`;
+  } else {
+    // Determinar el nombre del proveedor basado en la URL para mostrarlo más claramente
+    let providerName = "Proveedor en la nube";
+    if (settings.base_url.includes("api.x.ai")) {
+      providerName = "Grok (xAI)";
+    } else if (settings.base_url.includes("api.groq.com")) {
+      providerName = "Groq";
+    } else if (settings.base_url.includes("api.openai.com")) {
+      providerName = "OpenAI";
+    } else if (settings.base_url.includes("dashscope.aliyuncs.com")) {
+      providerName = "Qwen (Alibaba)";
+    }
+    
+    modelActiveProviderStatus.textContent = `Proveedor activo: ${providerName} (${settings.base_url}), Modelo: ${settings.default_model}`;
+  }
+  
+  modelApiKeyStatus.textContent = settings.has_api_key ? "(ya configurada)" : "(no configurada)";
+  modelApiKeyInput.value = "";
+
+  modelLocalList.innerHTML = "";
+  let ollamaModels;
+  try {
+    ollamaModels = await api("/settings/llm/ollama/models");
+  } catch (e) {
+    modelLocalList.appendChild(el("div", "dash-empty", "No se pudo consultar Ollama local."));
+    return;
+  }
+  if (!ollamaModels.ollama_available) {
+    modelLocalList.appendChild(el("div", "dash-empty", "Ollama no está corriendo en esta máquina."));
+  } else if (ollamaModels.models.length === 0) {
+    modelLocalList.appendChild(el("div", "dash-empty", "Sin modelos descargados todavía."));
+  } else {
+    for (const name of ollamaModels.models) {
+      modelLocalList.appendChild(el("div", "dash-item", name));
+    }
+  }
+}
+
+modelPullForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const model = modelPullNameInput.value.trim();
+  if (!model) return;
+
+  modelPullBtn.disabled = true;
+  modelPullFeedback.textContent = `Descargando "${model}"… puede tardar varios minutos (son varios GB), no cierres esta pestaña.`;
+  try {
+    await api("/settings/llm/ollama/pull", { method: "POST", body: JSON.stringify({ model }) });
+    modelPullFeedback.textContent = `"${model}" descargado.`;
+    modelPullNameInput.value = "";
+    await refreshModelSettings();
+    await loadModels();
+  } catch (e) {
+    modelPullFeedback.textContent = "Error: " + e.message;
+  } finally {
+    modelPullBtn.disabled = false;
+  }
+});
+
+modelCloudForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  modelSettingsFeedback.textContent = "Guardando…";
+
+  const preset = modelCloudPresetSelect.value;
+  const baseUrl = preset === "custom" ? modelCloudCustomUrlInput.value.trim() : CLOUD_PROVIDER_PRESETS[preset];
+  // Guardarlo con un nombre (ver profile_name) lo deja disponible como
+  // perfil reusable — vuelve a aparecer en el selector de modelo del
+  // chat más adelante, junto con cualquier otro perfil ya guardado.
+  const profileName = preset === "custom" ? modelCloudCustomNameInput.value.trim() : CLOUD_PROVIDER_PROFILE_NAMES[preset];
+  const body = {
+    provider: "openai_compatible",
+    base_url: baseUrl || null,
+    api_key: modelApiKeyInput.value.trim() || null, // vacío = no tocar la que ya está guardada
+    profile_name: profileName || null,
+  };
+
+  try {
+    await api("/settings/llm", { method: "POST", body: JSON.stringify(body) });
+    modelSettingsFeedback.textContent = "Guardado. Proveedor en la nube activado.";
+    await refreshModelSettings();
+    await loadModels(); // el selector de modelo del chat ahora incluye este perfil
+  } catch (e) {
+    modelSettingsFeedback.textContent = "Error: " + e.message;
+  }
+});
+
 // ---------- Arranque ----------
 
-refreshStatus();
-loadModels();
-refreshTasks();
-setInterval(refreshStatus, 6000);
+ensureAdminToken().finally(() => {
+  refreshStatus();
+  loadModels();
+  refreshTasks();
+  setInterval(refreshStatus, 6000);
+});

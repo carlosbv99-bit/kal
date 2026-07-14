@@ -114,6 +114,7 @@ class PlanningAgentLoop:
         history: list[dict] | None = None,
         session_context: dict | None = None,
         denied_permissions: frozenset[Permission] = frozenset(),
+        client: str | None = None,
     ) -> PlanRunResult:
         plan = self.planner.plan(goal, model=model) if use_planner else Planner._single_step_plan(goal)
 
@@ -122,7 +123,7 @@ class PlanningAgentLoop:
             run_result = self.agent_loop.run(
                 step.description, model=model, max_steps=max_steps,
                 history=history, session_context=session_context,
-                denied_permissions=denied_permissions,
+                denied_permissions=denied_permissions, client=client,
             )
             step_results.append(PlanStepResult(step=step.description, result=run_result))
             if run_result.status == "llm_error":

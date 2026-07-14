@@ -23,7 +23,11 @@ class CodeExecutionTool(Tool):
         description=(
             "Ejecuta código Python en un sandbox aislado (sin red, filesystem "
             "read-only salvo /workspace) y devuelve su salida estándar. Usar para "
-            "cálculos, transformación de datos, o cualquier lógica expresable en Python."
+            "cálculos, transformación de datos, o cualquier lógica expresable en Python. "
+            "NO sirve para crear archivos que el usuario se lleve (una página web, un proyecto "
+            "con varios archivos, etc.): `import os` y `open()` están prohibidos a propósito, "
+            "cualquier intento falla. Para ese tipo de pedido, generá el contenido directamente "
+            "en la respuesta final (bloques de código), no lo escribas con esta herramienta."
         ),
         parameters_schema={
             "type": "object",

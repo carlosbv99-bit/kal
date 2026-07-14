@@ -36,6 +36,49 @@ class OpenAICompatibleError(ProviderError):
     """Error específico de OpenAICompatibleClient."""
 
 
+def _tool_use_failed_fallback_content(exc: requests.exceptions.HTTPError) -> str | None:
+    """
+    BUG REAL ENCONTRADO EN USO: Groq puede rechazar con 400 y
+    `code: "tool_use_failed"` cuando el modelo intenta una llamada a
+    herramienta mal formada — pero el cuerpo del error YA trae, en
+    `failed_generation`, la respuesta en texto plano que el modelo
+    quería dar antes de ese intento roto. Sin esto, el usuario se
+    quedaba sin ninguna respuesta por un intento de herramienta
+    fallido, aunque el modelo sí tenía algo útil para decir. None si
+    el error no tiene esta forma específica (cualquier otro 400 sigue
+    siendo un error real, se propaga igual).
+    """
+    response = getattr(exc, "response", None)
+    if response is None or response.status_code != 400:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or error.get("code") != "tool_use_failed":
+        return None
+    return error.get("failed_generation") or None
+
+
+def _response_detail(exc: requests.exceptions.RequestException) -> str:
+    """
+    `str(exc)` de un HTTPError solo trae la línea de estado ("400
+    Client Error: Bad Request for url: ..."), nunca el cuerpo — que es
+    justamente donde un proveedor real (Grok/xAI, OpenAI, etc.) explica
+    QUÉ está mal (p.ej. "model not found", scope insuficiente en la
+    key). Sin esto, cualquier error real contra un proveedor en la nube
+    es indiagnosticable a ciegas. Trunca por si el cuerpo es enorme.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return str(exc)
+    body = (response.text or "").strip()
+    if not body:
+        return str(exc)
+    return f"{exc} — respuesta: {body[:500]}"
+
+
 class OpenAICompatibleClient:
     def __init__(
         self,
@@ -97,7 +140,21 @@ class OpenAICompatibleClient:
                 f"{self.base_url} no respondió en {self.timeout}s"
             ) from e
         except requests.exceptions.HTTPError as e:
-            raise OpenAICompatibleError(f"{self.base_url} devolvió un error HTTP: {e}") from e
+            fallback_content = _tool_use_failed_fallback_content(e)
+            if fallback_content is not None:
+                # El contenido de failed_generation queda en el log —
+                # sin esto, un intento de tool-call mal formado real
+                # (qué herramienta, qué argumentos) queda invisible en
+                # cuanto se usa el fallback, indiagnosticable a ciegas
+                # (bug real: no se podía ver QUÉ intentaba llamar el
+                # modelo la primera vez que esto se investigó).
+                logger.warning(
+                    f"{self.base_url} rechazó un intento de llamada a herramienta mal formado "
+                    f"(tool_use_failed) — se usa la respuesta en texto plano que el modelo ya había "
+                    f"generado. failed_generation: {fallback_content[:800]!r}"
+                )
+                return ChatResponse(content=fallback_content, tool_calls=[], raw={})
+            raise OpenAICompatibleError(f"{self.base_url} devolvió un error HTTP: {_response_detail(e)}") from e
 
         data = response.json()
         choices = data.get("choices") or []
@@ -116,7 +173,7 @@ class OpenAICompatibleClient:
                 except json.JSONDecodeError:
                     logger.warning(f"No se pudo parsear arguments de tool_call como JSON: {arguments!r}")
                     arguments = {}
-            tool_calls.append(ToolCall(name=function.get("name", ""), arguments=arguments))
+            tool_calls.append(ToolCall(name=function.get("name", ""), arguments=arguments, id=raw_call.get("id")))
 
         return ChatResponse(content=content, tool_calls=tool_calls, raw=data)
 
@@ -126,7 +183,7 @@ class OpenAICompatibleClient:
             response = self._get(f"{self.base_url}/models", headers=self._headers(), timeout=self.timeout)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            raise OpenAICompatibleError(f"No se pudo listar modelos de {self.base_url}: {e}") from e
+            raise OpenAICompatibleError(f"No se pudo listar modelos de {self.base_url}: {_response_detail(e)}") from e
         data = response.json()
         return [m["id"] for m in data.get("data", [])]
 

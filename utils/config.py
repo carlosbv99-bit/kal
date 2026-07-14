@@ -23,12 +23,30 @@ load_dotenv()
 
 class LLMConfig(BaseModel):
     """
-    Configuración del "cerebro" del agente: un modelo local vía Ollama.
-    Nunca apunta a un servicio en la nube por defecto — glm-5.1:cloud
-    (u otro modelo :cloud) debe seleccionarse explícitamente si se
-    quiere usar, nunca como default, para no romper el principio de
-    "sin red inesperada" que sigue el resto del proyecto.
+    Configuración del "cerebro" del agente. Por defecto un modelo local
+    vía Ollama — nunca apunta a un servicio en la nube por defecto, hay
+    que elegirlo explícitamente (`provider: openai_compatible`), para
+    no romper el principio de "sin red inesperada" del resto del
+    proyecto. kal se distribuye a usuarios con hardware muy distinto
+    (ver docs/HISTORY.md, "Confirmación explícita: kal es para uso
+    general, no personal") — alguien sin RAM/VRAM para un modelo local
+    de 30B necesita poder apuntar a un proveedor en la nube (Qwen,
+    Grok/xAI, OpenAI, OpenRouter, etc.) sin tocar código, solo config.
     """
+    # "ollama": agent_core/llm/ollama_client.py (formato nativo /api/chat).
+    # "openai_compatible": agent_core/llm/openai_compatible_client.py
+    # (formato OpenAI, {base_url}/chat/completions) — sirve tanto para el
+    # propio Ollama (F2, ya validado) como para cualquier proveedor real
+    # que hable ese mismo formato: Qwen (DashScope, modo compatible),
+    # Grok/xAI (api.x.ai/v1), OpenAI, OpenRouter, vLLM, etc. Requiere
+    # LLM_API_KEY en el entorno (ver .env.example) — sin ella, kal falla
+    # al arrancar con un error claro, nunca intenta sin autenticación.
+    provider: Literal["ollama", "openai_compatible"] = "ollama"
+    # Con provider: openai_compatible, tiene que ser la URL COMPLETA que
+    # pide ese proveedor (incluido cualquier sufijo tipo "/v1" — p.ej.
+    # "https://api.x.ai/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    # nunca se le agrega nada por detrás. El default de acá abajo es
+    # correcto tal cual solo para provider: ollama.
     base_url: str = "http://localhost:11434"
     default_model: str = "qwen3-coder:30b"
     timeout_seconds: int = 120
@@ -181,6 +199,20 @@ class MultimodalConfig(BaseModel):
     uploads: UploadsConfig = UploadsConfig()
 
 
+class ResourceBrokerConfig(BaseModel):
+    """
+    ImageService/AudioService/STTService (kernel_bus/services.py) cargan
+    su modelo perezosamente pero nunca lo descargaban — BUG REAL
+    ENCONTRADO EN USO: en una máquina sin GPU (todo corre en CPU), un
+    pipeline de varios GB se queda en RAM para siempre una vez usado,
+    compitiendo con Ollama por la misma RAM del sistema — confirmado en
+    logs/agent.log: Ollama quedaba con "Connection refused" 1-2 minutos
+    justo después de generar una imagen. Ver kernel_bus/resource_broker.py.
+    """
+    idle_timeout_seconds: int = 300
+    min_available_ram_mb: int = 2048
+
+
 class SandboxConfig(BaseModel):
     network_mode: Literal["none", "bridge"] = "none"
     memory_limit_mb: int = 512
@@ -222,6 +254,30 @@ class PermissionCascadeConfig(BaseModel):
                    "gpu", "camera", "microphone", "clipboard", "docker"],
         "agent": ["filesystem_read", "filesystem_write", "network"],
         "skill": ["filesystem_read"],
+    })
+
+
+class FilesystemAccessConfig(BaseModel):
+    """
+    Política del Permission Manager de filesystem (ver
+    tool_integration/filesystem_access_manager.py) — ORTOGONAL a
+    PermissionCascadeConfig de arriba: aquella decide "¿esta herramienta
+    puede pedir tocar el filesystem en absoluto?" (FILESYSTEM_READ/WRITE
+    por nivel de confianza); esta decide "¿esta acción concreta, en este
+    alcance concreto, se auto-permite o necesita un humano?".
+
+    `auto_allow`: alcance -> acciones que se auto-permiten sin pedir
+    aprobación (siempre que la propia PermissionCascade ya haya
+    otorgado FILESYSTEM_WRITE). Fail-safe por diseño: cualquier
+    combinación scope/acción que NO esté listada acá requiere
+    aprobación humana explícita — nunca al revés. Default: crear/
+    modificar dentro del workspace (el caso de menor riesgo, el único
+    que ejercita hoy el agente IDE de VS Code) — todo lo demás (borrar/
+    renombrar en el workspace, cualquier acción en home/external)
+    requiere aprobación.
+    """
+    auto_allow: dict[str, list[str]] = Field(default_factory=lambda: {
+        "workspace": ["create", "modify"],
     })
 
 
@@ -285,10 +341,12 @@ class Settings(BaseModel):
     memory: MemoryConfig
     error_handling: ErrorHandlingConfig
     multimodal: MultimodalConfig = MultimodalConfig()
+    resource_broker: ResourceBrokerConfig = ResourceBrokerConfig()
     context: ContextConfig = ContextConfig()
     sandbox: SandboxConfig
     tool_integration: ToolIntegrationConfig
     permissions: PermissionCascadeConfig = PermissionCascadeConfig()
+    filesystem_access: FilesystemAccessConfig = FilesystemAccessConfig()
     self_modification: SelfModificationConfig
     audit: AuditConfig
     signing: SigningConfig = SigningConfig()

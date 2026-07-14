@@ -1,0 +1,356 @@
+"""
+Configuración en caliente del LLM activo (provider/base_url/
+default_model/api_key) — persistida a disco (config/config.yaml +
+.env) y aplicada en memoria de inmediato, sin reiniciar el proceso.
+
+Pensado para que un usuario no-programador cambie de Ollama local a un
+proveedor en la nube (Qwen, Grok/xAI, OpenAI...) o viceversa desde la
+interfaz web, sin editar YAML a mano — kal se distribuye a usuarios
+con hardware muy distinto (ver docs/HISTORY.md), no todos pueden
+correr un modelo local grande.
+
+Reemplazo de texto DIRIGIDO, nunca yaml.dump()/reescritura completa —
+mismo criterio que tool_integration/skills.py::set_skill_enabled():
+config.yaml tiene comentarios explicativos reales (ejemplos de
+base_url por proveedor, benchmarks de default_model) que un
+yaml.dump() destruiría.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
+from utils.config import settings
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_CONFIG_PATH = Path("config/config.yaml")
+_ENV_PATH = Path(".env")
+_ENV_EXAMPLE_PATH = Path(".env.example")
+# Siempre el Ollama LOCAL de esta máquina, nunca settings.llm.base_url
+# (que puede apuntar a un proveedor en la nube si ese es el proveedor
+# ACTIVO) — descargar/listar modelos locales es una gestión aparte,
+# independiente de cuál proveedor esté activo en un momento dado.
+_OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
+_OLLAMA_PULL_TIMEOUT_SECONDS = 3600
+# Perfiles de proveedores en la nube guardados (nombre/base_url/nombre
+# de variable de entorno — NUNCA la key en sí, esa vive solo en .env).
+# Archivo propio, no config.yaml: es una lista que crece con el uso,
+# 100% generada por kal — a diferencia de config.yaml, no tiene
+# comentarios de autor que preservar, así que un dump completo es
+# seguro acá (ver _save_cloud_profiles_file más abajo).
+_CLOUD_PROFILES_PATH = Path("data/keys/cloud_profiles.json")
+
+
+class LLMSettingsError(Exception):
+    """La actualización pedida es inválida — nada se escribió a disco."""
+
+
+def read_llm_env_var(key: str) -> str | None:
+    """
+    Lee el valor ACTUAL de una variable relacionada con API keys —
+    SIEMPRE desde el archivo .env primero, nunca solo de os.environ.
+
+    BUG REAL ENCONTRADO EN USO: `load_dotenv()` (utils/config.py, se
+    re-ejecuta en cada --reload) NUNCA sobreescribe una variable que
+    ya esté seteada en el proceso. Si en algún momento de la sesión
+    quedó un valor viejo/incorrecto en os.environ (una prueba, un
+    primer intento con la key equivocada), ningún --reload posterior
+    lo iba a corregir — aunque el archivo .env tuviera después el
+    valor correcto y más nuevo. Confirmado en vivo: una key de Groq
+    real y válida quedaba rechazada con 401 porque el proceso seguía
+    usando un valor viejo en memoria. Leer directo del archivo evita
+    esta trampa por completo.
+    """
+    if _ENV_PATH.exists():
+        text = _ENV_PATH.read_text(encoding="utf-8")
+        match = re.search(rf'^{re.escape(key)}=(.*)$', text, re.MULTILINE)
+        if match and match.group(1):
+            return match.group(1)
+    return os.environ.get(key)
+
+
+def get_llm_settings() -> dict:
+    return {
+        "provider": settings.llm.provider,
+        "base_url": settings.llm.base_url,
+        "default_model": settings.llm.default_model,
+        # Nunca se devuelve la key en sí — solo si hay una guardada.
+        "has_api_key": bool(read_llm_env_var("LLM_API_KEY")),
+    }
+
+
+def update_llm_settings(
+    provider: str,
+    base_url: str | None = None,
+    default_model: str | None = None,
+    api_key: str | None = None,
+    profile_name: str | None = None,
+) -> None:
+    """
+    Valida ANTES de escribir nada (para no dejar config.yaml apuntando
+    a un estado que después falla al reconstruir el cliente real —
+    ver agent_core/orchestrator.py::build_llm_client()).
+
+    `profile_name`: si se pasa junto con provider="openai_compatible",
+    además de activarlo, lo guarda como perfil reusable (ver
+    save_cloud_profile) — así "Guardar y activar" en la pestaña Modelo
+    lo deja disponible para el selector de modelo más adelante, sin un
+    paso separado de "guardar como perfil".
+    """
+    previous_base_url = settings.llm.base_url  # capturado ANTES de pisarlo, para detectar un cambio real de endpoint
+
+    if provider == "openai_compatible":
+        effective_base_url = base_url or settings.llm.base_url
+        if not base_url and effective_base_url == _OLLAMA_DEFAULT_BASE_URL:
+            raise LLMSettingsError(
+                "Falta 'base_url' — un proveedor en la nube necesita la URL completa de su "
+                "API (p.ej. https://api.x.ai/v1), nunca el default de Ollama local."
+            )
+        effective_api_key = api_key or read_llm_env_var("LLM_API_KEY")
+        if not effective_api_key:
+            raise LLMSettingsError(
+                "Falta 'api_key' — no hay ninguna guardada todavía para usar un proveedor en la nube."
+            )
+        # BUG REAL ENCONTRADO EN USO: default_model es GLOBAL (una sola
+        # perilla en config.yaml), no por proveedor — un nombre de
+        # modelo de Ollama (p.ej. "deepseek-r1:14b") se quedaba pegado
+        # ahí después de activar un proveedor en la nube distinto (el
+        # endpoint cambió), rompiendo cualquier /chat sin un 'model'
+        # explícito con 404 "model not found". El selector web siempre
+        # manda un 'model' explícito así que no lo sufre, pero el
+        # agente IDE de VS Code no tiene selector propio — siempre
+        # depende de este default, y ahí sí rompía. Si el endpoint
+        # cambia de verdad y no se pidió un default_model explícito, se
+        # elige automáticamente el primer modelo de chat real que ese
+        # proveedor devuelva.
+        if default_model is None and effective_base_url != previous_base_url:
+            default_model = _first_chat_capable_model(effective_base_url, effective_api_key)
+    elif provider == "ollama" and base_url is None:
+        # BUG REAL ENCONTRADO EN USO: volver a "ollama" sin esto dejaba
+        # `base_url` apuntando a lo que fuera el proveedor en la nube
+        # anterior — OllamaClient terminaba pegándole a
+        # "https://api.x.ai/v1/api/tags" (404), sin ninguna forma de
+        # recuperarse desde la interfaz. Activar Ollama SIEMPRE vuelve
+        # a su URL local conocida, salvo que se pase una distinta a
+        # propósito (p.ej. un puerto no estándar).
+        base_url = _OLLAMA_DEFAULT_BASE_URL
+
+    if base_url is not None:
+        _update_yaml_field("base_url", base_url)
+        settings.llm.base_url = base_url
+    if default_model is not None:
+        _update_yaml_field("default_model", default_model)
+        settings.llm.default_model = default_model
+    _update_yaml_field("provider", provider)
+    settings.llm.provider = provider
+
+    if api_key:
+        _update_env_var("LLM_API_KEY", api_key)
+        os.environ["LLM_API_KEY"] = api_key
+
+    if profile_name and provider == "openai_compatible":
+        save_cloud_profile(
+            profile_name,
+            base_url=settings.llm.base_url,
+            api_key=api_key or read_llm_env_var("LLM_API_KEY") or "",
+        )
+
+
+def _sanitize_env_suffix(name: str) -> str:
+    """'Grok (xAI)' -> 'GROK_XAI' — usado para nombrar la variable de
+    entorno propia de cada perfil (LLM_API_KEY_<esto>)."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", name.strip()).strip("_").upper()
+    return cleaned or "PERFIL"
+
+
+def list_cloud_profiles() -> list[dict]:
+    """Perfiles guardados (nombre/base_url/nombre de variable de
+    entorno) — NUNCA la key en sí, esa se lee del .env al usarla."""
+    if not _CLOUD_PROFILES_PATH.exists():
+        return []
+    return json.loads(_CLOUD_PROFILES_PATH.read_text(encoding="utf-8"))
+
+
+def save_cloud_profile(name: str, base_url: str, api_key: str) -> None:
+    """Guarda (o actualiza, si ya existe un perfil con ese nombre) un
+    perfil de proveedor en la nube — la key se persiste en su PROPIA
+    variable de entorno (LLM_API_KEY_<NOMBRE>), no se pisa con la de
+    otro perfil ni con la del proveedor activo."""
+    api_key_env = f"LLM_API_KEY_{_sanitize_env_suffix(name)}"
+    profiles = list_cloud_profiles()
+    profiles = [p for p in profiles if p["name"] != name]
+    profiles.append({"name": name, "base_url": base_url, "api_key_env": api_key_env})
+
+    _CLOUD_PROFILES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _CLOUD_PROFILES_PATH.write_text(json.dumps(profiles, indent=2), encoding="utf-8")
+
+    if api_key:
+        _update_env_var(api_key_env, api_key)
+        os.environ[api_key_env] = api_key
+
+
+def activate_cloud_profile(name: str) -> None:
+    """Hace ACTIVO un perfil ya guardado (lo que responde al próximo
+    /chat) — reusa update_llm_settings(), sin volver a pedir la key."""
+    profile = next((p for p in list_cloud_profiles() if p["name"] == name), None)
+    if profile is None:
+        raise LLMSettingsError(f"No existe un perfil guardado llamado '{name}'.")
+    api_key = read_llm_env_var(profile["api_key_env"])
+    if not api_key:
+        raise LLMSettingsError(
+            f"El perfil '{name}' no tiene una API key configurada en el entorno "
+            f"({profile['api_key_env']})."
+        )
+    update_llm_settings(provider="openai_compatible", base_url=profile["base_url"], api_key=api_key)
+
+
+# BUG REAL ENCONTRADO EN USO: GET /v1/models de un proveedor real
+# (Groq) devuelve TODOS sus modelos hospedados, no solo los de chat —
+# whisper-large-v3 (habla-a-texto), llama-prompt-guard/gpt-oss-safeguard
+# (clasificadores de seguridad), orpheus (texto-a-voz), etc. aparecían
+# mezclados con los modelos de chat de verdad, aunque nunca podrían
+# responder a un /chat de kal. Filtro por nombre — heurístico, no una
+# garantía (no hay un campo "tipo" estándar en la respuesta de
+# /v1/models), pero cubre los casos reales encontrados.
+_NON_CHAT_MODEL_KEYWORDS = ("whisper", "tts", "orpheus", "guard", "safeguard", "embed", "moderation", "rerank")
+
+
+def _is_chat_capable_model_name(name: str) -> bool:
+    lowered = name.lower()
+    return not any(keyword in lowered for keyword in _NON_CHAT_MODEL_KEYWORDS)
+
+
+def _first_chat_capable_model(base_url: str, api_key: str) -> str | None:
+    """Usado por update_llm_settings() para elegir un default_model
+    razonable al activar un proveedor en la nube distinto sin uno
+    explícito — None si el proveedor no responde (queda sin cambiar,
+    no peor que el estado actual)."""
+    try:
+        client = OpenAICompatibleClient(base_url=base_url, api_key=api_key)
+        models = [m for m in client.list_models() if _is_chat_capable_model_name(m)]
+    except Exception as e:
+        logger.warning(f"No se pudo elegir un modelo automático para {base_url}: {e}")
+        return None
+    return models[0] if models else None
+
+
+def list_model_sources() -> list[dict]:
+    """
+    Modelos disponibles de TODAS las fuentes conocidas — Ollama local +
+    cada perfil en la nube guardado que responda con éxito AHORA MISMO
+    (nunca uno roto: sin crédito, key inválida, etc. simplemente no
+    aparece, en vez de mostrar un error a medias). Es lo que alimenta
+    el selector de modelo del chat — no depende de cuál proveedor esté
+    ACTIVO en este momento.
+
+    Filtra dos casos reales de "aparece pero no está listo para usar":
+    modelos que no son de chat (ver _NON_CHAT_MODEL_KEYWORDS) y modelos
+    Ollama con sufijo ":cloud" — esos son en realidad un proxy al
+    servicio en la nube DE OLLAMA MISMO, que necesita una sesión propia
+    (`ollama signin`) sin relación con esta configuración; sin ella,
+    devuelven 401 al primer uso, confirmado en vivo.
+    """
+    sources: list[dict] = []
+    try:
+        local_models = [m for m in list_local_ollama_models() if not m.endswith(":cloud")]
+        sources.append({"name": "ollama", "label": "Local (Ollama)", "models": local_models})
+    except LLMSettingsError:
+        pass
+
+    for profile in list_cloud_profiles():
+        api_key = read_llm_env_var(profile["api_key_env"])
+        if not api_key:
+            logger.warning(
+                f"Perfil '{profile['name']}' sin API key en el entorno ({profile['api_key_env']}) — "
+                "no aparece en el selector de modelo."
+            )
+            continue
+        try:
+            client = OpenAICompatibleClient(base_url=profile["base_url"], api_key=api_key)
+            models = [m for m in client.list_models() if _is_chat_capable_model_name(m)]
+        except Exception as e:
+            # BUG REAL ENCONTRADO EN USO: esto solo atrapaba ProviderError
+            # — cualquier otro tipo de excepción real (JSON inesperado,
+            # timeout de red puntual) hacía desaparecer el perfil del
+            # selector SIN NINGÚN rastro en los logs, indiagnosticable a
+            # ciegas. Ahora cualquier fallo queda registrado con su causa
+            # real antes de saltear el perfil.
+            logger.warning(f"Perfil '{profile['name']}' no respondió al listar modelos, se omite del selector: {e}")
+            continue
+        sources.append({"name": profile["name"], "label": profile["name"], "models": models})
+
+    return sources
+
+
+def list_local_ollama_models() -> list[str]:
+    """
+    Modelos YA descargados en el Ollama local de esta máquina —
+    independiente de cuál proveedor esté ACTIVO ahora mismo (a
+    diferencia de GET /models, que lista los modelos del proveedor
+    activo, sea local o en la nube).
+    """
+    try:
+        response = requests.get(f"{_OLLAMA_DEFAULT_BASE_URL}/api/tags", timeout=5)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise LLMSettingsError(f"No se pudo conectar a Ollama local en {_OLLAMA_DEFAULT_BASE_URL}: {e}") from e
+    data: dict[str, Any] = response.json()
+    return [m["name"] for m in data.get("models", [])]
+
+
+def pull_ollama_model(model: str) -> None:
+    """
+    Descarga un modelo nuevo al Ollama local (`ollama pull <model>`,
+    vía la misma API HTTP que usa el CLI — sin depender de que el
+    binario 'ollama' esté en el PATH del proceso de kal). Bloqueante:
+    una descarga real puede tardar varios minutos (varios GB) —
+    timeout generoso a propósito, no un valor pensado para llamadas
+    normales de chat.
+    """
+    try:
+        response = requests.post(
+            f"{_OLLAMA_DEFAULT_BASE_URL}/api/pull",
+            json={"name": model, "stream": False},
+            timeout=_OLLAMA_PULL_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise LLMSettingsError(f"No se pudo descargar '{model}': {e}") from e
+    data = response.json()
+    if data.get("status") not in ("success", None):
+        raise LLMSettingsError(f"Ollama no confirmó la descarga de '{model}': {data}")
+
+
+def _update_yaml_field(key: str, value: str) -> None:
+    text = _CONFIG_PATH.read_text(encoding="utf-8")
+    # Ancla a INICIO DE LÍNEA — nunca matchea los ejemplos comentados
+    # (p.ej. "  #     base_url: ...") porque después de la indentación
+    # el próximo carácter ahí es '#', no el nombre de la clave.
+    pattern = re.compile(rf'^(\s*){re.escape(key)}:\s*.*$', re.MULTILINE)
+    new_text, count = pattern.subn(rf'\g<1>{key}: "{value}"', text, count=1)
+    if count == 0:
+        raise LLMSettingsError(f"No se encontró la clave '{key}' en config.yaml — no se pudo actualizar.")
+    _CONFIG_PATH.write_text(new_text, encoding="utf-8")
+
+
+def _update_env_var(key: str, value: str) -> None:
+    if not _ENV_PATH.exists():
+        base = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8") if _ENV_EXAMPLE_PATH.exists() else ""
+        _ENV_PATH.write_text(base, encoding="utf-8")
+
+    text = _ENV_PATH.read_text(encoding="utf-8")
+    pattern = re.compile(rf'^{re.escape(key)}=.*$', re.MULTILINE)
+    if pattern.search(text):
+        new_text = pattern.sub(f"{key}={value}", text, count=1)
+    else:
+        sep = "\n" if text and not text.endswith("\n") else ""
+        new_text = f"{text}{sep}{key}={value}\n"
+    _ENV_PATH.write_text(new_text, encoding="utf-8")

@@ -426,6 +426,9 @@ button, input, textarea, select {
 .badge-warn { color: var(--warning); border-color: var(--warning); }
 .badge-critical { color: var(--critical); border-color: var(--critical); }
 
+.integration-card-name { font-weight: 600; font-size: 13px; }
+.integration-install-btn { margin-top: 8px; }
+
 .memory-search-row { display: flex; gap: 6px; }
 .memory-search-row input {
   flex: 1;
@@ -435,6 +438,27 @@ button, input, textarea, select {
   padding: 6px 9px;
   font-size: 12.5px;
 }
+
+.model-settings-form { display: flex; flex-direction: column; gap: 10px; }
+.model-settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.model-settings-label input, .model-settings-label select {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+.model-settings-save { align-self: flex-start; }
+.model-api-key-row { display: flex; gap: 6px; }
+.model-api-key-row input { flex: 1; }
 
 /* ---------- Accesibilidad: foco visible, movimiento reducido ---------- */
 

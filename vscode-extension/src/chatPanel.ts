@@ -1,7 +1,8 @@
-import * as fs from "fs";
 import * as vscode from "vscode";
+import { buildChatHtml } from "./chatWebviewHtml";
 import { EditorSnapshot } from "./editorContextFormat";
 import { KalClient } from "./kalClient";
+import { maybeHandleProjectFiles } from "./projectFiles";
 
 /**
  * WebviewPanel singleton para el chat con kal. El webview (media/chat.js)
@@ -30,7 +31,7 @@ export class ChatPanel {
     this.extensionUri = extensionUri;
     this.client = client;
 
-    this.panel.webview.html = this.buildHtml();
+    this.panel.webview.html = buildChatHtml(this.panel.webview, this.extensionUri);
 
     this.disposables.push(
       this.panel.webview.onDidReceiveMessage(async (message) => {
@@ -81,25 +82,10 @@ export class ChatPanel {
       const result = await this.client.chat(text, model, this.sessionId, editorContext);
       this.sessionId = result.session_id;
       this.panel.webview.postMessage({ type: "answer", result });
+      await maybeHandleProjectFiles(result, this.client);
     } catch (e) {
       this.panel.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
-  }
-
-  private buildHtml(): string {
-    const webview = this.panel.webview;
-    const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "chat.css"));
-    const jsUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "chat.js"));
-    const nonce = getNonce();
-
-    const htmlPath = vscode.Uri.joinPath(this.extensionUri, "media", "chat.html");
-    const raw = fs.readFileSync(htmlPath.fsPath, "utf-8");
-
-    return raw
-      .replaceAll("{{cssUri}}", cssUri.toString())
-      .replaceAll("{{jsUri}}", jsUri.toString())
-      .replaceAll("{{cspSource}}", webview.cspSource)
-      .replaceAll("{{nonce}}", nonce);
   }
 
   private dispose(): void {
@@ -107,13 +93,4 @@ export class ChatPanel {
     this.disposables.forEach((d) => d.dispose());
     this.panel.dispose();
   }
-}
-
-function getNonce(): string {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let text = "";
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
 }

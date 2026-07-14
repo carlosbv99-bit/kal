@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from kernel_bus.resource_broker import resource_broker
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -72,7 +73,26 @@ class ImageService:
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
         Path(self.editing_cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
 
+        # Ver kernel_bus/resource_broker.py — libera estos pipelines solo
+        # tras un rato sin uso, o de inmediato si la RAM del sistema está
+        # baja (nunca se descargaban antes, bug real confirmado en uso).
+        resource_broker.register(
+            "image.generate", is_loaded=lambda: self._pipeline is not None, unload=self._unload_pipeline
+        )
+        resource_broker.register(
+            "image.inpaint",
+            is_loaded=lambda: self._inpaint_pipeline is not None,
+            unload=self._unload_inpaint_pipeline,
+        )
+
+    def _unload_pipeline(self) -> None:
+        self._pipeline = None
+
+    def _unload_inpaint_pipeline(self) -> None:
+        self._inpaint_pipeline = None
+
     def _get_pipeline(self):
+        resource_broker.mark_used("image.generate")
         if self._pipeline is None:
             import torch
             from diffusers import AutoPipelineForText2Image
@@ -91,10 +111,16 @@ class ImageService:
 
         pipeline = self._get_pipeline()
 
-        logger.info(f"Generando imagen ({self.cfg.num_inference_steps} pasos): {prompt!r}")
+        # BUG REAL ENCONTRADO EN USO: el log y los metadatos citaban
+        # self.cfg.num_inference_steps (el default de config.yaml) aunque
+        # se haya pasado un override por kwargs — la imagen se generaba
+        # con el valor correcto, pero el metadato devuelto MENTÍA sobre
+        # cuántos pasos se usaron de verdad.
+        actual_steps = kwargs.get("num_inference_steps", self.cfg.num_inference_steps)
+        logger.info(f"Generando imagen ({actual_steps} pasos): {prompt!r}")
         result = pipeline(
             prompt=prompt,
-            num_inference_steps=kwargs.get("num_inference_steps", self.cfg.num_inference_steps),
+            num_inference_steps=actual_steps,
             guidance_scale=kwargs.get("guidance_scale", self.cfg.guidance_scale),
             height=kwargs.get("height", self.cfg.height),
             width=kwargs.get("width", self.cfg.width),
@@ -111,11 +137,12 @@ class ImageService:
             "metadata": {
                 "prompt": prompt,
                 "model": self.cfg.model,
-                "num_inference_steps": self.cfg.num_inference_steps,
+                "num_inference_steps": actual_steps,
             },
         }
 
     def _get_inpaint_pipeline(self):
+        resource_broker.mark_used("image.inpaint")
         if self._inpaint_pipeline is None:
             import torch
             from diffusers import AutoPipelineForInpainting
@@ -195,6 +222,11 @@ class AudioService:
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
         _VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
+        resource_broker.register("audio.synthesize", is_loaded=lambda: self._voice is not None, unload=self._unload_voice)
+
+    def _unload_voice(self) -> None:
+        self._voice = None
+
     def _ensure_voice_files(self) -> tuple[Path, Path]:
         model_path = _VOICES_DIR / f"{self.cfg.voice_model}.onnx"
         config_path = _VOICES_DIR / f"{self.cfg.voice_model}.onnx.json"
@@ -226,6 +258,7 @@ class AudioService:
         return Path(downloaded_model), Path(downloaded_config)
 
     def _get_voice(self):
+        resource_broker.mark_used("audio.synthesize")
         if self._voice is None:
             from piper.voice import PiperVoice
 
@@ -297,7 +330,13 @@ class STTService:
         self.cfg = cfg or settings.multimodal.stt
         self._model = None
 
+        resource_broker.register("stt.transcribe", is_loaded=lambda: self._model is not None, unload=self._unload_model)
+
+    def _unload_model(self) -> None:
+        self._model = None
+
     def _get_model(self):
+        resource_broker.mark_used("stt.transcribe")
         if self._model is None:
             from faster_whisper import WhisperModel
 

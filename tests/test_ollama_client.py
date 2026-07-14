@@ -29,12 +29,24 @@ class FakeResponse:
             raise requests.exceptions.HTTPError(f"status {self.status_code}")
 
 
-def _client(post_fn=None, get_fn=None, sleep_fn=None, connection_retries=2):
+class FakeResourceBroker:
+    """Doble de kernel_bus/resource_broker.py::ResourceBroker — solo
+    cuenta llamadas, sin recursos reales ni psutil."""
+
+    def __init__(self):
+        self.evict_calls = 0
+
+    def evict_idle_and_pressured(self):
+        self.evict_calls += 1
+
+
+def _client(post_fn=None, get_fn=None, sleep_fn=None, connection_retries=2, resource_broker=None):
     return OllamaClient(
         post_fn=post_fn,
         get_fn=get_fn,
         sleep_fn=sleep_fn or (lambda seconds: None),  # nunca dormir de verdad en tests
         connection_retries=connection_retries,
+        resource_broker=resource_broker or FakeResourceBroker(),
     )
 
 
@@ -50,6 +62,59 @@ def test_chat_succeeds_on_first_try_without_retrying():
 
     assert result.content == "hola"
     assert len(calls) == 1
+
+
+def test_chat_parses_tool_call_id_when_present():
+    # BUG REAL ENCONTRADO EN USO: Groq (a diferencia de Ollama) valida
+    # ESTRICTO el formato OpenAI y exige un 'id' por tool_call para
+    # correlacionar la respuesta de la herramienta con la llamada que
+    # la originó — sin propagarlo acá, agent_loop.py no tenía de dónde
+    # sacarlo para providers estrictos.
+    response = FakeResponse(
+        {
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_abc", "function": {"name": "run_code", "arguments": {"code": "print(1)"}}}
+                ],
+            }
+        }
+    )
+    client = _client(post_fn=lambda *a, **kw: response)
+
+    result = client.chat([{"role": "user", "content": "ejecutá esto"}])
+
+    assert result.tool_calls[0].id == "call_abc"
+
+
+def test_chat_parses_tool_call_without_id_as_none():
+    """Ollama no siempre manda 'id' — no debe romper el parseo."""
+    response = FakeResponse(
+        {"message": {"content": "", "tool_calls": [{"function": {"name": "run_code", "arguments": {}}}]}}
+    )
+    client = _client(post_fn=lambda *a, **kw: response)
+
+    result = client.chat([{"role": "user", "content": "ejecutá esto"}])
+
+    assert result.tool_calls[0].id is None
+
+
+def test_chat_evicts_idle_resources_before_calling_ollama():
+    """BUG REAL ENCONTRADO EN USO: sin esto, un pipeline de imagen/audio
+    de varios GB se queda en RAM para siempre, compitiendo con Ollama
+    por la misma RAM del sistema (confirmado: Ollama quedaba con
+    "Connection refused" justo después de generar una imagen). Ver
+    kernel_bus/resource_broker.py."""
+
+    def post_fn(*a, **kw):
+        return FakeResponse({"message": {"content": "hola"}})
+
+    broker = FakeResourceBroker()
+    client = _client(post_fn=post_fn, resource_broker=broker)
+
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert broker.evict_calls == 1
 
 
 def test_chat_retries_on_transient_connection_error_then_succeeds():

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from kernel_bus.bus import KernelServiceBus
-from kernel_bus.socket_server import KernelBusSocketServer
+from kernel_bus.socket_server import _MAX_LINE_BYTES, KernelBusSocketServer, LineTooLongError
 
 
 class FakeService:
@@ -107,6 +107,79 @@ def test_calls_and_denials_are_audited(bus, socket_path, monkeypatch, tmp_path):
     event_types = {e["event_type"] for e in entries}
     assert "kernel_service_call" in event_types
     assert "kernel_service_denied" in event_types
+
+
+def test_read_line_raises_when_no_newline_within_max_bytes():
+    """
+    Unit test directo de _read_line (sin socket real): una conexión que
+    nunca manda un '\\n' no puede hacer crecer el buffer sin límite —
+    hallazgo real de la revisión de seguridad 2026-07-09 (DoS de
+    memoria en el proceso HOST, disparable por una skill del market,
+    la confianza más baja del sistema).
+    """
+    class NeverEndingConn:
+        def recv(self, n):
+            return b"a" * n  # nunca manda un salto de línea
+
+    with pytest.raises(LineTooLongError):
+        KernelBusSocketServer._read_line(NeverEndingConn())
+
+
+def test_read_line_still_accepts_a_large_but_legitimate_line():
+    """Un prompt largo y real (bastante por debajo del límite) no debe
+    verse afectado por el fix — no es un límite de "línea corta"."""
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "test.echo", "params": {"text": "x" * 200_000}})
+
+    class OneShotConn:
+        def __init__(self, data):
+            self._buf = data
+        def recv(self, n):
+            chunk, self._buf = self._buf[:n], self._buf[n:]
+            return chunk
+
+    line = KernelBusSocketServer._read_line(OneShotConn((payload + "\n").encode("utf-8")))
+    assert line == payload
+
+
+def test_oversized_line_is_rejected_over_a_real_socket_and_audited(bus, socket_path, monkeypatch, tmp_path):
+    """
+    De punta a punta con un socket Unix real (no el unit test de
+    arriba): una skill que manda bytes sin salto de línea nunca hace
+    crecer memoria sin límite, la conexión se corta, queda auditado, y
+    el servidor SIGUE atendiendo conexiones siguientes con normalidad
+    (una skill hostil no puede tumbar el servicio para las demás).
+    """
+    from audit.audit_log import audit_log
+
+    monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
+    server = KernelBusSocketServer(
+        bus, allowed_methods=["test.echo"], socket_path=socket_path, skill_name="atacante", idle_timeout=5,
+    )
+    server.start()
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect(str(socket_path))
+        try:
+            sock.sendall(b"a" * (_MAX_LINE_BYTES + 1024))
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # el servidor puede cortar antes de que termine de mandar todo — también válido
+        try:
+            data = sock.recv(1024)
+        except (ConnectionResetError, OSError):
+            data = b""
+        sock.close()
+        assert data == b""  # el servidor cerró la conexión, nunca respondió nada
+
+        # La conexión siguiente (legítima) funciona con normalidad.
+        response = _send(socket_path, {"jsonrpc": "2.0", "id": 1, "method": "test.echo", "params": {"text": "sigo vivo"}})
+    finally:
+        server.stop()
+
+    assert response["result"] == {"echoed": "sigo vivo"}
+    entries = audit_log.tail(5)
+    event_types = {e["event_type"] for e in entries}
+    assert "kernel_bus_line_too_long" in event_types
 
 
 def test_max_requests_stops_accepting_after_the_limit(bus, socket_path):

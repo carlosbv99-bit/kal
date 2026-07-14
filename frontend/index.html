@@ -66,6 +66,8 @@
       <button class="dash-tab" data-tab="tools">Herramientas</button>
       <button class="dash-tab" data-tab="selfmod">Self-mod</button>
       <button class="dash-tab" data-tab="audit">Auditoría</button>
+      <button class="dash-tab" data-tab="integrations">Integraciones</button>
+      <button class="dash-tab" data-tab="modelo">Modelo</button>
     </nav>
 
     <div class="dash-body">
@@ -112,6 +114,63 @@
           <button class="mini-btn" data-refresh="audit">↻</button>
         </div>
         <div class="dash-list dash-list-mono" id="audit-list"></div>
+      </div>
+
+      <div class="dash-view" data-view="integrations">
+        <div class="dash-view-header">
+          <span>Integraciones de IDE</span>
+          <button class="mini-btn" data-refresh="integrations">↻</button>
+        </div>
+        <div class="dash-list" id="integrations-list"></div>
+      </div>
+
+      <div class="dash-view" data-view="modelo">
+        <div class="dash-view-header">
+          <span>Modelo del agente</span>
+          <button class="mini-btn" data-refresh="modelo">↻</button>
+        </div>
+        <div class="dash-item-meta" id="model-active-provider-status"></div>
+
+        <div class="dash-subhead">Local (Ollama)</div>
+        <button type="button" class="mini-btn" id="model-activate-ollama-btn">Usar Ollama local</button>
+        <div class="dash-list" id="model-local-list"></div>
+        <form class="model-settings-form" id="model-pull-form">
+          <label class="model-settings-label">
+            Descargar un modelo nuevo (ver <a href="https://ollama.com/library" target="_blank" rel="noopener">ollama.com/library</a>)
+            <input type="text" id="model-pull-name" placeholder="qwen2.5-coder:14b" />
+          </label>
+          <button type="submit" class="mini-btn" id="model-pull-btn">Descargar</button>
+        </form>
+        <div class="dash-item-meta" id="model-pull-feedback"></div>
+
+        <div class="dash-subhead">En la nube</div>
+        <form class="model-settings-form" id="model-cloud-form">
+          <label class="model-settings-label">
+            Proveedor
+            <select id="model-cloud-preset">
+              <option value="qwen">Qwen (Alibaba DashScope)</option>
+              <option value="grok">Grok (xAI)</option>
+              <option value="groq">Groq (distinto de Grok/xAI — api.groq.com)</option>
+              <option value="openai">OpenAI</option>
+              <option value="custom">Otro (URL personalizada)</option>
+            </select>
+          </label>
+          <label class="model-settings-label" id="model-cloud-custom-url-row" hidden>
+            Nombre del perfil (para reconocerlo después en el selector de modelo)
+            <input type="text" id="model-cloud-custom-name" placeholder="Mi proveedor" />
+            URL base de la API
+            <input type="text" id="model-cloud-custom-url" placeholder="https://mi-proveedor.com/v1" />
+          </label>
+          <label class="model-settings-label">
+            API key <span class="dash-item-meta" id="model-api-key-status"></span>
+            <span class="model-api-key-row">
+              <input type="password" id="model-api-key" placeholder="Dejar vacío para no cambiarla" autocomplete="off" />
+              <button type="button" class="mini-btn" id="model-api-key-toggle">👁</button>
+            </span>
+          </label>
+          <button type="submit" class="mini-btn model-settings-save">Guardar y activar</button>
+        </form>
+        <div class="dash-item-meta" id="model-settings-feedback"></div>
       </div>
 
     </div>

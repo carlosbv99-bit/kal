@@ -30,6 +30,7 @@ from typing import Any, Callable
 import requests
 
 from agent_core.llm.provider import ChatResponse, ProviderError, ToolCall
+from kernel_bus.resource_broker import resource_broker as _default_resource_broker
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -56,6 +57,7 @@ class OllamaClient:
         post_fn: PostFn | None = None,
         get_fn: GetFn | None = None,
         sleep_fn: SleepFn | None = None,
+        resource_broker=None,
     ):
         self.base_url = (base_url or settings.llm.base_url).rstrip("/")
         self.timeout = timeout or settings.llm.timeout_seconds
@@ -77,6 +79,9 @@ class OllamaClient:
         self._post = post_fn or requests.post
         self._get = get_fn or requests.get
         self._sleep = sleep_fn or time.sleep
+        # inyectable para tests; el default real es el singleton
+        # compartido de kernel_bus/resource_broker.py.
+        self._resource_broker = resource_broker or _default_resource_broker
 
     def chat(
         self,
@@ -90,6 +95,11 @@ class OllamaClient:
         `tools` sigue el formato de function-calling estilo OpenAI:
         [{"type": "function", "function": {"name", "description", "parameters"}}].
         """
+        # Libera RAM de servicios multimedia inactivos ANTES de pedirle a
+        # Ollama (local, misma RAM del sistema) que genere — ver
+        # kernel_bus/resource_broker.py, bug real de contención de RAM.
+        self._resource_broker.evict_idle_and_pressured()
+
         payload: dict[str, Any] = {
             "model": model or settings.llm.default_model,
             "messages": messages,
@@ -115,7 +125,7 @@ class OllamaClient:
                 except json.JSONDecodeError:
                     logger.warning(f"No se pudo parsear arguments de tool_call como JSON: {arguments!r}")
                     arguments = {}
-            tool_calls.append(ToolCall(name=function.get("name", ""), arguments=arguments))
+            tool_calls.append(ToolCall(name=function.get("name", ""), arguments=arguments, id=raw_call.get("id")))
 
         return ChatResponse(content=content, tool_calls=tool_calls, raw=data)
 

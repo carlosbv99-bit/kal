@@ -15,28 +15,42 @@ Responsabilidades:
 """
 from __future__ import annotations
 
+import os
 import secrets
 import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_core.context_service import ContextService, EditorContextSignals
 from agent_core.llm.agent_loop import AgentLoop
 from agent_core.llm.ollama_client import OllamaClient
+from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
 from agent_core.llm.planner import PlanningAgentLoop
-from agent_core.llm.provider import ProviderError
+from agent_core.llm.provider import LLMProvider, ProviderError
+from agent_core.llm_settings import (
+    LLMSettingsError,
+    activate_cloud_profile,
+    get_llm_settings,
+    list_local_ollama_models,
+    list_model_sources,
+    pull_ollama_model,
+    read_llm_env_var,
+    update_llm_settings,
+)
 from agent_core.memory.manager import MemoryManager
 from agent_core.self_diagnosis import INVARIANT_CHECKS, SelfDiagnosisAgent
 from agent_core.self_modification import self_modification_manager
 from agent_core.sessions import session_manager
-from audit.audit_log import audit_log
+from agent_core.vscode_integration import VSCodeIntegrationError, get_status as get_vscode_status, install_extension
+from audit.audit_log import AuditEvent, audit_log
 from error_handling.circuit_breaker import circuit_breaker
 from task_execution.executor import TaskExecutor
 from tool_integration.base_tool import Artifact
+from tool_integration.filesystem_access_manager import FilesystemAccessError, filesystem_access_manager
 from tool_integration.permissions import Permission
 from tool_integration.registry import tool_registry
 from utils.admin_token import get_or_create_admin_token
@@ -44,6 +58,33 @@ from utils.config import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def build_llm_client() -> LLMProvider:
+    """
+    Fábrica del LLMProvider real según settings.llm.provider — kal se
+    distribuye a usuarios con hardware muy distinto (ver
+    docs/HISTORY.md), así que el cerebro del agente no puede quedar
+    hardcodeado a Ollama local. "ollama" (default) no cambia nada del
+    comportamiento de siempre. "openai_compatible" sirve tanto para un
+    proveedor real en la nube (Qwen/DashScope, Grok/xAI, OpenAI,
+    OpenRouter...) como para el propio endpoint OpenAI-compatible de
+    Ollama (ya validado en F2, ver agent_core/llm/openai_compatible_client.py).
+
+    Fail-closed: sin LLM_API_KEY configurada, kal ni arranca — mismo
+    criterio que IMAGE_GEN_API_KEY/AUDIO_GEN_API_KEY en los adaptadores
+    multimodales (tool_integration/adapters/image_gen.py), nunca
+    intentar sin autenticación y fallar tarde con un error confuso.
+    """
+    if settings.llm.provider == "openai_compatible":
+        api_key = read_llm_env_var("LLM_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "LLM_API_KEY no configurada — completá .env (ver .env.example) "
+                "para usar llm.provider: openai_compatible."
+            )
+        return OpenAICompatibleClient(base_url=settings.llm.base_url, api_key=api_key)
+    return OllamaClient()
 
 
 class Orchestrator:
@@ -54,7 +95,7 @@ class Orchestrator:
         self.self_modification = self_modification_manager
         self.sessions = session_manager
         self.context_service = ContextService()
-        self.llm = OllamaClient()
+        self.llm = build_llm_client()
         self.agent = AgentLoop(llm_client=self.llm, task_executor=self.tasks, memory=self.memory)
         self.planning_agent = PlanningAgentLoop(self.agent)
         self.self_diagnosis = SelfDiagnosisAgent(llm_client=self.llm)
@@ -94,6 +135,30 @@ def require_admin_token(x_kal_admin_token: str | None = Header(default=None)) ->
         )
 
 
+_LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
+
+
+@app.get("/admin-token")
+def get_admin_token_endpoint(request: Request):
+    """
+    Fricción real encontrada en uso: pedirle a un usuario no-programador
+    que copie el token administrativo de una terminal para poder usar
+    la interfaz web era impracticable. Esto se lo entrega automáticamente
+    al FRONTEND (nunca al agente ni a una skill: no es un tool, no hay
+    forma de que el LLM llegue a esto) — pero SOLO si la conexión viene
+    de loopback (mismo criterio que docker-compose.yml: 127.0.0.1). Quien
+    accede desde la propia máquina donde corre kal ya podría leer
+    data/keys/admin_token directamente del disco — esto no le da a un
+    atacante remoto ninguna capacidad nueva, solo evita que el usuario
+    legítimo tenga que ir a buscarlo a mano. Alguien conectándose desde
+    otra máquina en la LAN (el caso real que este token protege) sigue
+    sin poder obtenerlo por acá.
+    """
+    if request.client is None or request.client.host not in _LOOPBACK_ADDRESSES:
+        raise HTTPException(status_code=403, detail="Solo disponible desde la misma máquina donde corre kal.")
+    return {"token": _ADMIN_TOKEN}
+
+
 class TaskRequest(BaseModel):
     description: str
 
@@ -124,6 +189,10 @@ class ChatRequest(BaseModel):
     # usuario lo vea venir).
     deny_permissions: list[str] | None = None
     editor_context: EditorContextRequest | None = None
+    # None/"web" = interfaz web (default: genera imagen/audio/video). "vscode" =
+    # extensión de VS Code (ver agent_core/context_service.py::_VSCODE_CLIENT_INSTRUCTION) —
+    # ahí "página web"/"app"/"script" es un pedido de código, no de imágenes.
+    client: str | None = None
 
 
 class SelfModProposeRequest(BaseModel):
@@ -148,6 +217,21 @@ class ToolRollbackRequest(BaseModel):
 
 class MemoryVerifyRequest(BaseModel):
     verified_by: str
+
+
+class FilesystemAccessApproveRequest(BaseModel):
+    # "once" | "session" | "project" | "skill" — ver
+    # tool_integration/filesystem_access_manager.py::GrantLevel.
+    level: str = "once"
+
+
+class FilesystemAccessOutcomeRequest(BaseModel):
+    # Reportado por la extensión de VS Code después de que el usuario
+    # decide en la vista previa — el Kernel ya auto-permitió la acción
+    # por política, esto deja constancia de qué pasó DE VERDAD (auditoría
+    # con datos reales, no solo "se permitió").
+    outcome: str  # "written" | "discarded"
+    files_written: list[str] = Field(default_factory=list)
 
 
 class SelfDiagnosisRequest(BaseModel):
@@ -186,6 +270,111 @@ def list_models():
         raise HTTPException(status_code=503, detail=str(e))
 
 
+# --- Configuración del LLM (local u en la nube) ---
+# kal se distribuye a usuarios con hardware muy distinto (ver
+# docs/HISTORY.md) — esto deja elegir Ollama local o cualquier
+# proveedor compatible con OpenAI (Qwen, Grok/xAI, OpenAI...) desde la
+# interfaz, sin editar config.yaml/.env a mano. Ver agent_core/llm_settings.py.
+
+class LLMSettingsUpdateRequest(BaseModel):
+    provider: str
+    base_url: str | None = None
+    default_model: str | None = None
+    api_key: str | None = None  # None = no tocar la que ya está guardada
+    # Si se pasa junto con provider="openai_compatible", además de
+    # activarlo lo guarda como perfil reusable (ver
+    # agent_core/llm_settings.py::save_cloud_profile) — así vuelve a
+    # aparecer en el selector de modelo más adelante sin volver a
+    # pedir la key.
+    profile_name: str | None = None
+
+
+def _reinject_llm_client() -> None:
+    """
+    Reconstruye el cliente real y lo re-inyecta en todo lo que ya
+    tenía una referencia — sin esto, cambiar el proveedor/perfil activo
+    no tendría efecto hasta reiniciar el proceso entero.
+    """
+    orchestrator.llm = build_llm_client()
+    orchestrator.agent.llm = orchestrator.llm
+    orchestrator.planning_agent.planner.llm = orchestrator.llm
+    orchestrator.self_diagnosis.llm = orchestrator.llm
+
+
+@app.get("/settings/llm")
+def get_llm_settings_endpoint():
+    return get_llm_settings()
+
+
+@app.post("/settings/llm", dependencies=[Depends(require_admin_token)])
+def update_llm_settings_endpoint(req: LLMSettingsUpdateRequest):
+    try:
+        update_llm_settings(
+            provider=req.provider, base_url=req.base_url,
+            default_model=req.default_model, api_key=req.api_key,
+            profile_name=req.profile_name,
+        )
+    except LLMSettingsError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _reinject_llm_client()
+    return get_llm_settings()
+
+
+class ActivateCloudProfileRequest(BaseModel):
+    name: str
+
+
+@app.get("/settings/llm/sources")
+def list_model_sources_endpoint():
+    """
+    Modelos de TODAS las fuentes conocidas (Ollama local + cada perfil
+    en la nube guardado que responda con éxito ahora mismo) — a
+    diferencia de /models (solo el proveedor ACTIVO), esto es lo que
+    alimenta el selector de modelo resiliente del chat.
+    """
+    return {"sources": list_model_sources()}
+
+
+@app.post("/settings/llm/activate-profile", dependencies=[Depends(require_admin_token)])
+def activate_cloud_profile_endpoint(req: ActivateCloudProfileRequest):
+    try:
+        activate_cloud_profile(req.name)
+    except LLMSettingsError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _reinject_llm_client()
+    return get_llm_settings()
+
+
+class OllamaPullRequest(BaseModel):
+    model: str
+
+
+@app.get("/settings/llm/ollama/models")
+def list_local_ollama_models_endpoint():
+    """
+    Modelos YA descargados en el Ollama local — independiente de cuál
+    proveedor esté ACTIVO ahora mismo (a diferencia de /models, que
+    lista los del proveedor activo). Ollama caído no es un error del
+    endpoint, es un estado real y esperable: se informa como lista
+    vacía + un aviso, no como 500.
+    """
+    try:
+        return {"models": list_local_ollama_models(), "ollama_available": True}
+    except LLMSettingsError as e:
+        return {"models": [], "ollama_available": False, "detail": str(e)}
+
+
+@app.post("/settings/llm/ollama/pull", dependencies=[Depends(require_admin_token)])
+def pull_ollama_model_endpoint(req: OllamaPullRequest):
+    try:
+        pull_ollama_model(req.model)
+    except LLMSettingsError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"model": req.model, "status": "downloaded"}
+
+
 # --- Chat / agente ---
 
 
@@ -222,13 +411,13 @@ def chat(req: ChatRequest):
             text=req.editor_context.text,
             is_selection=req.editor_context.is_selection,
         )
-    context_bundle = orchestrator.context_service.build(session, editor_context)
+    context_bundle = orchestrator.context_service.build(session, editor_context, client=req.client)
 
     try:
         result = orchestrator.planning_agent.run(
             req.goal, model=req.model, use_planner=use_planner,
             history=context_bundle.history, session_context=context_bundle.session_context,
-            denied_permissions=session.denied_permissions,
+            denied_permissions=session.denied_permissions, client=req.client,
         )
     except ProviderError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -240,7 +429,20 @@ def chat(req: ChatRequest):
             orchestrator.sessions.update_active_artifact(session, step.artifact)
 
     def _step_artifact(step) -> dict | None:
-        if step.artifact is None or step.artifact.modality != "image":
+        if step.artifact is None:
+            return None
+        if step.artifact.modality == "project_files":
+            # A diferencia de image/audio/video, esto no es un archivo YA
+            # generado en disco (uri) — es una PROPUESTA que la extensión
+            # de VS Code todavía tiene que revisar y aplicar (ver
+            # vscode-extension/src/projectFiles.ts). El backend nunca
+            # escribe esto al disco real del usuario.
+            return {
+                "modality": "project_files",
+                "request_id": step.artifact.metadata.get("request_id"),
+                "files": step.artifact.metadata.get("files", []),
+            }
+        if step.artifact.modality != "image":
             return None
         url = _artifact_url(step.artifact.uri)
         if url is None:
@@ -453,6 +655,62 @@ def get_self_modification(proposal_id: str):
     return proposal
 
 
+# --- Permission Manager de filesystem (tool_integration/filesystem_access_manager.py) ---
+#
+# La política default (config.yaml: filesystem_access.auto_allow) ya
+# auto-permite crear/modificar dentro del workspace de VS Code — hoy
+# nada llega acá pidiendo aprobación en la práctica. Estos endpoints
+# quedan listos para cuando una Skill futura (o una acción
+# delete/rename de VS Code) sí lo necesite.
+
+@app.get("/filesystem-access")
+def list_pending_filesystem_access():
+    return [
+        {
+            "id": p.id, "skill_name": p.skill_name, "scope": p.scope.value,
+            "action": p.action.value, "resource_key": p.resource_key,
+        }
+        for p in filesystem_access_manager.list_pending()
+    ]
+
+
+@app.post("/filesystem-access/{request_id}/approve", dependencies=[Depends(require_admin_token)])
+def approve_filesystem_access(request_id: str, req: FilesystemAccessApproveRequest):
+    try:
+        filesystem_access_manager.approve(request_id, level=req.level)
+    except (FilesystemAccessError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": request_id, "status": "approved"}
+
+
+@app.post("/filesystem-access/{request_id}/deny", dependencies=[Depends(require_admin_token)])
+def deny_filesystem_access(request_id: str):
+    try:
+        filesystem_access_manager.deny(request_id)
+    except FilesystemAccessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": request_id, "status": "denied"}
+
+
+@app.post("/filesystem-access/{request_id}/report-outcome")
+def report_filesystem_access_outcome(request_id: str, req: FilesystemAccessOutcomeRequest):
+    """
+    Sin token admin a propósito: el Kernel ya auto-permitió esta acción
+    por política (auto_allow), esto solo deja constancia auditada de
+    qué pasó DE VERDAD del lado de la extensión (¿el usuario aplicó la
+    propuesta o la descartó?) — nunca decide nada, solo audita.
+    """
+    audit_log.record(
+        AuditEvent(
+            event_type="filesystem_access_granted" if req.outcome == "written" else "filesystem_access_denied",
+            summary=f"Extensión de VS Code reportó '{req.outcome}' para la solicitud {request_id}",
+            context={"request_id": request_id, "outcome": req.outcome, "files_written": req.files_written},
+            outcome="success" if req.outcome == "written" else "failure",
+        )
+    )
+    return {"id": request_id, "outcome": req.outcome}
+
+
 # --- Auto-diagnóstico ---
 # Bajo demanda únicamente: nunca se dispara solo, ni siquiera cuando un
 # invariante está mal — alguien tiene que pedirlo explícitamente acá.
@@ -477,6 +735,25 @@ def self_repair(invariant: str, req: SelfDiagnosisRequest):
             if result.proposal else None
         ),
     }
+
+
+# --- Integraciones de IDE ---
+# v1 escopado: solo VS Code, sin instalar VS Code mismo (se asume ya
+# instalado) ni protocolo de handshake — la extensión ya habla HTTP
+# simple contra esta misma API. Ver agent_core/vscode_integration.py.
+
+@app.get("/integrations/vscode/status")
+def vscode_integration_status():
+    return get_vscode_status()
+
+
+@app.post("/integrations/vscode/install", dependencies=[Depends(require_admin_token)])
+def vscode_integration_install():
+    try:
+        message = install_extension()
+    except VSCodeIntegrationError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"message": message}
 
 
 # --- Auditoría ---
@@ -507,6 +784,18 @@ def serve_app_js():
     return FileResponse(_FRONTEND_DIR / "app.js", media_type="application/javascript", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/")
+def serve_index_html():
+    # BUG REAL ENCONTRADO EN USO: la suposición original de que
+    # "index.html no cambia tan seguido" dejó de ser cierta — ganó
+    # varios campos/ids nuevos en esta misma sesión (pestañas Modelo/
+    # Integraciones). Un index.html viejo cacheado junto con un app.js
+    # nuevo (ese sí ya servido sin cache) rompe en silencio: el JS
+    # nuevo busca ids que el HTML viejo no tiene. Mismo criterio que
+    # style.css/app.js de acá arriba.
+    return FileResponse(_FRONTEND_DIR / "index.html", media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
 # --- Artefactos (imágenes/audio/video generados o subidos) ---
 # Solo lectura: sirve lo que ya hay en data/artifacts/ para que el
 # frontend pueda mostrar <img src="/artifacts/..."> — sin esto, no hay
@@ -517,9 +806,8 @@ app.mount("/artifacts", StaticFiles(directory=str(_ARTIFACTS_DIR)), name="artifa
 
 # --- Frontend estático ---
 # Mount catch-all en "/" — tiene que ser el ÚLTIMO mount registrado,
-# cualquier ruta/mount nuevo va ANTES de este. index.html sí puede
-# cachearse (no cambia tan seguido y no tiene el mismo impacto que un
-# CSS/JS desactualizado) — solo style.css/app.js tienen la ruta
-# explícita sin cache de arriba.
+# cualquier ruta/mount nuevo va ANTES de este. La ruta explícita de
+# arriba (serve_index_html) ya intercepta "/" sin cache; este mount
+# sigue sirviendo cualquier OTRO archivo estático del frontend.
 if _FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")

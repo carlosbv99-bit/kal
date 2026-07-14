@@ -41,6 +41,20 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Hallazgo de la revisión de seguridad 2026-07-09, corregido ahora: sin
+# esto, una skill (la confianza MÁS BAJA del sistema, instalable hoy
+# desde el market) podía mandar bytes sin salto de línea indefinidamente
+# y el proceso HOST (de confianza) los acumulaba sin límite en memoria —
+# DoS de memoria alcanzable por un tercero real, no solo teórico. Los
+# pedidos legítimos de hoy (prompt de texto + referencias artifact://,
+# nunca bytes binarios inline) pesan unos pocos KB — 1 MiB deja más de
+# 100x de margen sin dejar de acotar el peor caso.
+_MAX_LINE_BYTES = 1_048_576
+
+
+class LineTooLongError(Exception):
+    """Una conexión mandó más de _MAX_LINE_BYTES sin un salto de línea."""
+
 
 class KernelBusSocketServer:
     def __init__(
@@ -95,6 +109,9 @@ class KernelBusSocketServer:
                         line = self._read_line(conn)
                     except (socket.timeout, OSError):
                         continue
+                    except LineTooLongError:
+                        self._audit_line_too_long()
+                        continue
                     if line is None:
                         continue
 
@@ -123,6 +140,8 @@ class KernelBusSocketServer:
             if not chunk:
                 return None
             buf += chunk
+            if len(buf) > _MAX_LINE_BYTES:
+                raise LineTooLongError(f"línea de más de {_MAX_LINE_BYTES} bytes sin salto de línea")
         line, _, _ = buf.partition(b"\n")
         return line.decode("utf-8")
 
@@ -171,6 +190,16 @@ class KernelBusSocketServer:
                 event_type="kernel_service_denied",
                 summary=f"Skill '{self.skill_name}' intentó llamar a '{method}' sin declararlo en kernel_services",
                 context={"skill": self.skill_name, "method": method},
+                outcome="failure",
+            )
+        )
+
+    def _audit_line_too_long(self) -> None:
+        audit_log.record(
+            AuditEvent(
+                event_type="kernel_bus_line_too_long",
+                summary=f"Skill '{self.skill_name}' mandó una línea de más de {_MAX_LINE_BYTES} bytes sin salto de línea — conexión cortada",
+                context={"skill": self.skill_name},
                 outcome="failure",
             )
         )

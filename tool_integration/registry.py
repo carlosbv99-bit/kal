@@ -388,6 +388,7 @@ def _register_default_static_tools() -> None:
     from tool_integration.adapters.image_gen import ImageGenerationTool
     from tool_integration.adapters.speech_to_text import SpeechToTextTool
     from tool_integration.adapters.video_gen import VideoCompositionTool
+    from tool_integration.adapters.vscode_files import ProposeProjectFilesTool
 
     # UNA sola instancia de cada servicio, compartida de verdad entre el
     # adaptador de primera parte (llamada Python directa) y cualquier
@@ -411,6 +412,7 @@ def _register_default_static_tools() -> None:
     tool_registry.register_static_tool(SpeechToTextTool(stt_service=shared_stt_service))
     tool_registry.register_static_tool(ImageEditingTool(image_service=shared_image_service))
     tool_registry.register_static_tool(ImageCompositionTool())
+    tool_registry.register_static_tool(ProposeProjectFilesTool())
     tool_registry.load_skills()
 
 

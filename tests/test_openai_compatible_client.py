@@ -19,9 +19,10 @@ from agent_core.llm.provider import ProviderError
 
 
 class FakeResponse:
-    def __init__(self, json_data, status_code=200):
+    def __init__(self, json_data, status_code=200, text=""):
         self._json = json_data
         self.status_code = status_code
+        self.text = text
 
     def json(self):
         return self._json
@@ -30,7 +31,10 @@ class FakeResponse:
         if self.status_code >= 400:
             import requests
 
-            raise requests.HTTPError(f"HTTP {self.status_code}")
+            # `response=self` es lo que hace requests de verdad — sin
+            # esto, exc.response sería None y _response_detail() nunca
+            # podría recuperar el cuerpo real del error.
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
 
 def _client(post_fn=None, get_fn=None):
@@ -80,6 +84,10 @@ def test_chat_parses_tool_calls_with_arguments_as_json_string():
     assert result.has_tool_calls is True
     assert result.tool_calls[0].name == "run_code"
     assert result.tool_calls[0].arguments == {"code": "print(1)"}
+    # BUG REAL ENCONTRADO EN USO: Groq exige este 'id' para correlacionar
+    # la respuesta de la herramienta con la llamada — sin propagarlo acá,
+    # agent_loop.py no tenía de dónde sacarlo.
+    assert result.tool_calls[0].id == "call_1"
 
 
 def test_chat_raises_provider_error_on_connection_failure():
@@ -118,3 +126,74 @@ def test_is_available_false_when_get_fails():
 
 def test_openai_compatible_error_is_a_provider_error():
     assert issubclass(OpenAICompatibleError, ProviderError)
+
+
+# --- Detalle real del error (bug real encontrado probando contra Grok/xAI) ---
+#
+# str(HTTPError) SOLO trae la línea de estado ("400 Client Error: Bad
+# Request for url: ..."), nunca el cuerpo — que es justamente donde un
+# proveedor real (Grok/xAI acá) explica QUÉ está mal. Confirmado en vivo:
+# "Model not found: qwen3-coder:30b" (chat) y "Your newly created team
+# doesn't have any credits..." (list_models) quedaban invisibles sin esto.
+
+
+def test_chat_error_includes_the_real_response_body():
+    response = FakeResponse(
+        None, status_code=400, text='{"code":"invalid-argument","error":"Model not found: qwen3-coder:30b"}',
+    )
+    client = _client(post_fn=lambda *a, **kw: response)
+
+    with pytest.raises(OpenAICompatibleError, match="Model not found: qwen3-coder:30b"):
+        client.chat([{"role": "user", "content": "hola"}])
+
+
+def test_list_models_error_includes_the_real_response_body():
+    response = FakeResponse(
+        None, status_code=403, text='{"code":"permission-denied","error":"no tenés créditos"}',
+    )
+    client = _client(get_fn=lambda *a, **kw: response)
+
+    with pytest.raises(OpenAICompatibleError, match="no tenés créditos"):
+        client.list_models()
+
+
+# --- tool_use_failed de Groq: no tirar la respuesta a la basura ---
+#
+# BUG REAL ENCONTRADO EN USO: Groq rechaza con 400 cuando el modelo
+# intenta una llamada a herramienta mal formada — pero el cuerpo del
+# error YA trae, en "failed_generation", la respuesta en texto plano
+# que el modelo quería dar. Confirmado en vivo contra el agente IDE de
+# VS Code: "crea un proyecto html para un sitio web" perdía la
+# respuesta entera por esto.
+
+
+def test_chat_uses_the_failed_generation_as_fallback_content_on_tool_use_failed():
+    response = FakeResponse(
+        {
+            "error": {
+                "message": "Failed to call a function. Please adjust your prompt.",
+                "type": "invalid_request_error",
+                "code": "tool_use_failed",
+                "failed_generation": "¡Claro! Acá tenés un ejemplo de proyecto HTML...",
+            }
+        },
+        status_code=400,
+    )
+    client = _client(post_fn=lambda *a, **kw: response)
+
+    result = client.chat([{"role": "user", "content": "hola"}], tools=[{"type": "function", "function": {}}])
+
+    assert result.content == "¡Claro! Acá tenés un ejemplo de proyecto HTML..."
+    assert result.tool_calls == []
+
+
+def test_chat_still_raises_on_a_400_that_is_not_tool_use_failed():
+    response = FakeResponse(
+        {"error": {"message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"}},
+        status_code=400,
+        text='{"error":{"message":"Model not found","type":"invalid_request_error","code":"model_not_found"}}',
+    )
+    client = _client(post_fn=lambda *a, **kw: response)
+
+    with pytest.raises(OpenAICompatibleError, match="Model not found"):
+        client.chat([{"role": "user", "content": "hola"}])

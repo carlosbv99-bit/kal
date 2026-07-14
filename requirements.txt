@@ -53,6 +53,7 @@ rembg>=2.0               # eliminar fondo (modelo u2net, se descarga la 1a vez)
 # --- Utilidades ---
 tenacity>=8.2          # reintentos con backoff
 structlog>=24.1         # logging estructurado
+psutil>=5.9            # RAM disponible del sistema, ver kernel_bus/resource_broker.py
 
 # --- Testing ---
 pytest>=8.0

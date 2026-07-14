@@ -25,6 +25,17 @@ from typing import Any, Protocol, runtime_checkable
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
+    # ESTRICTO, a diferencia de Ollama) exige un 'id' único por
+    # tool_call, para correlacionar la respuesta de la herramienta
+    # (mensaje role="tool", campo tool_call_id) con la llamada que la
+    # originó — sin esto, un proveedor estricto rechaza cualquier turno
+    # posterior a una llamada a herramienta. Default None: Ollama no
+    # siempre lo devuelve, y el fallback de texto plano
+    # (_extract_fallback_tool_call) tampoco tiene uno — agent_loop.py
+    # genera uno nuevo si falta, nunca deja pasar un ToolCall sin id
+    # hacia afuera.
+    id: str | None = None
 
 
 @dataclass

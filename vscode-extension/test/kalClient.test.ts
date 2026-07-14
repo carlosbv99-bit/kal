@@ -48,6 +48,17 @@ test("chat() manda model=null, session_id=null y editor_context=null cuando no s
   await client.chat("x");
 });
 
+test("chat() siempre manda client: \"vscode\" — la interfaz web sigue generando imagen/audio/video, esta faceta no", async () => {
+  const fakeFetch = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    assert.equal(body.client, "vscode");
+    return jsonResponse({ session_id: "s", goal: "x", final_answer: "y", status: "success", plan: [], steps: [] });
+  }) as typeof fetch;
+
+  const client = new KalClient("http://localhost:8000", fakeFetch);
+  await client.chat("x");
+});
+
 test("chat() manda editor_context como señal cruda, nunca texto ya formateado", async () => {
   const fakeFetch = (async (_url: any, init: any) => {
     const body = JSON.parse(init.body);

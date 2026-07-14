@@ -2449,3 +2449,1340 @@ un escaneo). El resto de `test_sandboxed_skill.py` ganó un fixture
 `autouse` que simula "limpio" por defecto (no depende de tener
 ClamAV real instalado para probar la lógica de `SandboxedSkillTool`
 en sí, que es un concern distinto del escaneo).
+
+## Guía de usuario para VS Code + instalación automatizada (2026-07-11)
+
+Con la extensión de VS Code ya funcional (Hito 1/2, más arriba), faltaba
+la pieza que la hace usable por alguien no técnico: una guía concreta
+paso a paso (`docs/GUIA_VSCODE.md`, nueva) — instalar prerequisitos,
+preparar el proyecto, arrancar kal, cargar la extensión, usar los tres
+comandos, con un "✅ cómo saber que funcionó" en cada paso, pensada para
+quien nunca usó kal (ver memoria: usuario no programador).
+
+A pedido explícito, se automatizó buena parte de esa guía en
+`scripts/setup_all.sh` (nuevo): detecta y ofrece instalar (con
+confirmación antes de cada `sudo`) Docker/Python 3.11+/ffmpeg/Node
+18+/Ollama, prepara `.venv` + `pip install`, y compila+empaqueta+instala
+la extensión de forma **permanente** vía `vsce package` +
+`code --install-extension` — en vez del flujo de desarrollo (F5,
+"Extension Development Host") que documentaba el README original de la
+extensión. Alcance deliberado: solo Ubuntu/Debian (`apt`); en otra
+distro, avisa y remite a la guía manual. Es re-ejecutable (cada paso se
+salta si ya está hecho).
+
+**Bug real encontrado al probarlo** (no solo escrito, corrido de
+verdad en esta máquina): el primer intento de empaquetar con
+`npx @vscode/vsce package` usaba flags inventados (`-q`,
+`--packagePath` duplicado con `--out`) que no existen en esa CLI —
+`vsce package --help` reveló las flags reales
+(`--no-dependencies --allow-missing-repository --out <path>`).
+Corregido y confirmado con `code --list-extensions` mostrando
+`undefined_publisher.kal-vscode@0.1.0` instalado. De paso, se notó que
+el `.vsix` empaquetaba también los tests compilados
+(`out/test/*.test.js`, no excluidos por `.vscodeignore` — solo `test/**`,
+la fuente `.ts`, sí lo estaba) — agregado `out/test/**` a
+`vscode-extension/.vscodeignore`.
+
+## Integración de VS Code v1 — botón "Instalar" desde la web (2026-07-11)
+
+El usuario propuso una arquitectura ambiciosa: un "Integration
+Manager" del Kernel, protocolo de handshake con session tokens,
+"Capability Packages" instalables desde un marketplace, generalizado a
+cualquier IDE (JetBrains, Neovim, Photoshop...). Mismo criterio de
+disciplina de alcance ya aplicado en este proyecto: se documentó la
+visión como norte a futuro, pero se escopó una v1 concreta —
+
+- **Lo que NO se construyó, y por qué**: instalar VS Code mismo (la
+  app, cross-platform, alto riesgo, sin demanda validada); un
+  handshake con negociación de versión/capabilities (resuelve un
+  problema — múltiples tipos de cliente — que no existe con un solo
+  cliente HTTP); "Capability Packages" genéricos vía marketplace para
+  integraciones (generalización prematura sin un segundo caso real de
+  IDE que la justifique).
+- **Lo que sí**: reusar lo ya construido y probado en
+  `scripts/setup_all.sh`. Nuevo `agent_core/vscode_integration.py`
+  (`get_status()`, `install_extension()` — compila, empaqueta e
+  instala vía subprocess, cada intento auditado — éxito o fracaso —
+  con el `EventType` nuevo `"vscode_extension_installed"`). Dos
+  endpoints nuevos en `agent_core/orchestrator.py`:
+  `GET /integrations/vscode/status` (sin auth, solo lectura) y
+  `POST /integrations/vscode/install` (gateado con el mismo token
+  administrativo que ya protege self-modification/rollback — no un
+  mecanismo nuevo). Nuevo tab **"Integraciones"** en la interfaz web
+  (`frontend/index.html`/`app.js`/`style.css`) con la tarjeta VS Code
+  (estado + botón Instalar/Reinstalar) exactamente como la propuso el
+  usuario.
+- **Verificado real, de punta a punta, no solo con mocks**: se
+  desinstaló la extensión (`code --uninstall-extension`), se confirmó
+  `installed: false` vía el status endpoint real, se disparó el POST
+  real con el token admin real, y se confirmó la instalación con
+  `code --list-extensions` — más el evento correspondiente en el log
+  de auditoría, con la cadena íntegra. 18 tests nuevos (unitarios de
+  `vscode_integration.py` con subprocess mockeado +
+  endpoints con el auth gate ya existente extendido a la nueva ruta).
+
+## Ícono en la Activity Bar + ítem en la barra de estado (2026-07-11)
+
+Pregunta de un usuario no técnico tras usar el botón "Instalar": "¿va a
+aparecer un botón de kal en la interfaz de VS Code?" — respuesta
+honesta: no, la extensión solo contribuía comandos de paleta
+(`Ctrl+Shift+P`), sin ningún elemento visible. A pedido explícito, se
+agregaron dos puntos de entrada visibles:
+
+- **Ítem en la barra de estado** ("💬 Kal", abajo a la derecha) que
+  corre el comando `kal.openChat` ya existente — sin contribución
+  nueva en `package.json`, se crea programáticamente en
+  `extension.ts` vía `vscode.window.createStatusBarItem`.
+- **Ícono propio en la Activity Bar** (barra lateral izquierda, junto
+  a otras extensiones de agentes de IA que el usuario tenga
+  instaladas) — nuevo `viewsContainers`/`views` en `package.json`,
+  ícono `media/activity-icon.svg` (un trazo simple en forma de "k",
+  sin dependencia de fuentes: VS Code recolorea íconos monocromáticos
+  automáticamente). Abre una vista de chat fija (`ChatViewProvider`,
+  nuevo, implementa `vscode.WebviewViewProvider`) — conversación
+  **independiente** de la que abre `ChatPanel` (su propio
+  `session_id`, no comparten historial); no participa del flujo de
+  "contexto del editor adjunto" de "Preguntar sobre la selección",
+  eso sigue siendo específico de `ChatPanel`.
+
+El HTML del webview (`buildHtml()` en `ChatPanel`) era casi idéntico a
+lo que necesitaba `ChatViewProvider` — segundo consumidor real, no
+hipotético, así que se extrajo a `chatWebviewHtml.ts` compartido
+(`buildChatHtml()` + `getNonce()`) en vez de duplicarlo.
+
+**Verificado real**: `npm test` (20 tests existentes, sin
+regresiones) + reinstalación real vía el mismo botón "Instalar" de la
+web (desinstalar → instalar → confirmar con `code --list-extensions`
+y `find ~/.vscode/extensions/.../out/src` que el `.vsix` instalado
+contiene `chatViewProvider.js`/`chatWebviewHtml.js` y que
+`package.json` dentro del paquete instalado trae `viewsContainers` y
+`kal.chatView`). **Límite honesto**: no hay forma de abrir una ventana
+real de VS Code en este entorno (sin GUI) para confirmar visualmente
+que el ícono se ve bien en la Activity Bar — validado que el paquete
+está bien formado y VS Code lo aceptó sin error, pero la confirmación
+visual queda para cuando el usuario lo pruebe.
+
+## Límite de tamaño de línea en el Kernel Bus (2026-07-11)
+
+Primer hallazgo corregido de los 7 documentados como "deuda aceptada"
+en la revisión de seguridad del 2026-07-09 (ver
+[[project_security_review_2026_07_09]]) — elegido explícitamente por
+ser "el único que un tercero real podría disparar hoy con una skill
+instalada desde el market": `KernelBusSocketServer._read_line()`
+(`kernel_bus/socket_server.py`) acumulaba bytes en un buffer sin
+ningún límite mientras esperaba un `\n` — una skill (la confianza MÁS
+BAJA del sistema, hoy instalable desde el market remoto vía Fase A)
+que mandara datos sin salto de línea agotaba memoria del proceso HOST
+de confianza, no de su propio contenedor aislado. DoS real, no solo
+teórico, y alcanzable desde el punto de menor confianza del sistema.
+
+**Implementado**: constante `_MAX_LINE_BYTES = 1_048_576` (1 MiB) —
+los pedidos legítimos de hoy son JSON con texto de prompt y
+referencias `artifact://...` (nunca bytes binarios inline), de unos
+pocos KB; 1 MiB deja más de 100x de margen sin dejar de acotar el peor
+caso. `_read_line()` levanta `LineTooLongError` en cuanto el buffer
+supera ese límite, antes de intentar decodificar nada. `_serve()` la
+atrapa igual que ya atrapaba `socket.timeout`/`OSError`: corta esa
+conexión (sin responder nada — mismo criterio que cuando el cliente
+cierra temprano) y sigue sirviendo conexiones siguientes con
+normalidad, auditado (`EventType` nuevo:
+`"kernel_bus_line_too_long"`).
+
+**Fuera de alcance, a propósito**: `tool_integration/kernel_client.py`
+(el SDK que se copia DENTRO del contenedor de cada skill) tiene la
+misma función `_read_line()` duplicada, mismo patrón sin límite — pero
+ahí el riesgo es al revés: agotaría memoria de la propia skill
+(sandboxeada, ya con límites de recursos de Docker), nunca del host.
+No es el hallazgo que motivó este trabajo; queda anotado por si algún
+día se decide hacerlo simétrico por prolijidad, no por necesidad de
+seguridad.
+
+3 tests nuevos en `tests/test_kernel_bus_socket_server.py`: unitario
+directo de `_read_line()` con un `conn` falso que nunca manda un
+salto de línea (rápido, sin socket real); confirmación de que un
+pedido legítimo grande (200KB, bien por debajo del límite) sigue
+funcionando igual — el fix no penaliza pedidos reales, solo el caso
+sin límite; y un test de punta a punta con un socket Unix real que
+manda >1 MiB sin salto de línea, confirma que el servidor corta esa
+conexión sin respuesta, lo audita, y sigue atendiendo la conexión
+siguiente con normalidad (una skill hostil no puede tumbar el
+servicio para las demás). Suite completa: 583 passed, 0 regresiones.
+
+## Enter para enviar en el chat de la extensión de VS Code (2026-07-11)
+
+Reporte de uso real (capturas de pantalla del usuario probando el
+panel de chat instalado): `Enter` no enviaba el mensaje, solo agregaba
+un salto de línea — a diferencia de `frontend/app.js` (interfaz web),
+donde `Enter` ya envía y `Shift+Enter` hace salto de línea.
+`vscode-extension/media/chat.js` tenía la condición invertida
+(`ev.ctrlKey || ev.metaKey`, es decir Ctrl/Cmd+Enter para enviar).
+Corregido a `!ev.shiftKey`, mismo comportamiento que la web.
+
+## Distinción cliente web vs. agente IDE + restricción estructural de herramientas (2026-07-11)
+
+**Hallazgo real, en las mismas capturas**: pedirle a kal desde la
+extensión de VS Code "creá la página web para una panadería" fallaba
+de tres formas distintas, en tres intentos sucesivos, cada uno
+probado de verdad contra el modelo (`qwen3-coder:30b` vía Ollama), no
+en teoría:
+
+1. **Intento 1 (sin ningún fix)**: el modelo generó código Python con
+   `import os` y `open('index.html', 'w')` dentro de `run_code` —
+   rechazado por el validador estático (`code_analysis/denylist.py`,
+   que prohíbe `os`/`open()` a propósito en ese sandbox). Diagnóstico
+   real: `run_code` nunca pudo escribir archivos persistentes, el
+   modelo no lo sabía y lo intentaba de todos modos.
+2. **Intento 2 (regla de prompt genérica)**: se agregó una regla al
+   `SYSTEM_PROMPT` pidiendo explícitamente responder con el código en
+   la respuesta en vez de intentar escribir archivos. Probado en
+   vivo: el modelo dejó de intentar `open()`, pero interpretó "página
+   web" como "necesito imágenes" — generó 3 fotos de panadería sin
+   relación con HTML/CSS/JS, intentó una 4ta imagen totalmente ajena
+   (paisaje de montaña), chocó con el tope de repeticiones, y
+   respondió "¡Entendido!" sin código ni explicación.
+3. **Aquí el usuario aclaró un límite de alcance importante**: esta
+   corrección de comportamiento debía aplicar SOLO a la faceta de
+   agente IDE (VS Code) — la interfaz web debía seguir generando
+   imagen/audio/video como comportamiento validado de siempre. Esto
+   requirió que el backend supiera de qué cliente viene cada pedido.
+   **Implementado**: `ChatRequest.client: str | None` nuevo
+   (`agent_core/orchestrator.py`) — `None`/`"web"` = comportamiento de
+   siempre, `"vscode"` = la extensión (`kalClient.ts::chat()` ahora
+   manda `client: "vscode"` siempre). `ContextService.build()` gana un
+   parámetro `client`; si es `"vscode"`, agrega una instrucción nueva
+   (`_VSCODE_CLIENT_INSTRUCTION`) al único mensaje system fusionado
+   (respeta la restricción ya documentada de nunca usar un segundo
+   mensaje system).
+4. **Intento 3, con la distinción de cliente ya en su lugar (regla de
+   prompt condicional)**: probado en vivo de nuevo con
+   `client: "vscode"` — el modelo TODAVÍA generó 2 imágenes + llamó a
+   `system_info` 4 veces, chocó con el tope de repeticiones, y
+   respondió con un párrafo confuso sin código. **Conclusión real,
+   confirmada dos veces con reglas de prompt distintas**: pedirle al
+   modelo por texto que no llame a una herramienta disponible no es
+   una garantía — mismo patrón ya documentado con
+   `max_tool_repeats` (bug de la "raqueta de tenis": "la regla de
+   SYSTEM_PROMPT sola no alcanzó").
+5. **Fix real, estructural, no de prompt**: `AgentLoop` excluye del
+   toolset que arma para el modelo (`_build_tools_from_registry`,
+   `agent_core/llm/agent_loop.py`) las herramientas multimedia cuando
+   `client == "vscode"` — nueva constante `_MULTIMEDIA_TOOL_NAMES`
+   (image_generation, audio_generation, video_composition,
+   image_editing, image_composition, speech_to_text,
+   image_via_kernel, audio_via_kernel, voice_roundtrip_via_kernel,
+   image_inpaint_via_kernel). El modelo ni siquiera VE estas
+   herramientas en la lista que se le manda a Ollama — no es una
+   petición que pueda ignorar. `client` se enhebra desde
+   `ChatRequest` → `PlanningAgentLoop.run()` → `AgentLoop.run()` →
+   `_current_tools(client)`.
+
+**Verificación**: 6 tests nuevos (3 en `test_context_service.py`: la
+instrucción se agrega solo con `client="vscode"`, nunca con
+`None`/`"web"`, y se fusiona correctamente con artefacto/contexto de
+editor en el único mensaje system; 3 en `test_agent_loop.py`: el
+toolset real de herramientas — no un doble de prueba — excluye las
+multimedia con `client="vscode"`, las mantiene con `client=None`, y un
+tool_call "alucinado" hacia una herramienta excluida se rechaza como
+desconocida en vez de ejecutarse). `npm test` de la extensión: 21/21.
+
+**Límite honesto sobre la confirmación en vivo final**: el último
+intento de reproducir el caso completo contra Ollama real dio timeout
+de 120s, dos veces — investigado a fondo, no es un fallo del fix: esta
+máquina está bajo presión real de memoria ahora mismo (el proceso de
+Ollama con `qwen3-coder:30b` usa ~18.7GB de RAM de 27GB totales, con
+apenas ~3.5GB "disponibles" contando el resto de procesos del
+sistema/navegador). El mecanismo en sí (qué herramientas se le mandan
+al modelo) es código determinístico ya verificado con tests reales
+sobre el registry real de herramientas, no un doble — no depende de
+que el modelo "elija bien", así que esa verificación alcanza aunque no
+se haya podido repetir el flujo completo en vivo bajo esta carga de
+memoria puntual.
+
+Esta investigación de recursos, de paso, expuso un hallazgo real
+aparte: `ImageService`/`AudioService`/`STTService` (`kernel_bus/
+services.py`) cargan su modelo perezosamente pero nunca lo descargan
+— una vez generada una imagen, ese pipeline de varios GB queda en RAM
+para siempre mientras viva el proceso. Motivó una propuesta del
+usuario de un "Resource Broker" más amplio — evaluada, no
+implementada todavía, ver memoria del proyecto.
+
+## LLM en la nube como alternativa a Ollama local (2026-07-11)
+
+El usuario recordó un principio de fondo del proyecto (ya confirmado
+antes, ver "Confirmación explícita: kal es para uso general, no
+personal" más arriba): kal se DISTRIBUYE a usuarios con hardware muy
+distinto — el problema real de memoria que se acababa de encontrar
+(Ollama con `qwen3-coder:30b` usando ~18.7GB de RAM) lo podría sufrir
+cualquier otro usuario con menos RAM/VRAM que esta máquina de
+desarrollo, y la aplicación debe estar preparada para eso desde ya,
+no después. Pidió poder probar un modelo en la nube (Qwen, Grok/xAI,
+u otro) como alternativa real a Ollama local.
+
+**Lo que ya estaba construido y no hubo que rehacer**: el contrato
+`LLMProvider` (F1) y `OpenAICompatibleClient` (F2, `agent_core/llm/
+openai_compatible_client.py`) — ya soportaba `api_key` vía header
+`Authorization: Bearer` desde el día que se escribió, solo nunca se
+había probado contra un proveedor real en la nube (F2 lo validó
+contra el propio endpoint OpenAI-compatible de Ollama, sin costo).
+
+**Lo que faltaba, implementado ahora**: `utils/config.py::LLMConfig`
+gana `provider: Literal["ollama", "openai_compatible"] = "ollama"` —
+mismo patrón ya usado en `ImageGenConfig`/`AudioGenConfig`
+(`backend: "local" | "api"`). Nueva fábrica
+`agent_core/orchestrator.py::build_llm_client()`: con
+`provider: "ollama"` (default) construye `OllamaClient()` exactamente
+como antes, cero cambio de comportamiento; con
+`provider: "openai_compatible"` construye `OpenAICompatibleClient`
+apuntando a `settings.llm.base_url` (tiene que ser la URL COMPLETA que
+pida el proveedor elegido, sin agregarle nada por detrás) con la key
+de `LLM_API_KEY` (nuevo en `.env.example`). Fail-closed: sin la key
+configurada, kal ni arranca, con un error claro — mismo criterio que
+`IMAGE_GEN_API_KEY`/`AUDIO_GEN_API_KEY` en los adaptadores
+multimodales, nunca intentar sin autenticación. `config/config.yaml`
+documenta ejemplos reales de `base_url`/`default_model` para Qwen
+(DashScope), Grok/xAI y OpenAI.
+
+3 tests nuevos (`tests/test_llm_client_factory.py`): provider default
+construye `OllamaClient`; `openai_compatible` sin `LLM_API_KEY` falla
+cerrado con el mensaje claro; con la key, construye
+`OpenAICompatibleClient` apuntando exactamente a la URL configurada.
+
+**Pendiente real, no simulado**: el usuario eligió probar con
+Grok/xAI en concreto — falta que configure su propia API key (no
+compartida en esta conversación, por seguridad) y confirme para hacer
+la prueba real en vivo (`/models`, `/status`, `/chat`) contra la API
+de verdad, no solo contra dobles de prueba.
+
+## Interfaz web para configurar el modelo (local o en la nube) (2026-07-11)
+
+Seguimiento inmediato de lo anterior: el usuario pidió una interfaz
+para que cualquier usuario cambie de proveedor sin editar
+`config.yaml`/`.env` a mano — coherente con "kal se distribuye, no es
+de uso personal".
+
+**Implementado**: `agent_core/llm_settings.py` (nuevo) —
+`get_llm_settings()` (nunca devuelve la API key en sí, solo
+`has_api_key: bool`) y `update_llm_settings(provider, base_url=,
+default_model=, api_key=)`. Persiste con reemplazo de texto DIRIGIDO
+(regex ancorado a inicio de línea), nunca `yaml.dump()`/reescritura
+completa — mismo criterio que `tool_integration/skills.py::
+set_skill_enabled()`: `config.yaml` tiene comentarios reales
+(ejemplos de `base_url` por proveedor) que un dump destruiría.
+Verificado con un test que efectivamente busca que esos ejemplos
+comentados sigan intactos después de un update. Si `.env` no existe
+todavía, se crea a partir de `.env.example` antes de escribir la key
+(no asume que ya existe).
+
+Valida ANTES de escribir nada: `provider: "openai_compatible"` sin
+`base_url` (o con el default de Ollama sin cambiar) rechaza con un
+mensaje claro; sin ninguna API key (ni nueva ni ya guardada), también
+— así nunca se deja `config.yaml` apuntando a un estado que después
+haría fallar el arranque completo del proceso.
+
+Dos endpoints nuevos en `orchestrator.py`: `GET /settings/llm` (sin
+auth, nunca expone la key) y `POST /settings/llm` (gateado con el
+token admin, mismo mecanismo que self-modification/VS Code). Un
+update exitoso no solo persiste a disco — reconstruye el cliente real
+(`build_llm_client()`) y lo re-inyecta en TODO lo que ya tenía una
+referencia vieja (`orchestrator.llm`, `.agent.llm`,
+`.planning_agent.planner.llm`, `.self_diagnosis.llm`) para que el
+cambio tenga efecto de inmediato, sin reiniciar el proceso.
+
+Nueva pestaña **"Modelo"** en la interfaz web (`frontend/index.html`/
+`app.js`/`style.css`): selector de proveedor, URL base, modelo por
+defecto, API key (nunca prellenada, solo un indicador de "ya
+configurada"/"no configurada"). Al guardar, también refresca el
+selector de modelo del chat (`loadModels()`) — depende del proveedor
+recién activado.
+
+**Verificado real, no solo con tests**: `GET /settings/llm` contra el
+proceso real; `POST` sin token → 401; con token pero sin `base_url`
+para `openai_compatible` → 400 con el mensaje claro, SIN tocar
+`config.yaml`; `POST` con `provider: "ollama"` (no-op seguro, mismos
+valores ya vigentes) → 200, confirmado con `grep` que `config.yaml`
+sigue exactamente igual, comentarios/ejemplos incluidos. 12 tests
+nuevos (9 en `test_llm_settings.py`, 3 en
+`test_orchestrator_llm_settings.py`), más una entrada nueva sumada al
+gate compartido ya existente de `test_orchestrator_admin_auth.py`
+(sin agregar un test nuevo ahí, solo extiende la lista que ya recorren
+los 3 tests de ese archivo) — sumado a los 3 de
+`test_llm_client_factory.py` del ítem anterior, 15 tests nuevos en
+total para todo el trabajo de LLM en la nube.
+
+**Pendiente real, sigue igual**: la prueba en vivo contra Grok/xAI de
+verdad (no simulada) sigue esperando que el usuario configure su
+propia API key.
+
+## Rediseño de la pestaña "Modelo": alcance correcto + bug real de UX (2026-07-11)
+
+Probando la pestaña recién agregada, el usuario reportó dos problemas
+reales (con capturas):
+
+1. **Alcance mal pensado por mí**: la pestaña tenía `provider`/
+   `base_url`/`default_model` como un formulario genérico — pero
+   `default_model` es redundante con el selector de modelo que YA
+   existe en la barra de chat (`#model-select`, alimentado por
+   `GET /models`) — ese selector ya lista los modelos del proveedor
+   ACTIVO en cada momento, sea local o en la nube. El usuario lo
+   señaló explícitamente, y además recordó que la selección de modelo
+   apropiado por tarea es justamente lo que se viene preparando para
+   que decida kal mismo (ver `[[project_resource_broker_proposal]]`)
+   — no algo para que el usuario tipee a mano en otro lado. Alcance
+   correcto, dado explícitamente: esta pestaña debe tener SOLO (a)
+   descargar un modelo Ollama nuevo, y (b) configurar la API key de un
+   proveedor en la nube.
+2. **Bug real de UX**: el campo de API key (`type="password"`)
+   quedaba justo después de un campo de texto (`default_model`) en el
+   mismo `<form>` — Firefox lo interpretó como un formulario de login
+   real y ofreció "guardar la contraseña", usando el nombre del modelo
+   como "usuario". Confirmado en la captura del usuario.
+
+**Rediseño implementado**:
+- `agent_core/llm_settings.py` gana `list_local_ollama_models()` (lista
+  lo YA descargado, hablando siempre con el Ollama LOCAL fijo —
+  `http://localhost:11434` — nunca con `settings.llm.base_url`, que
+  podría apuntar a un proveedor en la nube si ese es el activo) y
+  `pull_ollama_model(model)` (equivalente a `ollama pull`, vía la
+  misma API HTTP que usa el CLI de Ollama, timeout generoso de 1 hora
+  — una descarga real pesa varios GB).
+- Dos endpoints nuevos: `GET /settings/llm/ollama/models` (sin auth,
+  Ollama caído se informa como estado real —
+  `ollama_available: false`—, nunca un 500) y
+  `POST /settings/llm/ollama/pull` (gateado con token admin, mismo
+  mecanismo que el resto).
+- Pestaña "Modelo" reescrita: sección "Local (Ollama)" con la lista de
+  modelos ya descargados + un campo para pedir uno nuevo (con link a
+  ollama.com/library); sección "En la nube" con un selector de
+  PRESETS (Qwen/Grok/xAI/OpenAI/Otro) que autocompleta la `base_url`
+  correcta en vez de pedir que el usuario la tipee de memoria, más el
+  campo de API key — ahora en su propio `<form>`, aislado, sin ningún
+  campo de texto plano adyacente (elimina el patrón que confundía a
+  Firefox), con un botón 👁 para mostrar/ocultar en vez de depender
+  de que el navegador no intente "ayudar". Sin campo de
+  `default_model`: guardar la config en la nube ya alcanza para que
+  el selector de modelo de la barra de chat liste los modelos reales
+  de ese proveedor.
+
+**Verificado real, no solo con tests**: `GET /settings/llm/ollama/models`
+contra el proceso real (5 modelos locales reales, incluido un
+`glm-5.1:cloud` — confirma que Ollama Cloud ya es una opción real
+soportada por el propio Ollama, aparte de este trabajo). Descarga real
+de un modelo chico (`qwen2.5:0.5b`, ~400MB) vía
+`POST /settings/llm/ollama/pull` con el token admin real — confirmado
+con un segundo `GET` que el modelo nuevo aparece en la lista. 8 tests
+nuevos (4 unitarios de `list_local_ollama_models`/`pull_ollama_model`
+con `requests` mockeado, 4 de los endpoints nuevos), más una entrada
+sumada al gate compartido de `test_orchestrator_admin_auth.py`.
+
+**Nota sobre el bug de Firefox**: no hay forma 100% confiable de
+evitar que un navegador ofrezca guardar un campo `type="password"`
+como contraseña de sitio — es una heurística del navegador, no algo
+que la página controle del todo. La combinación aplicada (sin campo
+de texto adyacente + form propio + toggle mostrar/ocultar) resuelve
+la causa concreta que se observó, pero no es una garantía absoluta
+para cualquier navegador.
+
+## Fricción real del token admin en el navegador + error HTTP sin cuerpo (2026-07-12)
+
+Dos hallazgos reales probando la pestaña "Modelo" contra Grok/xAI de
+verdad, con capturas del usuario:
+
+1. **Fricción repetida con el token admin**: el usuario tropezó más de
+   una vez con "Token administrativo inválido o ausente" al guardar,
+   porque ese navegador/pestaña todavía no tenía el token en
+   localStorage — hasta ahora, la única vía era visitar a mano
+   `?admin_token=...` (impreso en el log al arrancar). Fix real:
+   `frontend/app.js::api()` ahora detecta un 401, muestra un
+   `prompt()` pidiendo el token, lo guarda, y reintenta la MISMA
+   acción una sola vez (nunca en loop) — sin esto, la fricción iba a
+   seguir repitiéndose cada vez que alguien probara desde un
+   navegador/perfil nuevo.
+2. **Bug cosmético de paso**: el campo "URL base de la API" (solo
+   debería verse con el preset "Otro") quedaba visible con "Grok
+   (xAI)" seleccionado — no afectaba lo que se guardaba de verdad
+   (el submit usa el preset, ignora ese campo salvo con "Otro"), pero
+   confundía. Se agregó un recálculo defensivo de `hidden` también en
+   `refreshModelSettings()`, no solo en el evento "change" del select.
+
+**Hallazgo más importante, investigando el error real de Grok**: una
+vez resuelto el token, guardar la configuración de Grok funcionó, pero
+el selector de modelo de la barra de chat mostró "ollama no
+disponible" y la lámpara de LLM se puso roja. La causa NO era un bug
+de kal — `agent_core/llm/openai_compatible_client.py` descartaba el
+CUERPO de cualquier error HTTP (`str(HTTPError)` solo trae la línea de
+estado, nunca el cuerpo, que es justo donde un proveedor real explica
+QUÉ está mal). Sin verlo, el error era indiagnosticable a ciegas.
+
+**Fix real**: nueva función `_response_detail()` en
+`openai_compatible_client.py` — si la excepción trae un
+`.response` real, agrega su cuerpo (truncado a 500 caracteres) al
+mensaje de error. Aplicado a `chat()` y `list_models()`. Con esto,
+apareció el error REAL de xAI: `GET /models` devolvía 403 con
+`"Your newly created team doesn't have any credits or licenses
+yet."` — una cuenta nueva de xAI sin facturación cargada, nada que
+arreglar en kal. `POST /chat/completions` devolvía 400 con `"Model
+not found: qwen3-coder:30b"` — consecuencia directa de lo anterior
+(sin `/models` funcionando, el selector de modelo nunca se actualiza
+con nombres reales de Grok y se queda con el default de Ollama). Una
+vez que el usuario cargue facturación en su cuenta de xAI, ambos
+deberían resolverse solos — no se necesita más cambio de código para
+este caso puntual.
+
+2 tests nuevos en `tests/test_openai_compatible_client.py`
+confirmando que el cuerpo real aparece en el mensaje de error — el
+`FakeResponse` de los tests existentes se actualizó para adjuntar
+`response=self` al `HTTPError`, como hace `requests` de verdad
+(sin eso, los tests no podrían haber detectado esto). El fix del
+token admin (frontend) no tiene test automatizado — es interacción de
+navegador (`prompt()`), mismo criterio ya aplicado a otras piezas
+puramente de UI en este proyecto.
+
+## Sin cuenta con créditos en Grok/xAI: kal quedaba SIN SALIDA, más confusión Groq≠Grok (2026-07-12)
+
+El usuario planteó dos objeciones reales y correctas sobre el
+diagnóstico anterior:
+
+1. **"Eso no debe ocasionar que no se muestren los demás modelos... kal
+   queda inhabilitado y no hay manera de seleccionar nuevamente un
+   modelo local"** — tenía razón. El rediseño de la pestaña "Modelo"
+   había quitado el selector de `provider` genérico (correcto, era
+   redundante) pero sin querer también quitó la ÚNICA forma de volver
+   a activar Ollama local una vez que se activaba un proveedor en la
+   nube — si ese proveedor fallaba (como acá, sin créditos), no había
+   ninguna salida desde la interfaz.
+2. **"Tengo una API key de Grok que empieza con gsk_...¿la puedo
+   usar?"** — esa key es de **Groq** (api.groq.com, el fabricante de
+   chips de inferencia rápida), NO de **Grok/xAI** (api.x.ai) — dos
+   empresas y APIs distintas con nombres casi idénticos. Las keys de
+   xAI empiezan con `xai-...`, las de Groq con `gsk_...`. Confusión
+   real y entendible, nunca aclarada hasta ahora.
+
+**Implementado**:
+- Botón nuevo "Usar Ollama local" en la sección local de la pestaña
+  "Modelo" — un clic vuelve a `provider: "ollama"` sin pedir nada más,
+  siempre disponible como salida de emergencia.
+- Preset nuevo "Groq" en el selector de proveedores en la nube
+  (`https://api.groq.com/openai/v1`), distinto y aclarado en el propio
+  texto de la opción respecto de "Grok (xAI)".
+- `frontend/app.js::loadModels()` ya no dice "ollama no disponible"
+  a ciegas cuando falla — decía eso incluso con un proveedor en la
+  nube activo, mintiendo sobre la causa. Ahora es genérico y manda a
+  la pestaña Modelo.
+
+**Bug real y más grave, encontrado probando el botón nuevo**:
+`update_llm_settings(provider="ollama")` sin `base_url` explícito NO
+reseteaba `base_url` — quedaba con el valor del proveedor en la nube
+anterior. Confirmado en vivo: después de activar Grok y volver a
+"ollama", `config.yaml` quedó con `provider: "ollama"` pero
+`base_url: "https://api.x.ai/v1"` — `OllamaClient` intentaba pegarle a
+`https://api.x.ai/v1/api/tags` (404), sin ninguna forma de
+recuperación desde la interfaz. Fix: `update_llm_settings()` ahora
+resetea `base_url` al default de Ollama automáticamente cuando
+`provider == "ollama"` y no se pasa uno explícito (un `base_url`
+explícito — p.ej. un puerto no estándar — sigue respetándose).
+
+**Efecto secundario real encontrado**: el `config.yaml` REAL del
+proyecto había quedado en ese estado corrupto por pruebas manuales
+anteriores en esta misma sesión — y como `utils.config.settings` es
+un singleton cargado una sola vez de ese archivo real al importar, la
+suite de tests heredaba silenciosamente ese estado corrupto como
+línea de base. `tests/test_llm_settings.py::_fake_paths` ahora fuerza
+un estado conocido de `settings.llm` ANTES de cada test (no solo
+restaura "lo que hubiera antes") — confirmado corriendo la suite con
+el estado real deliberadamente corrompido primero, sigue pasando
+igual.
+
+4 tests nuevos (2 del reseteo de `base_url`, más el fixture de
+aislamiento corregido). Corregido también el `config.yaml` real del
+proyecto (vuelto a `http://localhost:11434`) y confirmado en vivo que
+`/models` volvió a listar los modelos locales reales.
+
+## Auto-provisión del token administrativo para loopback (2026-07-12)
+
+Probando el preset "Groq" nuevo, el usuario primero eligió "Grok
+(xAI)" por error (nombres muy parecidos, confirmado con el error real
+de xAI: "Incorrect API key provided" — la key de Groq no sirve ahí).
+Resuelto simplemente re-eligiendo el preset correcto.
+
+El planteo de fondo fue otro, y más importante: **"no me parece
+práctico que un usuario inexperto tenga que ingresar el token
+administrativo copiándolo desde la terminal, debe haber otra
+solución"**. Correcto — copiar un token de una terminal es una
+fricción real e injustificada para el caso normal de uso.
+
+**Análisis de seguridad antes de tocar nada**: el token existe para
+un problema concreto (revisión de seguridad 2026-07-09): cualquiera
+que alcance el puerto de kal, sin verificar identidad, podía aprobar
+self-modification/herramientas. Pero ese riesgo es sobre acceso
+**remoto** (LAN) — alguien que YA está en la misma máquina donde corre
+kal podría leer `data/keys/admin_token` directamente del disco, así
+que entregárselo por HTTP no le da ninguna capacidad nueva a un
+atacante local. La distinción correcta no es "pedir el token siempre"
+vs. "nunca pedirlo" — es **loopback vs. LAN real**.
+
+**Implementado**: `GET /admin-token` (nuevo, sin token requerido) en
+`agent_core/orchestrator.py` — responde con el token real SOLO si
+`request.client.host` es `127.0.0.1`/`::1` (mismo criterio que
+`docker-compose.yml`, que ya solo publica el puerto en loopback);
+cualquier otra IP (el caso real que el token protege) recibe 403 sin
+el token. `frontend/app.js::ensureAdminToken()` (nuevo) lo pide solo
+al arrancar, únicamente si no hay ya un token guardado — si el
+backend responde 403 (acceso no-loopback), no pasa nada, sigue
+funcionando el `prompt()` de respaldo ya existente. Con esto, usar kal
+desde la propia máquina (el caso normal) queda con CERO fricción de
+token — nunca hay que copiar nada de una terminal.
+
+**Detalle real de testing**: `TestClient` de Starlette simula por
+default un peer `"testclient"`, no loopback — hubo que pasar
+`client=("127.0.0.1", puerto)`/`client=("::1", puerto)` explícito para
+poder probar de verdad el camino de loopback, y una IP de LAN real
+(`192.168.1.50`) para confirmar que sigue bloqueado. 4 tests nuevos.
+Verificado también en vivo contra el proceso real corriendo
+(`curl http://127.0.0.1:8000/admin-token` devuelve el token real).
+
+## Selector de modelo resiliente ante un proveedor roto (2026-07-12)
+
+El usuario planteó una pregunta de diseño real y correcta: si el
+proveedor activo falla (p.ej. una API key sin créditos, el caso real
+que se venía dando con la key de Groq puesta por error contra xAI),
+¿cómo elige un usuario alguno de sus otros modelos ya activados? Antes
+de este fix, la respuesta era "no puede desde el selector de la barra
+de chat" — `loadModels()` solo mostraba un mensaje de error genérico
+si `/models` fallaba, dejando el selector totalmente inutilizable
+hasta ir a la pestaña "Modelo" a mano.
+
+**Implementado**: `loadModels()` (`frontend/app.js`), si `/models`
+falla, en vez de solo mostrar un error, pide
+`/settings/llm/ollama/models` (los modelos locales YA descargados,
+independiente del proveedor activo roto) y los ofrece directo en el
+mismo selector, marcados como "(local — activa Ollama)". Elegir
+cualquiera de esos dispara un listener de `"change"` nuevo que
+reactiva `provider: "ollama"` de inmediato (no recién al mandar el
+próximo mensaje) y refresca el estado — recuperación de un clic, sin
+pasar por la pestaña "Modelo" para nada.
+
+**Verificado real, no solo en teoría**: reproducido el estado roto de
+verdad (la key de Groq puesta contra el endpoint de xAI, error real
+"Incorrect API key provided"), confirmado que
+`/settings/llm/ollama/models` sigue funcionando con el proveedor
+activo roto, y que la secuencia completa (activar `ollama` →
+`/models` vuelve a andar) se comprueba en el backend real. Sin tests
+automatizados nuevos (100% lógica de DOM/frontend, mismo criterio que
+otras piezas de UI de este proyecto) — verificado por lectura +
+llamadas reales a la API subyacente.
+
+## Perfiles de proveedores en la nube guardados a la vez (2026-07-12)
+
+El usuario pidió, correctamente, ir un paso más allá del fallback
+solo-a-Ollama: **"en el selector de modelo activo no solo deben
+mostrarse los modelos locales ollama, sino todos los modelos en la
+nube correctamente activados"**. Hasta acá, kal solo recordaba UN
+proveedor en la nube a la vez (una sola `base_url`/`LLM_API_KEY`) —
+guardar uno nuevo pisaba el anterior sin dejar rastro.
+
+**Decisión de alcance, confirmada con el usuario vía
+`AskUserQuestion`**: guardar VARIOS perfiles a la vez, cada uno con su
+propia API key persistida (opción recomendada, sobre la alternativa
+de solo "recordar cuáles funcionaron antes" sin guardar las keys).
+
+**Implementado**: `data/keys/cloud_profiles.json` (nuevo) — lista de
+perfiles (`name`/`base_url`/`api_key_env`), gestionado 100% por kal
+(a diferencia de `config.yaml`, no tiene comentarios de autor que
+preservar, así que acá SÍ es seguro reescribirlo entero en cada
+cambio). Cada perfil guarda su key en su PROPIA variable de entorno
+(`LLM_API_KEY_<NOMBRE>`, p.ej. `LLM_API_KEY_GROQ`) — nunca se pisan
+entre sí, ni con la del proveedor ACTIVO (`LLM_API_KEY`, sin cambios).
+
+`agent_core/llm_settings.py` gana `save_cloud_profile()`,
+`list_cloud_profiles()`, `activate_cloud_profile()` (activa un perfil
+ya guardado sin volver a pedir la key) y `list_model_sources()` — el
+corazón del pedido: junta Ollama local + CADA perfil guardado que
+responda con éxito AHORA MISMO (arma un `OpenAICompatibleClient`
+temporal por perfil y llama a `.list_models()` de verdad) — un perfil
+guardado pero roto (sin crédito, key inválida) simplemente no
+aparece, nunca se muestra a medias. `update_llm_settings()` gana
+`profile_name`: guardar y activar un proveedor en la nube desde la
+pestaña "Modelo" ahora también lo deja guardado como perfil reusable,
+sin un paso separado.
+
+Dos endpoints nuevos: `GET /settings/llm/sources` (sin auth, la lista
+completa de arriba) y `POST /settings/llm/activate-profile` (admin-gated,
+`{"name": ...}`, reconstruye y reinyecta el cliente real igual que
+`/settings/llm`).
+
+**Frontend**: el selector de modelo del chat (`loadModels()`) ahora
+arma `<optgroup>` por fuente (Ollama local + cada perfil que
+respondió bien), con el modelo por defecto del proveedor activo
+preseleccionado si aparece en la lista. Elegir cualquier modelo activa
+su fuente al instante (Ollama o el perfil correspondiente), sin ir a
+la pestaña "Modelo". El formulario de la pestaña "Modelo" manda
+`profile_name` — el nombre corto del preset elegido (Qwen/Grok xAI/
+Groq/OpenAI) o, para "Otro", un campo nuevo pidiendo un nombre corto
+para reconocer el perfil después.
+
+**Verificado real, de punta a punta, no solo con tests**: perfil de
+prueba apuntado al propio endpoint OpenAI-compatible de Ollama (sin
+necesitar una key de verdad ni red externa) — guardado, confirmado en
+`data/keys/cloud_profiles.json`, `/settings/llm/sources` lista AMBAS
+fuentes (Ollama local + el perfil) con sus modelos reales,
+`activate-profile` lo activa, y activar un perfil inexistente falla
+limpio con 400 sin romper nada. Datos de prueba limpiados al terminar,
+proveedor activo devuelto a "ollama". 13 tests nuevos (9 en
+`test_llm_settings.py`, 4 en `test_orchestrator_llm_settings.py`),
+más una entrada sumada al gate compartido de
+`test_orchestrator_admin_auth.py` (sin necesitar mock: un perfil
+inexistente ya falla barato, mismo criterio que self-modification).
+
+## Tres bugs reales: Enter en VS Code sin efecto, index.html cacheado, extensión desactualizada (2026-07-12)
+
+Tres reportes del usuario en un mismo mensaje, cada uno con causa
+real distinta:
+
+1. **"El botón enviar debe activarse al presionar Enter" (VS Code)**:
+   el fix ya existía en el código fuente
+   (`vscode-extension/media/chat.js`, commit de la sesión anterior),
+   pero la extensión INSTALADA en su VS Code seguía siendo de antes de
+   ese fix — nunca se había reinstalado después. Confirmado
+   comparando el archivo fuente contra el de
+   `~/.vscode/extensions/undefined_publisher.kal-vscode-0.1.0/media/
+   chat.js` (todavía con `ev.ctrlKey || ev.metaKey`). Solución: NO fue
+   un cambio de código, fue reinstalar de verdad vía
+   `POST /integrations/vscode/install` — confirmado que la extensión
+   reinstalada ya trae `!ev.shiftKey`. **Lección**: un fix en el
+   repo no alcanza si la extensión empaquetada no se reinstala — a
+   tener en cuenta después de cualquier cambio a `vscode-extension/`.
+
+2. **"El selector de modelo activo... ya no reconoce ni a qwen local",
+   con una key de Grok que "funciona en otra aplicación"**: investigado
+   contra el backend real primero — `GET /settings/llm/sources`
+   mostraba TODO bien (Ollama local con sus modelos reales, Y el
+   perfil de Grok con su lista real de modelos de Groq, confirmando
+   que la key sí era válida). El backend nunca tuvo el bug. La causa
+   real era el frontend: `frontend/index.html` se servía CON caché
+   normal del navegador (a diferencia de `style.css`/`app.js`, que ya
+   tenían `Cache-Control: no-store` desde antes) — un `index.html`
+   viejo cacheado, combinado con el `app.js` nuevo (ese sí siempre
+   fresco), rompía en silencio: el JS nuevo esperaba elementos que el
+   HTML viejo no tenía. La suposición original documentada en el
+   código ("index.html no cambia tan seguido") dejó de ser cierta:
+   ganó varias pestañas/campos nuevos en esta misma sesión. Fix: nueva
+   ruta explícita `GET /` en `agent_core/orchestrator.py`
+   (`serve_index_html()`, registrada antes del mount catch-all) con
+   el mismo `Cache-Control: no-store` que ya tenían los otros dos
+   archivos. Como el HTML viejo ya estaba en la caché del usuario
+   ANTES de este fix, hace falta un refresh forzado una vez
+   (Ctrl+Shift+R) para bajar la versión nueva — de ahí en más, las
+   recargas normales ya siempre traen la versión actualizada.
+
+3 tests nuevos (`tests/test_orchestrator_static_frontend.py`) —
+de paso cubren también `style.css`/`app.js`, que nunca habían tenido
+test para esta protección a pesar de ya existir.
+
+## Selector de modelo: solo "listos para usar" + bug real de os.environ obsoleto (2026-07-12)
+
+Dos pedidos del usuario en el mismo mensaje: que el selector de
+modelo activo "solo muestre los modelos correctamente configurados y
+listos para usar" (aparecía una lista grande de modelos que no
+respondían), y que una key de Groq real y con crédito ("la uso en
+otra aplicación y funciona sin problema") seguía sin ser reconocida
+por kal, que además "ya no reconoce ni a qwen local".
+
+**"Listos para usar" — dos casos reales encontrados, no hipotéticos**:
+
+1. `GET /v1/models` de un proveedor real (Groq) devuelve TODOS sus
+   modelos hospedados, no solo los de chat — `whisper-large-v3`
+   (habla-a-texto), `llama-prompt-guard`/`gpt-oss-safeguard`
+   (clasificadores de seguridad), `orpheus` (texto-a-voz), etc.
+   aparecían mezclados con los modelos de chat de verdad, aunque
+   nunca podrían responder a un `/chat` de kal. Fix: filtro heurístico
+   por nombre (`_NON_CHAT_MODEL_KEYWORDS` en `agent_core/llm_settings.py`)
+   — no es una garantía (no hay un campo "tipo" estándar en la
+   respuesta), pero cubre los casos reales encontrados.
+2. Los modelos Ollama con sufijo `:cloud` (confirmado con
+   `ollama list | grep cloud` → `glm-5.1:cloud`) son en realidad un
+   proxy al servicio en la nube DE OLLAMA MISMO, que necesita su
+   propia sesión (`ollama signin`) sin relación con la configuración
+   de kal — sin ella, devuelven 401 al primer uso. Excluidos de
+   `list_model_sources()` (siguen apareciendo en la gestión de
+   descargas locales, donde sí tiene sentido verlos).
+
+**El bug real detrás de "no reconoce ni a Groq ni a Qwen local"**:
+diagnosticado primero ampliando el manejo de errores de
+`list_model_sources()` (atrapaba solo `ProviderError`, cualquier otra
+excepción hacía desaparecer un perfil del selector sin rastro en los
+logs) — eso reveló en `logs/agent.log` un 401 real de Groq:
+`"Invalid API Key"`, con la MISMA key que un proceso Python nuevo y
+aislado aceptaba sin problema contra la API real de Groq. Reproducido
+de forma aislada:
+
+```python
+os.environ['LLM_API_KEY_GROQ'] = 'PLACEHOLDER'
+from dotenv import load_dotenv
+load_dotenv()
+print(repr(os.environ.get('LLM_API_KEY_GROQ')))  # -> 'PLACEHOLDER'
+```
+
+`load_dotenv()` (se re-ejecuta en cada `--reload` de uvicorn) **nunca
+sobreescribe una variable que ya esté seteada** en el proceso. En
+algún momento de la sesión (una prueba anterior, un primer intento de
+guardado con la key equivocada) un valor viejo quedó "pegado" en
+`os.environ` del proceso vivo — ningún `--reload` posterior, ni que el
+`.env` en disco tuviera después el valor correcto, lo iba a corregir
+jamás. Mismo mecanismo de fondo que
+[Caché del navegador](#interfaz-web-para-configurar-el-modelo-local-o-en-la-nube-2026-07-11):
+una copia vieja sirviendo mientras la fuente de verdad ya está
+arreglada — pero acá la "copia vieja" vive en memoria del proceso, no
+en el navegador.
+
+**Fix**: nuevo `read_llm_env_var(key)` en `agent_core/llm_settings.py`
+que lee el valor SIEMPRE del archivo `.env` en disco primero (con
+fallback a `os.environ` solo si la clave no está en el archivo en
+absoluto) — nunca confía en `os.environ` como fuente de verdad para
+estas keys. Reemplaza todos los `os.environ.get(...)` de lectura en
+`llm_settings.py` (`get_llm_settings`, `update_llm_settings`,
+`activate_cloud_profile`, `list_model_sources`) y también en
+`agent_core/orchestrator.py::build_llm_client()` (mismo riesgo exacto
+para el proveedor que esté activo al arrancar). Los `os.environ[key]
+= value` de ESCRITURA (al guardar una key nueva) se mantienen sin
+cambios — el problema era solo de lectura.
+
+**Verificado en vivo, no solo con tests**: contra el proceso real de
+kal (corriendo con `--reload`, key de Groq efectivamente "envenenada"
+en memoria) — tras el fix, `GET /settings/llm/sources` pasó a listar
+correctamente tanto Ollama local (5 modelos) como el perfil "Groq"
+completo (10 modelos de chat reales, sin los que no lo son), sin
+ningún 401 nuevo en `logs/agent.log`. 2 tests nuevos en
+`tests/test_llm_settings.py` reproducen exactamente el escenario
+("os.environ viejo, .env en disco correcto y más nuevo" y "clave
+ausente del archivo, cae a os.environ").
+
+**Tercer síntoma del mismo mensaje explicado — "después de mi primer
+pedido ollama dejó de responder"**: al verificar el proceso real
+después del fix de arriba, `GET /status` devolvía `llm_available:
+false` — el proveedor ACTIVO del proceso real había quedado en
+`provider: "openai_compatible"` con `base_url` de Groq, pero la key
+GENÉRICA (`LLM_API_KEY`, la que usa el proveedor que esté activo en
+cada momento, distinta de `LLM_API_KEY_GROQ` que guarda cada perfil)
+seguía siendo el placeholder de Ollama
+(`no-hace-falta-para-ollama`) — un resto de una investigación en vivo
+anterior en esta misma sesión, de antes del fix de `read_llm_env_var`.
+Confirmado disparando `/chat` de verdad: 401 "Invalid API Key" contra
+Groq. **No es un bug nuevo de código** — es el mismo problema de fondo
+de esta sección, capturado en un estado real a medio arreglar. Fix
+inmediato: `POST /settings/llm {"provider": "ollama"}` (el botón
+"Usar Ollama local" hace exactamente esto) — confirmado
+`GET /status` → `llm_available: true` y un `/chat` real respondiendo
+correctamente contra Ollama local.
+
+## Resource Broker — Fase 1: liberar RAM de servicios multimedia inactivos (2026-07-12)
+
+El usuario reportó inconsistencia real cambiando entre modelos locales
+(GLM-4.7-flash vs Qwen) para generar imágenes — la misma duplicidad de
+sujetos ya vista antes, y "después de mi primer pedido ollama dejó de
+responder". Investigando `logs/agent.log`: justo después de cada
+generación de imagen, Ollama queda **totalmente inalcanzable**
+(`Connection refused`) durante 1-2 minutos, hasta reiniciarse solo.
+
+Propuse inicialmente que era contención de GPU/VRAM — el usuario
+corrigió: su máquina no usa GPU ni NPU para esto. Confirmado en el
+código (`kernel_bus/services.py`): todo corre explícitamente en CPU
+(`device="cpu"`, `use_cuda=False`). El mecanismo real es **RAM del
+sistema**: `ImageService`/`AudioService`/`STTService` cargan su modelo
+perezosamente pero nunca lo descargan — un pipeline de varios GB queda
+en RAM para siempre tras el primer uso, compitiendo con Ollama (que ya
+usa ~18.7GB de 27GB con `qwen3-coder:30b`, dato del OOM real
+investigado antes en esta misma sesión). El reintento de
+`OllamaClient` (ya existente) mitiga el síntoma (la tarea no aborta
+del todo) pero no evita que el proceso de Ollama se caiga.
+
+Esto conecta con una propuesta más amplia que el usuario ya había
+hecho antes (ver memoria `project_resource_broker_proposal`, entonces
+sin evidencia concreta): un "Model Lifecycle Manager" completo —
+descubrimiento de modelos, routing automático por capacidad, memoria
+compartida entre Skills, descarga por presión de memoria, preloading
+por contexto, políticas por hardware. Con evidencia real ahora en
+mano, se decidió (vía plan explícito, aprobado antes de tocar código)
+implementar **solo** la pieza justificada por el bug real: liberar RAM
+de servicios inactivos. El resto queda deliberadamente fuera de esta
+fase (ver más abajo).
+
+**Implementado**: `kernel_bus/resource_broker.py` (nuevo) —
+`ResourceBroker.register(name, is_loaded, unload)` +
+`mark_used(name)` + `evict_idle_and_pressured()`: libera cada recurso
+cargado que lleve más de `idle_timeout_seconds` sin uso (default 300s,
+`config.yaml: resource_broker.idle_timeout_seconds`), o **todos** de
+inmediato si `psutil.virtual_memory().available` cae debajo de
+`min_available_ram_mb` (default 2048MB) — evicción agresiva ante
+presión real, no solo por reloj. Singleton al final del módulo, mismo
+patrón que `tool_registry`/`audit_log`/`kernel_bus`.
+
+`kernel_bus/services.py`: los 4 recursos ya existentes se registran en
+`__init__` con closures sobre `self` — `image.generate`,
+`image.inpaint` (dos pipelines distintos de `ImageService`),
+`audio.synthesize`, `stt.transcribe`. Cada `_get_X()` llama
+`mark_used()` antes de comprobar si ya está cargado; `unload()`
+simplemente vuelve el campo a `None` (el GC libera la RAM real — nada
+más los referencia en producción, confirmado que
+`tool_integration/registry.py::_register_default_static_tools()` crea
+una única instancia compartida de cada servicio).
+
+`agent_core/llm/ollama_client.py::OllamaClient.chat()`: llama
+`evict_idle_and_pressured()` justo antes de `_post_with_retry()` — es
+el único lugar que de verdad compite por RAM local con estos servicios
+(un proveedor en la nube no usa RAM de esta máquina, por eso el
+enganche va acá y no en `OpenAICompatibleClient`). `resource_broker`
+inyectable en el constructor (default: el singleton real), mismo
+patrón DI que `post_fn`/`get_fn`/`sleep_fn` ya usado ahí mismo.
+
+`psutil` agregado explícito a `requirements.txt` (ya estaba instalado
+como dependencia transitiva, ninguna descarga nueva).
+
+**Verificado real, de punta a punta**: 15 tests nuevos
+(`tests/test_resource_broker.py`: registro/uso reciente no se libera/
+idle pasado el timeout se libera/nunca libera algo no cargado/presión
+de RAM libera todo de inmediato aunque nada llegó al timeout; más 1
+test nuevo en `tests/test_ollama_client.py` confirmando que `chat()`
+llama al broker inyectado antes de postear). Suite completa
+`pytest tests/ -q`, 0 regresiones. Confirmado en el proceso real
+corriendo: instanciar los 3 servicios registra los 4 recursos
+(`image.generate`, `image.inpaint`, `audio.synthesize`,
+`stt.transcribe`) con `is_loaded() == False` antes del primer uso.
+
+**Fuera de alcance de esta fase, documentado explícitamente**:
+routing automático de LLM por capacidad (sigue sin haber un segundo
+caso de uso real — un solo modelo activo a la vez, elegido a mano),
+preloading inteligente por contexto (sin heurística concreta
+definida), políticas por hardware más allá de las dos perillas de
+config ya agregadas (esta máquina confirmada 100% CPU, sin GPU que
+detectar distinto), y descubrimiento de modelos multimedia (no aplica
+hoy: imagen/audio/STT tienen un solo backend local cada uno).
+
+## default_model quedaba pegado a Ollama al activar un proveedor en la nube — rompía el agente IDE de VS Code (2026-07-14)
+
+El usuario reportó: "kal responde en la interfaz web pero no como
+agente IDE en vscode". Revisé primero que la extensión instalada
+coincidiera byte a byte con el código fuente actual (ya no era el bug
+de "extensión desactualizada" de sesiones previas) y todo el flujo del
+webview (CSP con nonce, `ChatViewProvider`, `chatWebviewHtml.ts`) sin
+encontrar nada roto — necesité pedirle al usuario el error real
+(`AskUserQuestion`) para seguir.
+
+El error real: `https://api.groq.com/openai/v1 devolvió ... 404 ...
+"The model \`deepseek-r1:14b\` does not exist"` — un nombre de modelo
+de OLLAMA, contra la API de Groq. Confirmado contra `GET
+/settings/llm`: `provider: "openai_compatible"` (Groq activo) con
+`default_model: "deepseek-r1:14b"` (un modelo LOCAL). Causa real:
+`default_model` es una perilla GLOBAL en `config.yaml`, no una por
+proveedor — activar un proveedor en la nube (sea vía el selector de
+modelo del chat o vía "Guardar y activar" en la pestaña Modelo) nunca
+tocaba `default_model`, dejando pegado lo último que hubiera sido
+válido para el proveedor ANTERIOR. La interfaz web no lo sufre porque
+su selector de modelo siempre manda un `model` explícito en cada
+`/chat` — pero el agente IDE de VS Code no tiene selector de modelo
+propio (`kal.model` es una config de texto libre, vacía por defecto),
+así que siempre depende de este default global, y ahí sí rompía.
+
+**Fix**: `agent_core/llm_settings.py::update_llm_settings()` — si
+`provider == "openai_compatible"` y el `base_url` efectivo CAMBIA
+respecto al que ya estaba activo, y no se pidió un `default_model`
+explícito, se elige automáticamente el primer modelo de chat real que
+ese proveedor devuelva (`_first_chat_capable_model()`, reusa el mismo
+filtro `_is_chat_capable_model_name()` de `list_model_sources()`). Si
+el proveedor no responde, se deja `default_model` como estaba (no
+peor que el estado actual). Mismo patrón ya usado para el bug análogo
+de `base_url` no reseteándose al volver a Ollama.
+
+**Verificado real, de punta a punta**: reproducido el estado exacto
+del bug contra el proceso vivo (activar Groq sin modelo explícito),
+confirmado que ahora elige un modelo real de Groq
+(`meta-llama/llama-4-scout-17b-16e-instruct`) en vez de quedarse con
+el nombre de Ollama, y un `/chat` con `client: "vscode"` (mismo cuerpo
+que manda la extensión) respondiendo `status: "success"` de verdad.
+
+De paso, corregidos 2 tests que dependían de comportamiento previo a
+esta sesión: `tests/test_llm_client_factory.py` monkeypatcheaba
+`os.environ` directamente sin aislar `agent_core.llm_settings._ENV_PATH`
+— desde el fix de `read_llm_env_var` (antes en esta misma sesión), esos
+tests quedaban enmascarados por el `.env` REAL del proyecto en disco;
+y `test_list_model_sources_skips_a_profile_with_no_key_in_the_environment`
+tenía el mismo problema (`save_cloud_profile()` ya escribe la key al
+`.env` real de test, borrar solo `os.environ` no alcanzaba). 4 tests
+nuevos en `tests/test_llm_settings.py` cubriendo la elección automática
+de modelo (cambio de endpoint la dispara / mismo endpoint no la
+dispara / un `default_model` explícito se respeta siempre / proveedor
+roto no pisa el modelo anterior). Suite completa, 0 regresiones.
+
+## Groq rompía cualquier tarea de más de un paso: dos bugs reales de interoperabilidad estricta del formato OpenAI (2026-07-14)
+
+Con el default_model arreglado, el usuario probó de nuevo el agente
+IDE de VS Code contra Groq y encontró DOS bugs reales más, cada uno en
+un punto distinto del mismo flujo — ambos porque Groq valida el
+formato OpenAI ESTRICTO, mientras que Ollama (contra el que se probó
+todo originalmente) es tolerante y nunca los hizo notar.
+
+**1. Un intento de tool-call mal formado tiraba la respuesta entera a
+la basura**: "crea un proyecto html para un sitio web" devolvía un 400
+de Groq: `code: "tool_use_failed"` — el modelo había intentado una
+llamada a herramienta mal formada, pero el cuerpo del error YA incluye
+en `failed_generation` la respuesta en texto plano que el modelo
+quería dar antes de ese intento roto. Fix:
+`agent_core/llm/openai_compatible_client.py::_tool_use_failed_fallback_content()`
+detecta esta forma específica de error y usa `failed_generation` como
+respuesta final en vez de propagar el 400 — el usuario recibe la
+respuesta útil que el modelo sí tenía, solo se descarta el intento de
+herramienta roto (irrecuperable de todos modos, no hay forma de saber
+qué quiso llamar).
+
+**2. `tool_calls[].function.arguments` como objeto, no como string**:
+en cualquier turno DESPUÉS de una llamada a herramienta, Groq
+rechazaba con 400 (`'arguments' : value must be a string`) —
+`agent_core/llm/agent_loop.py` reconstruye el mensaje `assistant` con
+`tool_calls` para el próximo turno, y mandaba `tc.arguments` (un dict
+ya parseado) directo, sin `json.dumps()`. Ollama tolera un objeto ahí;
+el formato OpenAI real exige un string con JSON adentro. Fix: serializar
+con `json.dumps()` al reconstruir ese mensaje.
+
+**3. Falta el 'id' de cada tool_call (y el 'tool_call_id' de su
+respuesta)**: arreglado el punto 2, apareció un tercer 400:
+`'tool_calls.0.id' : property 'id' is missing` — el formato OpenAI
+exige un id único por tool_call en el mensaje `assistant`, correlacionado
+con `tool_call_id` en el mensaje `role="tool"` que le responde. Ni
+Ollama ni el fallback de texto plano (`_extract_fallback_tool_call`)
+garantizan un id. Fix: `ToolCall` (contrato público en
+`agent_core/llm/provider.py`) gana un campo `id: str | None = None`
+(retrocompatible); ambos clientes (`OllamaClient`/`OpenAICompatibleClient`)
+lo propagan si el proveedor lo manda; `agent_loop.py` genera uno
+(`call_<hex>`) si falta, ANTES de construir los mensajes, y lo usa
+consistente en `tool_calls[].id` (mensaje assistant) y `tool_call_id`
+(mensaje tool).
+
+**Verificado real, de punta a punta, los tres bugs juntos**: "ejecuta
+este codigo: print(2+2)" (dispara el flujo de 2 pasos completo) y
+"crea un proyecto html para un sitio web" (dispara tool_use_failed)
+contra el proceso real con Groq activo — ambos ahora responden
+`status: "success"` con la respuesta correcta, sin ningún 400. 7 tests
+nuevos: 2 en `test_openai_compatible_client.py` (fallback de
+tool_use_failed / un 400 distinto sigue propagándose), 2 en
+`test_ollama_client.py` (id presente/ausente en el parseo), 2 en
+`test_agent_loop.py` (arguments como string / id generado y
+correlacionado), más una aserción nueva en un test ya existente de
+`test_openai_compatible_client.py`. Suite completa, 0 regresiones.
+
+## Permission Manager de filesystem del Kernel + creación real de archivos desde VS Code (2026-07-14)
+
+El usuario notó que kal, como agente IDE, "entrega todo el código y da
+instrucciones pero no crea automáticamente las carpetas ni los
+archivos" — confirmado en el código: `CodeExecutionTool` prohíbe
+`open()`/`import os` a propósito (sandbox aislado) y su propia
+descripción le dice al modelo que genere el código en la respuesta
+final, nunca que lo escriba; del lado de la extensión, la única
+escritura real (`applyEdit.ts`) reemplaza un archivo ya abierto, nunca
+crea archivos/carpetas nuevas.
+
+En la discusión de diseño, el usuario planteó un "Permission Manager"
+completo del Kernel — Skill + Recurso + Acción, con scopes de
+aprobación (una vez/sesión/proyecto/skill), inspirado en el modelo de
+confianza de carpetas de VS Code pero generalizado a cualquier Skill.
+Explícitamente pidió diseñarlo COMPLETO ahora, no esperar a que otra
+Skill lo necesite — kal se distribuye al público, no es de uso
+personal, y hay que estar preparado para cualquier contingencia antes
+de que un usuario real la reporte. Confirmado vía `AskUserQuestion`
+por sobre la alternativa de escopar solo lo mínimo para VS Code.
+
+**Límite arquitectónico real, no negociable**: el backend de Python
+NUNCA sabe qué carpeta tiene abierta VS Code — solo la extensión lo
+sabe. La escritura real al disco del proyecto SIEMPRE ocurre del lado
+de la extensión (`vscode.workspace.fs`); el rol del Kernel es
+política + auditoría, nunca ejecutar la escritura él mismo.
+
+**Implementado — Kernel (nuevo, genérico, no solo para VS Code)**:
+- `tool_integration/filesystem_permissions.py` (100% stdlib, mismo
+  criterio de shipping que `permissions.py`): `FilesystemAction`
+  (create/read/modify/delete/rename) × `FilesystemScope`
+  (workspace/home/external).
+- `tool_integration/filesystem_access_manager.py`:
+  `FilesystemAccessManager.evaluate()` decide `auto_allowed` vs
+  `requires_approval` por política de `config.yaml` (fail-safe: solo
+  workspace+create/modify auto-permitido por default, todo lo demás
+  requiere un humano) — consultando primero un store de concesiones ya
+  otorgadas en 4 escalas tal como las planteó el usuario: `once`
+  (nunca se persiste), `session` (memoria del proceso), `project`
+  (persistido por recurso exacto), `skill` (persistido, cualquier
+  recurso de esa skill). Toda decisión queda auditada
+  (`audit/audit_log.py`, 4 `EventType` nuevos:
+  `filesystem_access_requested/_granted/_denied/_escalated`). Para
+  `requires_approval`, mismo patrón propose→pending→approve con token
+  admin que ya existía para self-modification/herramientas dinámicas:
+  `GET /filesystem-access`, `POST /filesystem-access/{id}/approve`
+  (con el nivel de escala elegido), `POST /filesystem-access/{id}/deny`.
+
+**Implementado — primer consumidor real (VS Code)**:
+- `tool_integration/adapters/vscode_files.py::ProposeProjectFilesTool`
+  (`propose_project_files`): el modelo propone `files: [{path,
+  content}]` con rutas SIEMPRE relativas (rechaza absolutas y `..`,
+  reforzado en la propia descripción de la herramienta al modelo);
+  consulta `filesystem_access_manager.evaluate(scope=WORKSPACE,
+  action=CREATE)` (auto-permitido por política default, pero deja
+  auditoría) y devuelve la propuesta estructurada — nunca escribe nada
+  ella misma. Excluida del toolset salvo `client == "vscode"` (mismo
+  mecanismo que ya excluía herramientas multimedia PARA vscode, acá
+  invertido: el cliente web no tiene ningún canal para aplicar una
+  propuesta de archivos).
+- `agent_core/llm/agent_loop.py::_artifact_to_observation()`: rama
+  nueva para `modality="project_files"` — resumen en lenguaje natural
+  para el modelo, NUNCA el contenido completo (la vista previa real la
+  ve el usuario, del lado de la extensión).
+- `agent_core/orchestrator.py::_step_artifact()`: antes solo
+  serializaba `modality="image"` en la respuesta de `/chat` — se
+  extiende para serializar `project_files` completo (request_id +
+  archivos), de donde la extensión lo lee.
+- `vscode-extension/src/projectFiles.ts` (nuevo): al recibir una
+  respuesta de `/chat` con una propuesta, si no hay ninguna carpeta
+  abierta ofrece "Abrir una carpeta..."; si hay workspace, modal con
+  la lista de archivos + "Ver detalle" (documento virtual con todo el
+  contenido) + Aplicar/Descartar (mismo patrón que
+  `applyEdit.ts::runApplySuggestedEdit`, generalizado a varios
+  archivos). Al aplicar: valida cada ruta (reusa
+  `projectFilesFormat.ts::findFirstInvalidPath`, sin `import vscode`,
+  testeable con Node normal — defensa en profundidad, aunque el
+  backend ya validó lo mismo), avisa y pide confirmar si hay
+  colisiones con archivos existentes (todo o nada, sin merge parcial),
+  aborta TODO si algún path resuelto queda fuera de la raíz del
+  workspace, y si todo está bien crea carpetas
+  (`vscode.workspace.fs.createDirectory`) y escribe
+  (`vscode.workspace.fs.writeFile`). Reporta el resultado real
+  (escrito/descartado) a `POST /filesystem-access/{id}/report-outcome`
+  (nuevo, deliberadamente SIN token admin — el Kernel ya auto-permitió
+  esto por política, el endpoint solo audita qué pasó de verdad).
+
+**Verificado real, de punta a punta, contra el proceso vivo**: pedido
+real ("creá un index.html con un título que diga Hola Mundo, usando la
+herramienta para proponer archivos de proyecto") con `client:
+"vscode"` — el modelo llamó `propose_project_files`, la respuesta de
+`/chat` trajo el `artifact` completo (`request_id` + archivos), y
+`logs/audit.log` mostró la cadena real
+`filesystem_access_requested` → `filesystem_access_granted`.
+Confirmado también `POST /filesystem-access/{id}/report-outcome`
+dejando el evento de auditoría correspondiente. Extensión reempaquetada
+e instalada de nuevo (`POST /integrations/vscode/install` — lección ya
+conocida: un cambio en `vscode-extension/` no alcanza sin esto),
+confirmado que el `.vsix` instalado ya trae `projectFiles.js`/
+`projectFilesFormat.js` y el método nuevo de `kalClient.js`. La
+escritura real en un VS Code con GUI (fuera del alcance de este
+entorno de desarrollo, sin pantalla) queda pendiente de confirmación
+visual del usuario, mismo límite honesto que la integración de VS Code
+original.
+
+35 tests nuevos entre backend y extensión: `test_filesystem_access_manager.py`
+(22, política + las 4 escalas de concesión + auditoría),
+`test_propose_project_files_tool.py` (8, validación de paths + llamada
+al Permission Manager), casos nuevos en `test_agent_loop.py` (exclusión
+por cliente + rama de observación), `test_orchestrator_chat_project_files.py`
+(serialización de `_step_artifact`), 2 nuevos en
+`test_orchestrator_admin_auth.py` (gate de `/filesystem-access/*` +
+`report-outcome` deliberadamente sin gate), y 8 en
+`projectFilesFormat.test.ts` (validación de rutas, sin `vscode`).
+
+**Fuera de alcance de esta fase, documentado explícitamente**:
+autorizar/crear un workspace nuevo para una ruta EXTERNA (el escenario
+"creá un proyecto en ~/Desktop/MiProyecto" que describió el usuario) —
+el Kernel-side ya soporta scope HOME/EXTERNAL + aprobación admin-gated
+para cualquier Skill futura, pero la UX específica de VS Code
+("Crear nuevo workspace / Autorizar esta carpeta / Cancelar") no está
+conectada — requiere que el modelo comunique una ruta absoluta de
+forma confiable, sin canal bueno para eso hoy (parsear lenguaje natural
+es frágil). Alternativa más simple para después: un comando nuevo con
+selector nativo de carpeta (`vscode.window.showOpenDialog`) — la
+elección explícita del usuario ES la autorización. Tampoco hay merge
+parcial en colisiones (todo o nada), y las escalas `project`/`skill`
+de concesión no las ejercita todavía VS Code de verdad (siempre
+auto-permitido por política) — quedan listas para cuando haga falta.
+
+## Tener la herramienta disponible no bastó: el modelo seguía sin usar propose_project_files (2026-07-14)
+
+Probando la funcionalidad recién construida, el usuario pegó una
+respuesta real de kal: seguía devolviendo el código en bloques de
+texto y ofreciendo pegarlo a mano ("¿te gustaría que te proporcione un
+script en Node.js que lo haga?") — exactamente el comportamiento
+viejo, pese a que `propose_project_files` ya estaba registrada y
+ofrecida al modelo para `client="vscode"`.
+
+Causa real, encontrada en dos lugares: (1)
+`agent_core/context_service.py::_VSCODE_CLIENT_INSTRUCTION` (inyectada
+en CADA turno para el cliente VS Code) todavía decía literalmente "tu
+respuesta final debe traer el código completo en bloques de código
+**para que el usuario lo copie**" — una instrucción escrita ANTES de
+que la herramienta existiera, ahora activamente contraproducente: le
+decía al modelo, en cada turno, que el camino correcto era mostrar
+texto, nunca mencionaba que ahora hay una herramienta real para
+proponer archivos. (2) `agent_core/llm/agent_loop.py::SYSTEM_PROMPT`
+tenía la misma laguna: "si el pedido requiere ese tipo de archivo, no
+lo intentes escribir con run_code — es un error conocido, no algo
+para reintentar de otra forma" — cierto sobre `run_code`, pero sin
+redirigir a la alternativa real que ahora existe.
+
+**Lección, coherente con un patrón ya visto varias veces en esta
+sesión** (herramientas multimedia que había que EXCLUIR
+estructuralmente del toolset porque una regla de prompt sola no
+alcanzaba): acá el problema es el inverso — tener una herramienta
+disponible en el toolset no es información suficiente para que el
+modelo la prefiera sobre su hábito por defecto de responder solo en
+texto, sobre todo si una instrucción vieja en el mismo prompt sigue
+apuntando en la dirección contraria.
+
+**Fix**: reescritas ambas — `_VSCODE_CLIENT_INSTRUCTION` ahora dice
+explícitamente "IMPORTANTE: tenés disponible la herramienta
+propose_project_files... usá SIEMPRE propose_project_files — no te
+limites a mostrar el código en bloques y sugerir que lo copien"; el
+bloque de `SYSTEM_PROMPT` sobre `run_code` ahora redirige a
+`propose_project_files` cuando está disponible, y solo cae al
+comportamiento viejo ("responder con el código completo en texto") si
+no lo está — correcto para ambos clientes sin necesitar texto
+condicional por cliente en el `SYSTEM_PROMPT` mismo (el toolset ya se
+filtra por cliente en `agent_loop.py`, la instrucción solo necesita no
+contradecir esa realidad).
+
+**Verificado real, de punta a punta**: mismo pedido exacto que antes
+generaba solo texto ("creá una página web simple para una barbería con
+un título y un botón de reservar cita") contra el proceso real —
+ahora la PRIMERA respuesta llama `propose_project_files` directamente,
+sin ofrecer alternativas manuales. 1 test nuevo
+(`test_context_service.py`) confirma que la instrucción de VS Code
+menciona la herramienta por nombre.
+
+## Multi-archivo (HTML+CSS+JS): seguía fallando a veces incluso con el fix del prompt (2026-07-14)
+
+El usuario reportó "sigue igual" pegando un log real con
+`tool_use_failed` — reveló un problema DISTINTO del anterior: el
+modelo a veces SÍ intentaba llamar a `propose_project_files`, pero el
+log solo decía "se usa la respuesta en texto plano" sin mostrar QUÉ
+había intentado llamar — indiagnosticable a ciegas. Primer fix:
+`openai_compatible_client.py` ahora loguea el `failed_generation` real
+(truncado) en el warning.
+
+Reproduciendo en vivo con la MISMA frase ("crea el código para una
+página web para una barbería", pedido de 3 archivos: HTML+CSS+JS): el
+PRIMER intento no llamó a la herramienta en absoluto — escribió los
+tres archivos como bloques de código en la respuesta y, al final,
+literalmente describió en texto cómo se vería la llamada a la
+herramienta ("Para crear estos archivos... te sugiero: \`\`\`json
+[{"path": "index.html", ...}]\`\`\`") sin ejecutarla de verdad. Los
+siguientes 5 intentos con la misma frase SÍ llamaron a la herramienta
+correctamente con los 3 archivos — confirmando que es variabilidad de
+muestreo del modelo (Groq/llama-4-scout, cuya confiabilidad de
+tool-calling ya se documentó como más débil que Ollama en
+[[technical_openai_strict_tool_calling_format]]), no un bug
+determinístico reproducible siempre.
+
+**Fix (mitiga, no puede garantizar 100%)**: reforzada
+`_VSCODE_CLIENT_INSTRUCTION` — instrucción explícita de llamar a la
+herramienta UNA sola vez con TODOS los archivos juntos cuando el
+proyecto tiene varios, y de nunca "describir en texto cómo se vería la
+llamada" en vez de hacerla de verdad (el caso real observado).
+Verificado con 9 pedidos reales seguidos de la misma frase: 8/9
+llamaron a la herramienta correctamente (vs. la falla real reportada
+por el usuario antes del refuerzo). El 9no dio `llm_error` — pero por
+una causa totalmente distinta y esperable: rate limit real de Groq
+(429, "tokens per minute" agotado) causado por las pruebas repetidas
+en poco tiempo contra la cuenta gratuita — la herramienta SÍ se había
+llamado bien en ese intento, el error fue en el turno de seguimiento.
+
+**Límite honesto, no resuelto ni resoluble solo con prompt**: con un
+modelo de tool-calling menos confiable (Groq) bajo carga (varios
+archivos grandes en un mismo argumento), una falla ocasional sigue
+siendo posible — el `tool_use_failed` fallback ya evita perder la
+respuesta por completo, y reintentar el mismo pedido normalmente
+funciona (confirmado empíricamente). Ollama local no tiene este
+problema de confiabilidad de tool-calling (documentado desde antes),
+así que es la alternativa más robusta si esto se vuelve frecuente en
+el uso real.
+
+## Proyectos distintos en la misma conversación mezclaban sus archivos (2026-07-14)
+
+El usuario reportó que ahora sí funcionaba, pero "mezcla en el árbol
+de archivos todos los archivos de los proyectos que se van creando" —
+causa real: `propose_project_files` nunca tuvo instrucción sobre
+organización de carpetas, así que dos pedidos distintos en la misma
+conversación (p.ej. una página para una barbería y después otra para
+una panadería) proponían archivos SUELTOS en la raíz del proyecto
+(`index.html`, `estilos.css`, `script.js` para ambos) — el segundo
+pedido pisaba/mezclaba con el primero, sin ninguna separación.
+
+**Fix**: reforzada `_VSCODE_CLIENT_INSTRUCTION` — si el pedido es un
+proyecto NUEVO y distinto de lo que se venía haciendo en la
+conversación, todos sus archivos van dentro de una subcarpeta con
+nombre corto y descriptivo derivado del pedido (p.ej.
+`barberia-web/index.html`, nunca suelto en la raíz); si en cambio es
+agregar/modificar el MISMO proyecto ya en curso, o el usuario pide una
+ruta explícita, se respeta esa instrucción en lugar de crear una
+subcarpeta nueva.
+
+**Verificado real, de punta a punta**: dos pedidos distintos en la
+MISMA sesión ("página para una barbería" seguido de "página para una
+panadería") — el primero propuso `barberia-web/index.html` +
+`barberia-web/estilos.css` + `barberia-web/script.js`, el segundo
+`panaderia-web/index.html` + `panaderia-web/estilos.css` +
+`panaderia-web/script.js` — cada proyecto en su propia subcarpeta, sin
+mezclarse.
+
+## "Fallo al crear un proyecto Android" + "todo el HTML en una línea": el mismo patrón de fondo, dos causas distintas (2026-07-15)
+
+El usuario reportó ambos síntomas juntos. Investigando `logs/agent.log`
+en detalle encontré que las DOS fallas eran manifestaciones del mismo
+patrón ya conocido (el modelo "imita" la llamada a
+`propose_project_files` como texto en vez de ejecutarla de verdad) —
+pero con una causa técnica distinta en cada caso, ninguna cubierta por
+el fallback existente (`_extract_fallback_tool_call`).
+
+**Causa 1 — forma no reconocida**: `_extract_fallback_tool_call` (el
+mecanismo que ya existía para detectar un tool call imitado como texto
+plano) solo reconocía la forma `{"name": ..., "arguments": ...}` — pero
+el modelo, para `propose_project_files` específicamente, a veces
+imitaba un ARRAY crudo de archivos (`[{"path":..., "content":...}]`),
+sin ese envoltorio. `extract_json_object()` (que `_extract_fallback_tool_call`
+usa) ni siquiera intenta reconocer un array — devolvía `None` de
+entrada, dejando el texto crudo (con los saltos de línea escapados
+como `\n` literal) como respuesta final. Esto es lo que el usuario veía
+como "todo el código en una línea": no estaba minificado, era el JSON
+con sus escapes de texto sin interpretar, mostrado tal cual.
+
+Fix: `agent_core/llm/json_extraction.py::extract_json_array()` (nueva,
+misma lógica que `extract_json_object()` pero para arrays) +
+`_extract_fallback_tool_call()` ahora también intenta esta forma,
+armando un `ToolCall(name="propose_project_files", arguments={"files": ...})`
+si el array tiene la forma esperada (`path`/`content` en cada
+elemento) Y la herramienta está disponible (nunca para el cliente web).
+
+**Causa 2 — JSON técnicamente inválido**: reproduciendo el pedido real
+de un proyecto Android ("agenda personal"), con la causa 1 ya
+arreglada el intento SEGUÍA sin detectarse — el modelo escribía código
+Java/XML multilínea con saltos de línea LITERALES dentro del valor de
+`"content"` en vez de escaparlos como `\n` (un error real y común al
+armar JSON "a mano" en vez de generarlo con una librería) — técnicamente
+inválido, `json.loads()` en modo estricto lo rechaza entero
+(`JSONDecodeError: Invalid control character`) por un solo carácter
+mal escapado, perdiendo la propuesta completa.
+
+Fix: `json.loads(candidate, strict=False)` en ambos extractores —
+`strict=False` permite caracteres de control (incluido un salto de
+línea literal) dentro de un string JSON, exactamente el caso real. Sin
+reimplementar un parser tolerante propio: es una opción ya integrada
+de la librería estándar para exactamente este problema.
+
+**Además**: reforzada `_VSCODE_CLIENT_INSTRUCTION` para proyectos
+grandes (Android, con manifest/gradle/actividades/layouts en varias
+carpetas) — proponer primero solo los archivos ESENCIALES para que el
+proyecto funcione de forma mínima, en vez de intentar todo de una vez
+y arriesgarse a que la respuesta se corte a la mitad; el resto se pide
+en un pedido siguiente.
+
+**Verificado real, de punta a punta**: el pedido EXACTO que antes
+fallaba ("creá un proyecto Android para una agenda personal") ahora
+responde `status: "success"` con `propose_project_files` llamada de
+verdad (3 archivos: `MainActivity.java`, `activity_main.xml`,
+`AndroidManifest.xml`, todos dentro de `agenda-personal/`). 5 tests
+nuevos: 2 en `test_json_extraction.py` (`extract_json_array` +
+tolerancia a salto de línea literal en ambos extractores), 3 en
+`test_agent_loop.py` (array crudo detectado / ignorado sin la
+herramienta ofrecida / salto de línea literal tolerado). Suite
+relacionada completa, 0 regresiones.

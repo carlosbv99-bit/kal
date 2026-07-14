@@ -38,10 +38,12 @@ conversación debe quedar disponible en el siguiente turno.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from uuid import uuid4
 
-from agent_core.llm.json_extraction import extract_json_object
+from agent_core.llm.json_extraction import extract_json_array, extract_json_object
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.provider import LLMProvider, ProviderError, ToolCall
 from agent_core.memory.manager import MemoryManager
@@ -129,6 +131,16 @@ Reglas:
   pedido "generame un sombrero" terminó generando CUATRO imágenes de sombreros, agregándole título
   a dos, y combinando dos en una composición — nada de eso se pidió, y cada llamada de más
   desperdicia tiempo y recursos reales (cada generación de imagen tarda minutos en esta máquina).
+- run_code NUNCA puede crear archivos que el usuario se lleve (una página web, una app, un
+  proyecto con varios archivos): `import os` y `open()` están prohibidos a propósito en ese
+  sandbox, cualquier intento falla con un error de validación ANTES de ejecutar nada. Si el pedido
+  requiere ese tipo de archivo Y tenés disponible la herramienta propose_project_files, usala en
+  cambio — es la forma correcta de crear archivos reales, el usuario los revisa y aprueba antes de
+  que se escriba nada. Si NO la tenés disponible, no intentes escribirlo con run_code de todos
+  modos — es un error conocido; respondé con el código completo en la respuesta final en cambio.
+  Bug real encontrado en uso: pedido "creá la página web para una panadería" generó código con
+  `open('index.html', 'w')` y `import os`, rechazado por el validador, después de gastar un paso
+  entero en el intento fallido.
 
 Ejemplos de cuándo NO llamar a ninguna herramienta (bugs reales encontrados en uso — el modelo
 llamó herramientas irrelevantes en casos exactamente como estos):
@@ -172,6 +184,20 @@ def _artifact_to_observation(artifact: Artifact) -> str:
         if "summary" in artifact.metadata:
             return artifact.metadata["summary"]
         return str(artifact.metadata)
+    if artifact.modality == "project_files":
+        # Nunca el contenido completo de los archivos acá — infla el
+        # historial de la conversación sin necesidad, el modelo no
+        # necesita releerlo (la vista previa real la ve el USUARIO, del
+        # lado de la extensión de VS Code, no el modelo).
+        if artifact.metadata.get("status") == "requires_approval":
+            return (
+                "ERROR: esta acción requiere aprobación humana explícita antes de poder "
+                "proponerse (política de filesystem_access en config.yaml) — avisale al "
+                "usuario, no se creó ni propuso ningún archivo."
+            )
+        files = artifact.metadata.get("files", [])
+        names = ", ".join(f["path"] for f in files)
+        return f"Se prepararon {len(files)} archivo(s) para el proyecto ({names}) — el usuario decidirá si los aplica."
     return f"{artifact.modality}: archivo generado en {artifact.uri}"
 
 
@@ -196,6 +222,34 @@ def _agent_tool_from_tool(name: str, tool: Tool) -> AgentTool:
     return agent_tool
 
 
+# Herramientas de generación/edición multimedia, excluidas del toolset
+# cuando client="vscode" (ver agent_core/context_service.py y
+# AgentLoop._build_tools_from_registry). Restricción ESTRUCTURAL, no
+# una instrucción de prompt: ya se probó en vivo que una regla de
+# SYSTEM_PROMPT sola no evita que el modelo llame a estas herramientas
+# para pedidos de código ("creá la página web para una panadería"
+# generó fotos de panadería en vez de HTML/CSS/JS, dos veces, con
+# distintas reglas de prompt) — mismo criterio que max_tool_repeats
+# más abajo: un tope estructural, no una petición que el modelo puede
+# ignorar. Lista explícita (no una categoría genérica en ToolManifest
+# todavía): si se agrega una herramienta multimedia nueva, hay que
+# sumarla acá a mano.
+_MULTIMEDIA_TOOL_NAMES = frozenset({
+    "image_generation", "audio_generation", "video_composition",
+    "image_editing", "image_composition", "speech_to_text",
+    "image_via_kernel", "audio_via_kernel",
+    "voice_roundtrip_via_kernel", "image_inpaint_via_kernel",
+})
+
+# Inverso del conjunto de arriba: herramientas que SOLO tienen sentido
+# para client="vscode" — el backend nunca escribe el archivo real él
+# mismo (ver tool_integration/adapters/vscode_files.py), la escritura
+# ocurre del lado de la extensión tras la aprobación del usuario. El
+# cliente web no tiene ningún canal para aplicar esa propuesta, así que
+# ofrecérsela solo generaría una respuesta que nadie puede usar.
+_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files"})
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -215,18 +269,22 @@ class AgentLoop:
             {tool.name: tool for tool in tools} if tools is not None else None
         )
 
-    def _current_tools(self) -> dict[str, AgentTool]:
+    def _current_tools(self, client: str | None = None) -> dict[str, AgentTool]:
         if self._explicit_tools is not None:
             return self._explicit_tools
-        return self._build_tools_from_registry()
+        return self._build_tools_from_registry(client)
 
-    def _build_tools_from_registry(self) -> dict[str, AgentTool]:
+    def _build_tools_from_registry(self, client: str | None = None) -> dict[str, AgentTool]:
         instance_tools: dict[str, Tool] = {
             "run_code": CodeExecutionTool(self.task_executor),
             "remember": MemoryRememberTool(self.memory),
             "recall": MemoryRecallTool(self.memory),
         }
         merged: dict[str, Tool] = {**self.tool_registry.active_tools(), **instance_tools}
+        if client == "vscode":
+            merged = {name: tool for name, tool in merged.items() if name not in _MULTIMEDIA_TOOL_NAMES}
+        else:
+            merged = {name: tool for name, tool in merged.items() if name not in _VSCODE_ONLY_TOOL_NAMES}
         return {name: _agent_tool_from_tool(name, tool) for name, tool in merged.items()}
 
     def _extract_fallback_tool_call(self, content: str, tools: dict[str, AgentTool]) -> ToolCall | None:
@@ -250,12 +308,29 @@ class AgentLoop:
         mencione al pasar no se confunde con un tool call.
         """
         data = extract_json_object(content)
-        if data is None or data.get("name") not in tools:
-            return None
-        arguments = data.get("arguments", {})
-        if not isinstance(arguments, dict):
-            return None
-        return ToolCall(name=data["name"], arguments=arguments)
+        if data is not None and data.get("name") in tools:
+            arguments = data.get("arguments", {})
+            if isinstance(arguments, dict):
+                return ToolCall(name=data["name"], arguments=arguments)
+
+        # BUG REAL ENCONTRADO EN USO: para propose_project_files en
+        # particular, el modelo a veces "imita" la llamada como un
+        # array JSON crudo de archivos — ni siquiera envuelto en
+        # {"name", "arguments"} como el resto de los tool calls
+        # imitados que sí detecta el chequeo de arriba. Sin esto, ese
+        # texto se mostraba tal cual al usuario (con los saltos de
+        # línea de cada archivo escapados como "\n" literal, pareciendo
+        # "todo el código en una sola línea") en vez de crear la
+        # propuesta de verdad.
+        if "propose_project_files" in tools:
+            files = extract_json_array(content)
+            if files and all(
+                isinstance(f, dict) and isinstance(f.get("path"), str) and isinstance(f.get("content"), str)
+                for f in files
+            ):
+                return ToolCall(name="propose_project_files", arguments={"files": files})
+
+        return None
 
     # --- Loop principal ---
 
@@ -268,6 +343,7 @@ class AgentLoop:
         history: list[dict] | None = None,
         session_context: dict | None = None,
         denied_permissions: frozenset[Permission] = frozenset(),
+        client: str | None = None,
     ) -> AgentRunResult:
         """
         `history` (turnos previos de la misma sesión, ver
@@ -291,10 +367,16 @@ class AgentLoop:
         tarea. La regla de SYSTEM_PROMPT sola no alcanzó (ya estaba
         activa cuando pasó esto) — este tope es la barrera estructural
         que no depende de que el modelo la respete.
+        `client`: "vscode" excluye del toolset las herramientas de
+        generación/edición multimedia (ver _MULTIMEDIA_TOOL_NAMES más
+        arriba) — mismo criterio que max_tool_repeats: una restricción
+        ESTRUCTURAL (el modelo ni siquiera ve estas herramientas en la
+        lista disponible), no una instrucción de prompt. Ya se probó en
+        vivo que pedirle por prompt que no las llame no alcanza.
         """
         max_steps = max_steps or settings.llm.max_agent_steps
         max_tool_repeats = max_tool_repeats or settings.llm.max_tool_repeats
-        tools = self._current_tools()
+        tools = self._current_tools(client)
         # BUG REAL ENCONTRADO EN USO: session_context como un SEGUNDO
         # mensaje role="system" separado (en vez de fundido en el
         # primero) hacía que qwen3-coder:30b lo ignorara por completo —
@@ -332,11 +414,33 @@ class AgentLoop:
             if not effective_tool_calls:
                 return AgentRunResult(goal=goal, final_answer=response.content, steps=steps, status="success")
 
+            # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
+            # ESTRICTO, a diferencia de Ollama que es tolerante) exige un
+            # 'id' único por tool_call — para correlacionar la respuesta de
+            # la herramienta (mensaje role="tool", tool_call_id) con la
+            # llamada que la originó. Ollama no siempre lo devuelve, y el
+            # fallback de texto plano tampoco tiene uno — se genera acá si
+            # falta, nunca se manda un tool_call sin id hacia un proveedor
+            # que sí lo exige.
+            for tc in effective_tool_calls:
+                if tc.id is None:
+                    tc.id = f"call_{uuid4().hex[:24]}"
+
+            # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
+            # ESTRICTO, a diferencia de Ollama que es tolerante) exige que
+            # tool_calls[].function.arguments sea un STRING con JSON adentro,
+            # nunca el objeto ya parseado — sin este dumps, Groq rechazaba
+            # CUALQUIER turno posterior a una llamada a herramienta con 400
+            # ("arguments: value must be a string"), rompiendo toda tarea de
+            # más de un paso contra un proveedor en la nube.
             messages.append(
                 {
                     "role": "assistant",
                     "content": response.content,
-                    "tool_calls": [{"function": {"name": tc.name, "arguments": tc.arguments}} for tc in effective_tool_calls],
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                        for tc in effective_tool_calls
+                    ],
                 }
             )
 
@@ -363,7 +467,7 @@ class AgentLoop:
                         observation=observation, artifact=artifact,
                     )
                 )
-                messages.append({"role": "tool", "content": observation})
+                messages.append({"role": "tool", "content": observation, "tool_call_id": tool_call.id})
 
         logger.warning(f"Agente agotó max_steps={max_steps} sin respuesta final para: {goal!r}")
         return AgentRunResult(

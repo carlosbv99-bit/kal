@@ -14,10 +14,20 @@
  */
 import { EditorSnapshot } from "./editorContextFormat";
 
+export interface ProjectFilesArtifact {
+  modality: "project_files";
+  request_id: string;
+  files: { path: string; content: string }[];
+}
+
 export interface ChatStep {
   tool: string;
   arguments: Record<string, unknown>;
   observation: string;
+  // Solo se tipa completo "project_files" (lo único que esta extensión
+  // necesita leer estructurado, ver projectFiles.ts) — cualquier otro
+  // modality (p.ej. "image") llega tal cual, sin usarse acá.
+  artifact?: ProjectFilesArtifact | Record<string, unknown> | null;
 }
 
 export interface ChatResult {
@@ -55,6 +65,7 @@ export class KalClient {
                 is_selection: editorContext.isSelection,
               }
             : null,
+          client: "vscode",
         }),
       });
     } catch (e) {
@@ -77,6 +88,32 @@ export class KalClient {
       return response.ok;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Deja constancia auditada de qué pasó DE VERDAD con una propuesta de
+   * propose_project_files (ver tool_integration/adapters/vscode_files.py)
+   * después de que el usuario decide en la vista previa — el Kernel ya
+   * auto-permitió la acción por política, esto no pide ni espera
+   * ninguna aprobación, solo audita. Sin token admin (ver
+   * agent_core/orchestrator.py::report_filesystem_access_outcome).
+   * Best-effort: si falla, no debe romper el flujo de escritura real,
+   * que ya ocurrió (o se descartó) para cuando esto se llama.
+   */
+  async reportFilesystemAccessOutcome(
+    requestId: string,
+    outcome: "written" | "discarded",
+    filesWritten: string[]
+  ): Promise<void> {
+    try {
+      await this.fetchFn(`${this.baseUrl}/filesystem-access/${requestId}/report-outcome`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome, files_written: filesWritten }),
+      });
+    } catch {
+      // best-effort, ver docstring
     }
   }
 }

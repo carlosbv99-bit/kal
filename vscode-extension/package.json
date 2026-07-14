@@ -10,6 +10,24 @@
   "categories": ["Other"],
   "main": "./out/src/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kal",
+          "title": "Kal",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "kal": [
+        {
+          "id": "kal.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "kal.openChat",
