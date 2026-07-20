@@ -17,6 +17,14 @@ PACKAGE_PATH="$DIST_DIR/$PACKAGE_NAME.zip"
 mkdir -p "$DIST_DIR"
 
 # Directorios y archivos a incluir
+#
+# "sandbox" y "kernel_bus" quedaron eliminados de esta lista: la
+# reestructuración de arquitectura de 2026-07-20 los movió a kernel/
+# (api/broker/lifecycle/permissions/registry/services) + sdk/ (la base
+# pura de la que kernel/ depende). Un `package_distribution.sh` corrido
+# ANTES de esta corrección generaba un zip roto: le faltaba
+# directamente el núcleo del proyecto (kernel/, sdk/), y arrastraba una
+# advertencia inofensiva pero engañosa de "sandbox no encontrado".
 INCLUDE_DIRS=(
     "agent_core"
     "audit"
@@ -24,7 +32,8 @@ INCLUDE_DIRS=(
     "config"
     "error_handling"
     "frontend"
-    "sandbox"
+    "kernel"
+    "sdk"
     "scripts"
     "skills"
     "task_execution"
@@ -38,6 +47,8 @@ INCLUDE_FILES=(
     "Dockerfile"
     "docker-compose.yml"
     "README.md"
+    "CONTRIBUTING.md"
+    "LICENSE"
     "requirements.txt"
     ".env.example"
 )
@@ -183,7 +194,7 @@ fi
 # Empaquetar en ZIP
 echo "Empaquetando en ZIP: $PACKAGE_PATH"
 cd "$TEMP_DIR"
-zip -r "$PACKAGE_PATH" "$PACKAGE_NAME" -x "*.git*" "*__pycache__*" "*.pyc" "*.pyo" "*.pytest_cache*" ".gitignore" ".dockerignore"
+zip -r "$PACKAGE_PATH" "$PACKAGE_NAME" -x "*.git*" "*__pycache__*" "*.pyc" "*.pyo" "*.pytest_cache*" ".gitignore" ".dockerignore" "*/node_modules/*" "*/out/*" "*.vsix"
 
 # Limpiar directorio temporal
 rm -rf "$TEMP_DIR"
