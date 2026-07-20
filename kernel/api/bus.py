@@ -2,7 +2,7 @@
 Registro de servicios del Kernel Service Bus + despacho por nombre de
 método ("<servicio>.<acción>"). Puramente en memoria del proceso
 principal — nunca sabe nada de sockets ni de contenedores (eso es
-kernel_bus/socket_server.py, que envuelve esto para exponerlo a una
+kernel/api/socket_server.py, que envuelve esto para exponerlo a una
 skill aislada).
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ class KernelServiceBus:
         # adentro y no debería exponerse a código de terceros sin
         # necesidad. SandboxedSkillTool._to_artifact() resuelve acá
         # cuando la skill devuelve el mismo "artifact://" que recibió
-        # como resultado propio (ver kernel_bus/services.py::ImageService.generate()).
+        # como resultado propio (ver kernel/services/services.py::ImageService.generate()).
         # Mecanismo deliberadamente mínimo — no un sistema de artefactos
         # completo (eso es la visión más grande de "Proyectos", no
         # construida todavía).
@@ -45,6 +45,20 @@ class KernelServiceBus:
         service = self._services.get(service_name)
         if service is None:
             raise ServiceNotFoundError(f"servicio desconocido: '{service_name}'")
+
+        # Hallazgo de la revisión de seguridad 2026-07-09: antes esto
+        # resolvía la acción con getattr genérico sobre CUALQUIER
+        # atributo público del servicio — inofensivo mientras cada
+        # servicio solo tuviera los métodos pensados como "acciones",
+        # pero sin ninguna lista explícita, un método público agregado
+        # a futuro para otro propósito (no pensado como acción del bus)
+        # quedaría invocable igual, por accidente. ALLOWED_ACTIONS es la
+        # lista explícita y con intención de cada servicio (ver
+        # kernel/services/services.py) — dispatch() ya no confía en que
+        # "es público" signifique "es una acción segura".
+        allowed_actions = getattr(service, "ALLOWED_ACTIONS", frozenset())
+        if action_name not in allowed_actions:
+            raise ActionNotFoundError(f"acción desconocida: '{method}'")
 
         action = getattr(service, action_name, None)
         if action is None or not callable(action):
@@ -92,7 +106,7 @@ class KernelServiceBus:
 
 
 def _build_default_bus() -> KernelServiceBus:
-    from kernel_bus.services import AudioService, ImageService, STTService
+    from kernel.services.services import AudioService, ImageService, STTService
 
     bus = KernelServiceBus()
     bus.register("image", ImageService())
@@ -101,7 +115,9 @@ def _build_default_bus() -> KernelServiceBus:
     return bus
 
 
-# Singleton, mismo patrón que tool_registry (tool_integration/registry.py)
+# Singleton, mismo patrón que tool_registry (kernel/registry/registry.py)
 # / audit_log (audit/audit_log.py) / permission_cascade
-# (tool_integration/permission_cascade.py).
-kernel_bus = _build_default_bus()
+# (kernel/permissions/permission_cascade.py). Nombrado `kernel_service_bus`,
+# no `kernel` a secas — evita la colisión confusa con el nombre del
+# propio paquete `kernel` que lo contiene.
+kernel_service_bus = _build_default_bus()

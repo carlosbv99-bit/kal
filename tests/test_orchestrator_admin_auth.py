@@ -61,6 +61,8 @@ _GATED_REQUESTS = [
     ("POST", "/settings/llm/activate-profile", {"name": "groq"}),
     ("POST", "/filesystem-access/no-existe/approve", {"level": "once"}),
     ("POST", "/filesystem-access/no-existe/deny", {}),
+    ("POST", "/network-access/no-existe/approve", {"level": "once"}),
+    ("POST", "/network-access/no-existe/deny", {}),
 ]
 
 

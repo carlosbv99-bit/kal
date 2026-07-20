@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from agent_core.sessions import SessionManager
-from tool_integration.base_tool import Artifact
-from tool_integration.permissions import Permission
+from sdk.artifacts import Artifact
+from sdk.permissions import Permission
 
 
 def test_get_or_create_with_none_creates_a_new_session_with_random_id():

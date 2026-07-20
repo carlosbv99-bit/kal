@@ -2,7 +2,7 @@
 Denylist de nodos/llamadas AST prohibidos en código no confiable.
 
 Esto es un filtro barato de primera línea, NO la garantía de seguridad
-(esa la da el aislamiento real en sandbox/). Ver sandbox/docker_runner.py
+(esa la da el aislamiento real en sandbox/). Ver kernel/lifecycle/docker_runner.py
 para la capa que realmente contiene el daño si esta lista falla en
 detectar algo (código ofuscado, por ejemplo).
 
@@ -40,7 +40,7 @@ FORBIDDEN_CALLS = {
 
 # Módulos cuya importación está prohibida por defecto (requieren
 # aprobación humana explícita en el manifiesto de la herramienta,
-# ver tool_integration/registry.py)
+# ver kernel/registry/registry.py)
 FORBIDDEN_IMPORTS = {
     "os",
     "sys",

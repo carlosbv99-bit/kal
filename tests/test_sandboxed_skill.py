@@ -1,7 +1,7 @@
 """
-Tests de tool_integration/sandboxed_skill.py::SandboxedSkillTool — el
+Tests de kernel/registry/sandboxed_skill.py::SandboxedSkillTool — el
 Tool que reemplaza a una skill real: cada execute() corre DENTRO de un
-contenedor Docker efímero (sandbox/skill_runner.py), nunca en este
+contenedor Docker efímero (kernel/lifecycle/skill_runner.py), nunca en este
 proceso.
 
 Los tests con SandboxExecutor falso prueban la LÓGICA de
@@ -16,11 +16,11 @@ import json
 
 import pytest
 
-from sandbox.docker_runner import DockerSandboxRunner, SandboxResult
-from sandbox.executor import SandboxExecutor
+from kernel.lifecycle.docker_runner import DockerSandboxRunner, SandboxResult
+from kernel.lifecycle.executor import SandboxExecutor
 from tests.conftest import requires_docker
-from tool_integration.base_tool import ToolManifest
-from tool_integration.sandboxed_skill import SandboxedSkillTool
+from sdk.skill import ToolManifest
+from kernel.registry.sandboxed_skill import SandboxedSkillTool
 
 
 class FakeSandboxExecutor:
@@ -59,7 +59,7 @@ def _clean_scan_by_default(monkeypatch):
     se simula "limpio" sin depender de tener ClamAV real instalado.
     Los tests puntuales del escaneo lo pisan explícitamente.
     """
-    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", lambda data, suffix="": None)
+    monkeypatch.setattr("kernel.registry.sandboxed_skill.scan_bytes", lambda data, suffix="": None)
 
 
 @pytest.fixture
@@ -215,7 +215,7 @@ def test_file_artifact_blocked_when_scan_detects_malware(tmp_path, manifest, mon
     def _boom(data, suffix=""):
         raise MalwareScanError("ClamAV detectó contenido malicioso: FAKE.TEST-SIGNATURE")
 
-    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", _boom)
+    monkeypatch.setattr("kernel.registry.sandboxed_skill.scan_bytes", _boom)
 
     skill_dir = tmp_path / "s"
     skill_dir.mkdir()
@@ -242,7 +242,7 @@ def test_file_artifact_blocked_when_clamav_unavailable(tmp_path, manifest, monke
     def _unavailable(data, suffix=""):
         raise MalwareScanError("ClamAV no está instalado — no se puede garantizar que este archivo sea seguro")
 
-    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", _unavailable)
+    monkeypatch.setattr("kernel.registry.sandboxed_skill.scan_bytes", _unavailable)
 
     skill_dir = tmp_path / "s"
     skill_dir.mkdir()
@@ -270,7 +270,7 @@ def test_scan_blocked_artifact_is_audited(tmp_path, manifest, monkeypatch):
     def _boom(data, suffix=""):
         raise MalwareScanError("detectado")
 
-    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", _boom)
+    monkeypatch.setattr("kernel.registry.sandboxed_skill.scan_bytes", _boom)
 
     skill_dir = tmp_path / "s"
     skill_dir.mkdir()
@@ -295,7 +295,7 @@ def test_text_artifacts_are_never_scanned(tmp_path, manifest, monkeypatch):
     """system_info/qr_code (metadata pura) no producen un archivo — no
     hay nada que escanear, y no debería llamarse a scan_bytes."""
     calls = []
-    monkeypatch.setattr("tool_integration.sandboxed_skill.scan_bytes", lambda data, suffix="": calls.append(data))
+    monkeypatch.setattr("kernel.registry.sandboxed_skill.scan_bytes", lambda data, suffix="": calls.append(data))
 
     skill_dir = tmp_path / "s"
     skill_dir.mkdir()
@@ -319,7 +319,7 @@ def test_end_to_end_text_artifact_with_real_docker(tmp_path):
     skill_dir = tmp_path / "greeter"
     skill_dir.mkdir()
     (skill_dir / "tool.py").write_text(
-        "from tool_integration.base_tool import Artifact, Tool, ToolManifest\n\n\n"
+        "from sdk.skill import Tool, ToolManifest\nfrom sdk.artifacts import Artifact\n\n\n"
         "class GreetTool(Tool):\n"
         "    manifest = ToolManifest(name='greet', description='saluda')\n\n"
         "    def execute(self, **kwargs):\n"
@@ -352,7 +352,7 @@ def test_end_to_end_file_artifact_with_real_docker(tmp_path):
     skill_dir.mkdir()
     (skill_dir / "tool.py").write_text(
         "import os\n"
-        "from tool_integration.base_tool import Artifact, Tool, ToolManifest\n\n\n"
+        "from sdk.skill import Tool, ToolManifest\nfrom sdk.artifacts import Artifact\n\n\n"
         "class WriterTool(Tool):\n"
         "    manifest = ToolManifest(name='writer', description='escribe un archivo')\n\n"
         "    def execute(self, **kwargs):\n"
@@ -394,7 +394,7 @@ def test_skill_without_network_permission_cannot_reach_internet(tmp_path):
     skill_dir.mkdir()
     (skill_dir / "tool.py").write_text(
         "import socket\n"
-        "from tool_integration.base_tool import Artifact, Tool, ToolManifest\n\n\n"
+        "from sdk.skill import Tool, ToolManifest\nfrom sdk.artifacts import Artifact\n\n\n"
         "class CuriousTool(Tool):\n"
         "    manifest = ToolManifest(name='curioso', description='intenta conectarse a internet')\n\n"
         "    def execute(self, **kwargs):\n"
@@ -420,7 +420,7 @@ def test_skill_without_network_permission_cannot_reach_internet(tmp_path):
     assert artifact.metadata.get("status") == "error"
 
 
-# --- Kernel Service Bus (kernel_bus/__init__.py) ---
+# --- Kernel Service Bus (kernel/__init__.py) ---
 
 
 def test_kernel_services_declared_means_extra_mounts_is_passed(tmp_path, manifest):
@@ -447,16 +447,18 @@ def test_no_kernel_services_means_no_extra_mounts(tool):
 
 
 @requires_docker
-def test_end_to_end_kernel_bus_call_with_fake_service(tmp_path):
+def test_end_to_end_kernel_call_with_fake_service(tmp_path):
     """
     Valida la plomería COMPLETA del Kernel Service Bus con Docker real
-    (socket montado, tool_integration/kernel_client.py copiado dentro
+    (socket montado, sdk/context.py copiado dentro
     del contenedor, permiso declarado respetado) — con un servicio
     FALSO (sin tocar SDXL-Turbo real, rápido).
     """
-    from kernel_bus.bus import KernelServiceBus
+    from kernel.api.bus import KernelServiceBus
 
     class FakeEchoService:
+        ALLOWED_ACTIONS = frozenset({"echo"})
+
         def echo(self, text):
             return {"echoed": text}
 
@@ -466,8 +468,8 @@ def test_end_to_end_kernel_bus_call_with_fake_service(tmp_path):
     skill_dir = tmp_path / "llamador"
     skill_dir.mkdir()
     (skill_dir / "tool.py").write_text(
-        "from tool_integration.base_tool import Artifact, Tool\n"
-        "from tool_integration.kernel_client import call as kernel_call\n\n\n"
+        "from sdk.skill import Tool\nfrom sdk.artifacts import Artifact\n"
+        "from sdk.context import call as kernel_call\n\n\n"
         "class LlamadorTool(Tool):\n"
         "    def execute(self, **kwargs):\n"
         "        result = kernel_call('test.echo', text='hola desde el contenedor')\n"
@@ -489,16 +491,22 @@ def test_end_to_end_kernel_bus_call_with_fake_service(tmp_path):
 
 
 @requires_docker
-def test_end_to_end_kernel_bus_denies_method_not_declared_in_kernel_services(tmp_path):
+def test_end_to_end_kernel_denies_method_not_declared_in_kernel_services(tmp_path):
     """
     La skill declara kernel_services=["test.echo"] pero su CÓDIGO
     intenta llamar a "test.otro_metodo" (no declarado) — el servidor
     debe rechazarlo ANTES de tocar el servicio real, sin importar que
     "test.otro_metodo" exista de verdad en el bus.
     """
-    from kernel_bus.bus import KernelServiceBus
+    from kernel.api.bus import KernelServiceBus
 
     class FakeEchoService:
+        # "otro_metodo" SÍ está en ALLOWED_ACTIONS (es una acción real y
+        # permitida del bus) — lo que este test verifica es el rechazo
+        # de la capa de arriba (allowed_methods, ver kernel_services más
+        # abajo), independiente de la allowlist del propio servicio.
+        ALLOWED_ACTIONS = frozenset({"echo", "otro_metodo"})
+
         def echo(self, text):
             return {"echoed": text}
 
@@ -511,8 +519,8 @@ def test_end_to_end_kernel_bus_denies_method_not_declared_in_kernel_services(tmp
     skill_dir = tmp_path / "curioso_del_kernel"
     skill_dir.mkdir()
     (skill_dir / "tool.py").write_text(
-        "from tool_integration.base_tool import Artifact, Tool\n"
-        "from tool_integration.kernel_client import call, KernelError\n\n\n"
+        "from sdk.skill import Tool\nfrom sdk.artifacts import Artifact\n"
+        "from sdk.context import call, KernelError\n\n\n"
         "class CuriosoTool(Tool):\n"
         "    def execute(self, **kwargs):\n"
         "        try:\n"
@@ -538,20 +546,22 @@ def test_end_to_end_kernel_bus_denies_method_not_declared_in_kernel_services(tmp
 
 
 @requires_docker
-def test_end_to_end_kernel_bus_resolves_artifact_passed_between_two_calls(tmp_path):
+def test_end_to_end_kernel_resolves_artifact_passed_between_two_calls(tmp_path):
     """
     Plomería COMPLETA (Docker real + socket real) para el caso que
     motivó la resolución de artefactos de ENTRADA en
-    kernel_bus/bus.py::KernelServiceBus._resolve_input_artifacts()
+    kernel/api/bus.py::KernelServiceBus._resolve_input_artifacts()
     (agregado junto con audio.synthesize/stt.transcribe/image.inpaint):
     una skill llama a una acción que PRODUCE un artefacto, y pasa esa
     misma referencia "artifact://..." como entrada de una segunda
     llamada — con servicios FALSOS (instantáneos), para validar el
     protocolo en sí, no un modelo real.
     """
-    from kernel_bus.bus import KernelServiceBus
+    from kernel.api.bus import KernelServiceBus
 
     class FakeProducerConsumerService:
+        ALLOWED_ACTIONS = frozenset({"produce", "consume"})
+
         def produce(self):
             return {"artifact": "artifact://fake/1", "path": "/no/existe/pero/no/importa.bin", "metadata": {}}
 
@@ -564,8 +574,8 @@ def test_end_to_end_kernel_bus_resolves_artifact_passed_between_two_calls(tmp_pa
     skill_dir = tmp_path / "encadenador"
     skill_dir.mkdir()
     (skill_dir / "tool.py").write_text(
-        "from tool_integration.base_tool import Artifact, Tool\n"
-        "from tool_integration.kernel_client import call as kernel_call\n\n\n"
+        "from sdk.skill import Tool\nfrom sdk.artifacts import Artifact\n"
+        "from sdk.context import call as kernel_call\n\n\n"
         "class EncadenadorTool(Tool):\n"
         "    def execute(self, **kwargs):\n"
         "        produced = kernel_call('test.produce')\n"

@@ -1,7 +1,7 @@
 """
 Expone un KernelServiceBus a UNA skill aislada, para UNA ejecución, vía
 un socket Unix — nunca vía red (el contenedor de la skill sigue con
-network_mode="none"). tool_integration/sandboxed_skill.py arranca uno
+network_mode="none"). kernel/registry/sandboxed_skill.py arranca uno
 de estos por cada `.execute()` de una skill que declare
 `kernel_services` en su skill.yaml, y lo para al terminar (éxito o
 error) — nunca sobrevive más allá de esa única ejecución.
@@ -26,8 +26,8 @@ import threading
 from pathlib import Path
 
 from audit.audit_log import AuditEvent, audit_log
-from kernel_bus.bus import ActionNotFoundError, KernelServiceBus, ServiceNotFoundError
-from kernel_bus.protocol import (
+from kernel.api.bus import ActionNotFoundError, ArtifactNotFoundError, KernelServiceBus, ServiceNotFoundError
+from kernel.api.protocol import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
@@ -160,13 +160,28 @@ class KernelBusSocketServer:
 
         try:
             result = self.bus.dispatch(request.method, request.params)
-        except (ServiceNotFoundError, ActionNotFoundError) as e:
+        except (ServiceNotFoundError, ActionNotFoundError, ArtifactNotFoundError) as e:
+            # Errores de protocolo del propio bus — el mensaje solo cita
+            # el nombre de servicio/acción/artefacto que la SKILL misma
+            # pasó como parámetro, nunca un detalle interno del host.
+            # Seguros de devolver tal cual.
             self._audit_call(request.method, "failure", str(e))
             return error_response(request.id, METHOD_NOT_FOUND, str(e))
         except Exception as e:
+            # Hallazgo de la revisión de seguridad 2026-07-09: antes se
+            # devolvía str(e) crudo a la skill — un servicio real puede
+            # fallar de formas que revelan detalles del host (rutas de
+            # archivo reales ya resueltas desde un "artifact://" de
+            # entrada, mensajes de librerías de terceros, etc.). Si esa
+            # misma skill también tiene permiso de red, eso es una vía
+            # de exfiltración. El detalle completo se sigue registrando
+            # server-side (log + auditoría) para diagnóstico — solo deja
+            # de cruzar el socket hacia el proceso de menor confianza.
             logger.warning(f"Servicio '{request.method}' falló para la skill '{self.skill_name}': {e}")
             self._audit_call(request.method, "failure", str(e))
-            return error_response(request.id, INTERNAL_ERROR, str(e))
+            return error_response(
+                request.id, INTERNAL_ERROR, f"el servicio '{request.method}' falló procesando el pedido"
+            )
 
         self._audit_call(request.method, "success", "")
         return success_response(request.id, result)
@@ -197,7 +212,7 @@ class KernelBusSocketServer:
     def _audit_line_too_long(self) -> None:
         audit_log.record(
             AuditEvent(
-                event_type="kernel_bus_line_too_long",
+                event_type="kernel_line_too_long",
                 summary=f"Skill '{self.skill_name}' mandó una línea de más de {_MAX_LINE_BYTES} bytes sin salto de línea — conexión cortada",
                 context={"skill": self.skill_name},
                 outcome="failure",
