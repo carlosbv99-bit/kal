@@ -7,7 +7,7 @@ skill de referencia sin NINGUNA dependencia de ML propia, de punta a
 punta — confirma que puede generar una imagen real pidiéndosela al
 kernel, sin cargar torch/diffusers ella misma.
 
-Separado de test_sandboxed_skill.py::test_end_to_end_kernel_bus_*
+Separado de test_sandboxed_skill.py::test_end_to_end_kernel_*
 (que usan un servicio FALSO, rápido) porque este SÍ tarda lo mismo que
 cualquier generación real de imagen — segundos a minutos según
 hardware, no instantáneo.
@@ -21,11 +21,11 @@ import pytest
 pytest.importorskip("diffusers")
 pytest.importorskip("torch")
 
-from sandbox.docker_runner import DockerSandboxRunner  # noqa: E402
-from sandbox.executor import SandboxExecutor  # noqa: E402
+from kernel.lifecycle.docker_runner import DockerSandboxRunner  # noqa: E402
+from kernel.lifecycle.executor import SandboxExecutor  # noqa: E402
 from tests.conftest import requires_docker  # noqa: E402
-from tool_integration.base_tool import ToolManifest  # noqa: E402
-from tool_integration.sandboxed_skill import SandboxedSkillTool  # noqa: E402
+from sdk.skill import ToolManifest# noqa: E402
+from kernel.registry.sandboxed_skill import SandboxedSkillTool  # noqa: E402
 
 pytestmark = requires_docker
 
@@ -41,8 +41,8 @@ def test_image_via_kernel_skill_generates_a_real_image(tmp_path):
         manifest=manifest, skill_dir=SKILL_DIR, entry_point="tool:ImageViaKernelTool",
         image="python:3.11-slim", sandbox=real_sandbox, artifacts_root=tmp_path / "artifacts",
         kernel_services=["image.generate"],
-        # kernel_bus_instance NO se inyecta a propósito: usa el bus real
-        # de producción (kernel_bus.bus.kernel_bus), con el ImageService
+        # kernel_instance NO se inyecta a propósito: usa el bus real
+        # de producción (kernel.api.bus.kernel), con el ImageService
         # real — es justo lo que se quiere validar acá.
     )
 

@@ -2,7 +2,7 @@
 Tests de integración REAL del Kernel Service Bus para los 3 servicios
 agregados al terminar de desacoplar el resto de las herramientas
 (audio.synthesize, stt.transcribe, image.inpaint) — mismo patrón que
-tests/test_kernel_bus_image_service_integration.py: sin dobles de
+tests/test_kernel_image_service_integration.py: sin dobles de
 prueba, Docker real, socket real, y los modelos reales (piper-tts,
 faster-whisper, diffusers de inpainting) cuando están disponibles/ya
 cacheados en este entorno. Se saltan con un mensaje claro si algo no
@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from sandbox.docker_runner import DockerSandboxRunner
-from sandbox.executor import SandboxExecutor
+from kernel.lifecycle.docker_runner import DockerSandboxRunner
+from kernel.lifecycle.executor import SandboxExecutor
 from tests.conftest import requires_docker
-from tool_integration.base_tool import ToolManifest
-from tool_integration.sandboxed_skill import SandboxedSkillTool
+from sdk.skill import ToolManifest
+from kernel.registry.sandboxed_skill import SandboxedSkillTool
 
 pytestmark = requires_docker
 
@@ -33,7 +33,7 @@ def _make_skill_tool(name: str, entry_point: str, kernel_services: list[str], tm
         manifest=manifest, skill_dir=SKILLS_ROOT / name, entry_point=entry_point,
         image="python:3.11-slim", sandbox=real_sandbox, artifacts_root=tmp_path / "artifacts",
         kernel_services=kernel_services,
-        # kernel_bus_instance NO se inyecta a propósito: usa el bus real
+        # kernel_instance NO se inyecta a propósito: usa el bus real
         # de producción, con los servicios reales — es justo lo que se
         # quiere validar acá.
     )
@@ -41,7 +41,7 @@ def _make_skill_tool(name: str, entry_point: str, kernel_services: list[str], tm
 
 def test_audio_via_kernel_skill_generates_real_audio(tmp_path):
     pytest.importorskip("piper")
-    from kernel_bus.services import AudioService
+    from kernel.services.services import AudioService
 
     try:
         AudioService()._get_voice()
@@ -64,7 +64,7 @@ def test_audio_via_kernel_skill_generates_real_audio(tmp_path):
 def test_voice_roundtrip_via_kernel_skill_transcribes_its_own_synthesis(tmp_path):
     pytest.importorskip("piper")
     pytest.importorskip("faster_whisper")
-    from kernel_bus.services import AudioService, STTService
+    from kernel.services.services import AudioService, STTService
 
     try:
         AudioService()._get_voice()
@@ -93,7 +93,7 @@ def test_voice_roundtrip_via_kernel_skill_transcribes_its_own_synthesis(tmp_path
 def test_image_inpaint_via_kernel_skill_edits_a_real_generated_image(tmp_path):
     pytest.importorskip("diffusers")
     pytest.importorskip("torch")
-    from kernel_bus.services import ImageService
+    from kernel.services.services import ImageService
 
     service = ImageService()
     try:

@@ -1,5 +1,5 @@
 """
-Tests de sandbox/skill_image_builder.py — imagen Docker derivada por
+Tests de kernel/lifecycle/skill_image_builder.py — imagen Docker derivada por
 skill, para las que declaran `requirements` (paquetes de pip) en su
 skill.yaml.
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 import docker
 import pytest
 
-from sandbox.skill_image_builder import MINIMAL_IMAGE, SkillImageBuilder, SkillImageBuildError
+from kernel.lifecycle.skill_image_builder import MINIMAL_IMAGE, SkillImageBuilder, SkillImageBuildError
 from tests.conftest import requires_docker
 
 

@@ -1,6 +1,6 @@
 """
 Fase E4 (despliegue en modo solo-observación): consume en vivo el
-stream de eventos de sandbox/ebpf/syscall_events.bt durante uso REAL de
+stream de eventos de kernel/lifecycle/ebpf/syscall_events.bt durante uso REAL de
 kal (no solo la suite de tests), para conocer la tasa de falsos
 positivos antes de considerar enforcement (E5) — nunca bloquea nada,
 solo registra en la auditoría.
@@ -10,13 +10,13 @@ E4): manual, con sudo, por sesión — ni una regla sudoers permanente ni
 un servicio systemd todavía (eso queda para evaluar en E7 si esta
 evaluación resulta útil). Uso:
 
-    sudo bpftrace sandbox/ebpf/syscall_events.bt | python3 -m sandbox.ebpf.observer
+    sudo bpftrace kernel/lifecycle/ebpf/syscall_events.bt | python3 -m kernel.lifecycle.ebpf.observer
 
-(o `bash sandbox/ebpf/run_observer.sh`, que arma este mismo pipe).
+(o `bash kernel/lifecycle/ebpf/run_observer.sh`, que arma este mismo pipe).
 
 El pipe separa el privilegio correctamente: bpftrace corre con sudo
 (lo mínimo que necesita para cargar los programas en el kernel — ver
-sandbox/ebpf/prototype_syscalls.bt para por qué Claude no puede
+kernel/lifecycle/ebpf/prototype_syscalls.bt para por qué Claude no puede
 correrlo él mismo en esta máquina). Este script corre SIN privilegios
 — todo lo que hace es leer líneas de texto de stdin y llamar a
 audit_log.record() (que ya sabe protegerse solo con su propio lock de
@@ -26,14 +26,14 @@ necesita ni debe correr con sudo.
 Sobre dónde vive esto en un despliegue futuro (E7): mismo tier de
 confianza que sandbox_runner (el único componente que ya toca el
 socket de Docker) — no un cuarto proceso privilegiado nuevo. Ver
-sandbox/ebpf/event_consumer.py para esa discusión completa.
+kernel/lifecycle/ebpf/event_consumer.py para esa discusión completa.
 """
 from __future__ import annotations
 
 import sys
 from typing import Iterable, TextIO
 
-from sandbox.ebpf.event_consumer import parse_event_line, record_syscall_event
+from kernel.lifecycle.ebpf.event_consumer import parse_event_line, record_syscall_event
 from utils.logger import get_logger
 
 logger = get_logger(__name__)

@@ -1,11 +1,11 @@
 """
 Runner de confianza que ejecuta una skill DENTRO del contenedor
 efímero — nunca se importa como módulo de este proyecto: se lee como
-texto (ver tool_integration/sandboxed_skill.py) y se manda tal cual
+texto (ver kernel/registry/sandboxed_skill.py) y se manda tal cual
 como `source_code` a SandboxExecutor.execute_trusted(), que lo corre
 como /workspace/main.py dentro del sandbox de Docker.
 
-Protocolo (ver tool_integration/sandboxed_skill.py, que arma estos
+Protocolo (ver kernel/registry/sandboxed_skill.py, que arma estos
 archivos antes de cada ejecución):
   - /workspace/skill/<archivo>.py  -> código de la skill (copiado desde
     su carpeta real, tal cual está en skills/<nombre>/)

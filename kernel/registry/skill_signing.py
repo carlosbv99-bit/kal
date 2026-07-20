@@ -1,7 +1,7 @@
 """
 Firma de identidad del AUTOR de una skill (F3 del plan de marketplace,
 ver memoria del proyecto y README) — distinta de
-tool_integration/signing.py, que firma con la clave PROPIA de kal para
+kernel/registry/signing.py, que firma con la clave PROPIA de kal para
 detectar tampering de una herramienta dinámica ya aprobada. Acá el
 problema es otro: un tercero escribe una skill, la publica, y este
 usuario la instala en su propia copia de kal — hace falta saber si el
@@ -19,9 +19,9 @@ aplicado antes en este proyecto). Una skill "verified" significa
 firmó con esa clave — nada más.
 
 Nunca se envía a un contenedor de skill (a diferencia de
-tool_integration/permissions.py/base_tool.py/kernel_client.py) — la
+sdk/permissions.py/base_tool.py/kernel_client.py) — la
 verificación ocurre enteramente en el host, ANTES de que
-sandbox/skill_runner.py exista siquiera para esa ejecución.
+kernel/lifecycle/skill_runner.py exista siquiera para esa ejecución.
 """
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _canonical_manifest(skill_dir: Path) -> bytes:
 
 class SkillSigner:
     """Identidad criptográfica de un AUTOR de skills — un keypair Ed25519
-    propio, nunca el mismo que tool_integration/signing.py::tool_signer
+    propio, nunca el mismo que kernel/registry/signing.py::tool_signer
     (ese es la identidad de kal, no la de un autor externo)."""
 
     def __init__(self, key_dir: Path | str):

@@ -5,7 +5,7 @@ para correr en CI (.github/workflows/validate-skills.yml) en cada PR
 que toque skills/**, y también a mano antes de abrir uno.
 
 Valida exactamente lo mismo que ya exige la instalación remota
-(tool_integration/skill_market.py + scripts/install_from_market.py):
+(kernel/registry/skill_market.py + scripts/install_from_market.py):
 cada skill.yaml debe parsear, y cada skill.sig debe verificar. Esto
 prueba integridad del paquete — NUNCA autoridad del autor (ver
 CONTRIBUTING.md): un PR puede pasar este chequeo perfecto y aun así
@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tool_integration.skill_signing import verify_skill_signature  # noqa: E402
-from tool_integration.skills import DEFAULT_SKILLS_DIR, MANIFEST_FILENAME, parse_manifest  # noqa: E402
+from kernel.registry.skill_signing import verify_skill_signature  # noqa: E402
+from kernel.registry.skills import DEFAULT_SKILLS_DIR, MANIFEST_FILENAME, parse_manifest  # noqa: E402
 
 
 def validate_all_skills(skills_dir: Path = DEFAULT_SKILLS_DIR) -> list[str]:

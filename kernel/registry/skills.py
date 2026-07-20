@@ -4,7 +4,7 @@ skills/<nombre>/, cada una con su manifiesto (skill.yaml) y su propio
 código Tool.
 
 Diferencia de confianza con las herramientas dinámicas que el AGENTE
-propone (tool_integration/registry.py::propose_dynamic_tool, con sandbox
+propone (kernel/registry/registry.py::propose_dynamic_tool, con sandbox
 y aprobación humana): una skill la instala un HUMANO copiando una carpeta
 al proyecto — mismo nivel de confianza que los adaptadores de primera
 parte (image_gen.py, browser.py). Por eso el CÓDIGO de la skill (import
@@ -29,14 +29,14 @@ manifiesto, ni por supuesto para instanciar la clase o llamar a
 propio `skill.yaml`, que es la ÚNICA fuente de verdad — `entry_point`
 es solo un string ("archivo:Clase") que recién se resuelve DENTRO del
 contenedor, al momento de ejecutar de verdad (ver
-sandbox/skill_runner.py). Lo que queda registrado en el ToolRegistry es
-un `SandboxedSkillTool` (tool_integration/sandboxed_skill.py): cada
+kernel/lifecycle/skill_runner.py). Lo que queda registrado en el ToolRegistry es
+un `SandboxedSkillTool` (kernel/registry/sandboxed_skill.py): cada
 `.execute()` corre en un contenedor Docker efímero, con las mismas
 garantías que ya tiene `run_code` (sin red por defecto, filesystem
 read-only salvo /workspace, límites de recursos, usuario sin
 privilegios). Si `skill.yaml` declara `requirements` (paquetes de pip),
 se construye/reusa una imagen Docker derivada solo para esa skill (ver
-sandbox/skill_image_builder.py); sin requirements, se usa la imagen ya
+kernel/lifecycle/skill_image_builder.py); sin requirements, se usa la imagen ya
 endurecida `kal-sandbox-minimal`.
 
 Trade-off real y aceptado: al no importar nunca el `.py`, `load_skills()`
@@ -49,7 +49,7 @@ formato de `entry_point` sea válido y que el archivo referenciado
 exista.
 
 INTEGRIDAD DEL PAQUETE (F3 del plan de marketplace, ver
-tool_integration/skill_signing.py): "un humano leyó el código antes de
+kernel/registry/skill_signing.py): "un humano leyó el código antes de
 poner enabled: true" no dice nada sobre si ESE código es el mismo que
 el autor original publicó — un paquete de skill de un tercero puede
 alterarse entre que se publica y que este usuario lo instala. Antes de
@@ -72,14 +72,14 @@ from typing import TYPE_CHECKING
 import yaml
 
 from audit.audit_log import AuditEvent, audit_log
-from tool_integration.base_tool import ToolManifest
-from tool_integration.permissions import Permission
-from tool_integration.skill_signing import verify_skill_signature
+from sdk.skill import ToolManifest
+from sdk.permissions import Permission
+from kernel.registry.skill_signing import verify_skill_signature
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from sandbox.skill_image_builder import SkillImageBuilder
-    from tool_integration.registry import ToolRegistry
+    from kernel.lifecycle.skill_image_builder import SkillImageBuilder
+    from kernel.registry.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -101,8 +101,8 @@ class SkillManifest:
     # Specs de pip (p.ej. "qrcode==7.4.2") que esta skill necesita además
     # de la stdlib. Si no está vacío, se construye (o reusa, cacheada por
     # hash de esta lista) una imagen Docker derivada de
-    # sandbox/images/minimal/ solo para esta skill — ver
-    # sandbox/skill_image_builder.py. Vacío por defecto: la mayoría de las
+    # kernel/lifecycle/images/minimal/ solo para esta skill — ver
+    # kernel/lifecycle/skill_image_builder.py. Vacío por defecto: la mayoría de las
     # skills (como system_info) no necesita nada más que stdlib.
     requirements: list[str] = field(default_factory=list)
     # JSON Schema de los argumentos de execute(), expuesto al LLM (ver
@@ -112,7 +112,7 @@ class SkillManifest:
     parameters_schema: dict = field(default_factory=lambda: {"type": "object", "properties": {}})
     # Métodos del Kernel Service Bus ("<servicio>.<acción>", p.ej.
     # "image.generate") que esta skill puede llamar — ver
-    # kernel_bus/__init__.py y tool_integration/kernel_client.py.
+    # kernel/__init__.py y sdk/context.py.
     # Allowlist plana: cualquier llamado a un método no listado acá se
     # rechaza ANTES de tocar el servicio real (fail closed), aunque el
     # servicio exista. Vacío por defecto: la mayoría de las skills no
@@ -128,7 +128,7 @@ class SkillStatus:
     # "image_build_failed" | "signature_invalid"
     status: str
     detail: str = ""
-    # "unsigned" | "verified" | "tampered" (ver tool_integration/skill_signing.py
+    # "unsigned" | "verified" | "tampered" (ver kernel/registry/skill_signing.py
     # — F3 del plan de marketplace: integridad del paquete, no confianza en
     # el autor). "unsigned" para toda skill sin skill.sig, compatibilidad
     # total con las skills existentes.
@@ -158,7 +158,7 @@ def _validate_entry_point_reference(skill_dir: Path, entry_point: str) -> str | 
     si está todo bien. El `.py` en sí (¿existe la clase? ¿es una
     subclase de Tool? ¿tiene errores de sintaxis?) recién se resuelve
     DENTRO del contenedor, en la primera ejecución real — ver
-    sandbox/skill_runner.py.
+    kernel/lifecycle/skill_runner.py.
     """
     module_part, _, class_name = entry_point.partition(":")
     if not module_part or not class_name:
@@ -247,13 +247,13 @@ def load_skills(
             _audit(manifest.name, "invalid_manifest", detail)
             continue
 
-        from sandbox.skill_image_builder import MINIMAL_IMAGE
+        from kernel.lifecycle.skill_image_builder import MINIMAL_IMAGE
 
         image = MINIMAL_IMAGE
         if manifest.requirements:
             try:
                 if image_builder is None:
-                    from sandbox.skill_image_builder import SkillImageBuilder as _SkillImageBuilder
+                    from kernel.lifecycle.skill_image_builder import SkillImageBuilder as _SkillImageBuilder
 
                     image_builder = _SkillImageBuilder()
                 image = image_builder.build_or_get_image(manifest.name, manifest.requirements)
@@ -266,7 +266,7 @@ def load_skills(
                 _audit(manifest.name, "image_build_failed", detail)
                 continue
 
-        from tool_integration.sandboxed_skill import SandboxedSkillTool
+        from kernel.registry.sandboxed_skill import SandboxedSkillTool
 
         registry.register_static_tool(
             SandboxedSkillTool(

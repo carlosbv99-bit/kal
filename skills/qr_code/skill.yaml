@@ -3,7 +3,7 @@ description: "Genera una imagen PNG de código QR a partir de un texto (URL, men
 version: "0.1.0"
 entry_point: "tool:QRCodeTool"
 # Skill de REFERENCIA para el pipeline de aislamiento real (ver
-# tool_integration/skills.py y tool_integration/sandboxed_skill.py):
+# kernel/registry/skills.py y kernel/registry/sandboxed_skill.py):
 # a propósito tiene una dependencia externa (qrcode) y devuelve un
 # archivo real, no solo texto — así valida de punta a punta tanto la
 # imagen Docker derivada (requirements) como la convención

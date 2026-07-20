@@ -28,7 +28,7 @@ services:
   sandbox_runner:
     build:
       context: .
-      dockerfile: sandbox/Dockerfile
+      dockerfile: kernel/lifecycle/Dockerfile
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro  # solo este servicio lo toca
     environment:

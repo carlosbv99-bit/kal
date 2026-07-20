@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from sandbox.executor import SandboxExecutor
+from kernel.lifecycle.executor import SandboxExecutor
 
 app = FastAPI(title="Sandbox Runner")
 executor = SandboxExecutor()

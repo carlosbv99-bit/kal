@@ -1,11 +1,11 @@
 """
 Genera docs/index.html: una página estática navegable sobre el mismo
 catálogo que ya usa el market (Fase B del plan de comunidad, ver
-tool_integration/skill_market.py para la Fase A — instalación
+kernel/registry/skill_market.py para la Fase A — instalación
 remota). Sin backend ni JS: se corre a mano, se commitea el HTML
 resultante, y GitHub Pages lo sirve directamente desde /docs en main.
 
-A diferencia de load_skills() (tool_integration/skills.py), esto NO
+A diferencia de load_skills() (kernel/registry/skills.py), esto NO
 filtra por `enabled` — el listado del market muestra todo lo que hay
 publicado en el repo; `enabled` es una decisión de instalación local
 de cada usuario, no una propiedad del catálogo.
@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tool_integration.skill_signing import verify_skill_signature  # noqa: E402
-from tool_integration.skills import DEFAULT_SKILLS_DIR, MANIFEST_FILENAME, SkillManifest, parse_manifest  # noqa: E402
+from kernel.registry.skill_signing import verify_skill_signature  # noqa: E402
+from kernel.registry.skills import DEFAULT_SKILLS_DIR, MANIFEST_FILENAME, SkillManifest, parse_manifest  # noqa: E402
 
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">

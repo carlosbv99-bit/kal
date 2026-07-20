@@ -2,8 +2,8 @@ name: image_via_kernel
 description: "Genera una imagen a partir de un prompt de texto, pidiéndoselo al Kernel Service Bus (no carga ningún modelo propio)."
 version: "0.1.0"
 entry_point: "tool:ImageViaKernelTool"
-# Skill de REFERENCIA para el Kernel Service Bus (ver kernel_bus/__init__.py
-# y tool_integration/kernel_client.py): demuestra el caso de uso real que
+# Skill de REFERENCIA para el Kernel Service Bus (ver kernel/__init__.py
+# y sdk/context.py): demuestra el caso de uso real que
 # motivó todo el bus — una skill de terceros produciendo contenido con IA
 # sin poder cargar el modelo ella misma (ni declarar torch/diffusers como
 # dependencia). requirements vacío a propósito: no necesita NADA más que

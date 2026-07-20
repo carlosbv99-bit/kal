@@ -4,7 +4,7 @@ utils/config.py::PermissionCascadeConfig para el porqué y los
 defaults). Usada por agent_core/llm/agent_loop.py ANTES de invocar el
 handler de cualquier herramienta.
 
-IMPORTANTE — separado de tool_integration/permissions.py a propósito:
+IMPORTANTE — separado de sdk/permissions.py a propósito:
 ese otro archivo se copia TAL CUAL dentro de cada contenedor de skill
 (toda skill necesita `Permission` a través de `base_tool.py`), así que
 debe seguir siendo 100% stdlib. Este módulo SÍ depende de
@@ -18,11 +18,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from tool_integration.permissions import Permission
+from sdk.permissions import Permission
 from utils.config import settings
 
 if TYPE_CHECKING:
-    from tool_integration.base_tool import Tool
+    from sdk.skill import Tool
 
 
 def trust_tier_for(tool: "Tool") -> str:
@@ -40,14 +40,14 @@ def trust_tier_for(tool: "Tool") -> str:
     bajo pensado justo para código de terceros, anulando el propósito
     completo de tener niveles de confianza distintos.
 
-    Imports diferidos: evitan el ciclo tool_integration.permission_cascade
-    <-> tool_integration.registry/sandboxed_skill (esos dos módulos
-    importan Permission de tool_integration.permissions, no de acá, pero
+    Imports diferidos: evitan el ciclo kernel.permissions.permission_cascade
+    <-> kernel.registry.registry/sandboxed_skill (esos dos módulos
+    importan Permission de sdk.permissions, no de acá, pero
     igual conviene no importarlos a nivel de módulo para no forzar su
     carga completa solo por importar esta función).
     """
-    from tool_integration.registry import DynamicSandboxedTool
-    from tool_integration.sandboxed_skill import SandboxedSkillTool
+    from kernel.registry.registry import DynamicSandboxedTool
+    from kernel.registry.sandboxed_skill import SandboxedSkillTool
 
     if isinstance(tool, SandboxedSkillTool):
         return "skill"
@@ -59,7 +59,7 @@ def trust_tier_for(tool: "Tool") -> str:
 class PermissionCascade:
     """
     Chequeo INDEPENDIENTE de UNSUPPORTED_RUNTIME_PERMISSIONS
-    (tool_integration/permissions.py): aquel es "¿esto se puede confinar
+    (sdk/permissions.py): aquel es "¿esto se puede confinar
     técnicamente?" (siempre activo, no configurable); este es "¿este
     contexto concreto (nivel de confianza + sesión) está autorizado a
     pedirlo?".

@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from validate_skills import validate_all_skills  # noqa: E402
-from tool_integration.skill_signing import SkillSigner  # noqa: E402
+from kernel.registry.skill_signing import SkillSigner  # noqa: E402
 
 _SKILL_YAML_TEMPLATE = """name: {name}
 description: "una skill de prueba"
@@ -101,6 +101,6 @@ def test_real_project_skills_are_all_verified():
     firmadas desde la Fase A) — confirma que el propio repo pasaría
     hoy el chequeo de CI que se está agregando en esta Fase C.
     """
-    from tool_integration.skills import DEFAULT_SKILLS_DIR
+    from kernel.registry.skills import DEFAULT_SKILLS_DIR
 
     assert validate_all_skills(DEFAULT_SKILLS_DIR) == []

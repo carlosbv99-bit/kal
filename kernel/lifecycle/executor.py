@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from audit.audit_log import AuditEvent, audit_log
 from code_analysis.ast_validator import validate_code
-from sandbox.docker_runner import DockerSandboxRunner, SandboxResult
-from tool_integration.permissions import Permission, UNSUPPORTED_RUNTIME_PERMISSIONS
+from kernel.lifecycle.docker_runner import DockerSandboxRunner, SandboxResult
+from sdk.permissions import Permission, UNSUPPORTED_RUNTIME_PERMISSIONS
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -106,7 +106,7 @@ class SandboxExecutor:
         existe para código NO CONFIABLE (propuesto por el LLM/el agente,
         ver registry.py::propose_dynamic_tool) — bloquea os/importlib/etc.
         pensando en ESE caso. `execute_trusted` es para código de PRIMERA
-        PARTE, versionado en este repo (p.ej. sandbox/skill_runner.py: el
+        PARTE, versionado en este repo (p.ej. kernel/lifecycle/skill_runner.py: el
         runner que ejecuta una skill ya habilitada por un humano dentro
         del contenedor) — ese script NECESITA os/importlib legítimamente
         para hacer su trabajo (importar el módulo de la skill, manejar

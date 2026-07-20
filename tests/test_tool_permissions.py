@@ -1,15 +1,15 @@
 """
-Tests del modelo de permisos granulares (tool_integration/permissions.py)
+Tests del modelo de permisos granulares (sdk/permissions.py)
 y de cómo ToolManifest y SandboxExecutor lo aplican.
 """
 from __future__ import annotations
 
 import pytest
 
-from sandbox.docker_runner import SandboxResult
-from sandbox.executor import SandboxExecutor
-from tool_integration.base_tool import ToolManifest
-from tool_integration.permissions import Permission, UNSUPPORTED_RUNTIME_PERMISSIONS
+from kernel.lifecycle.docker_runner import SandboxResult
+from kernel.lifecycle.executor import SandboxExecutor
+from sdk.skill import ToolManifest
+from sdk.permissions import Permission, UNSUPPORTED_RUNTIME_PERMISSIONS
 
 
 class FakeRunner:

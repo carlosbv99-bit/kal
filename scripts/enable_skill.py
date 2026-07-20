@@ -1,12 +1,12 @@
 """
 Habilita o deshabilita una skill ya instalada bajo skills/<nombre>/,
 reemplazando la edición manual de `enabled:` en su skill.yaml (F4 del
-plan de marketplace, ver tool_integration/skills.py::set_skill_enabled).
+plan de marketplace, ver kernel/registry/skills.py::set_skill_enabled).
 
 Antes de habilitar, muestra en un solo lugar todo lo que la edición a
 mano no mostraba: permisos, paquetes de pip que se van a instalar
 (requirements), servicios del kernel que puede llamar, y el estado de
-su firma de integridad (F3, ver tool_integration/skill_signing.py) —
+su firma de integridad (F3, ver kernel/registry/skill_signing.py) —
 y pide confirmación explícita. Una skill cuya firma no verifica
 ("tampered") nunca se habilita, ni siquiera con --yes.
 
@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tool_integration.skill_signing import verify_skill_signature  # noqa: E402
-from tool_integration.skills import (  # noqa: E402
+from kernel.registry.skill_signing import verify_skill_signature  # noqa: E402
+from kernel.registry.skills import (  # noqa: E402
     MANIFEST_FILENAME,
     audit_skill_enable_change,
     parse_manifest,

@@ -1,5 +1,5 @@
 """
-Tests de tool_integration/skill_market.py (Fase A del plan de
+Tests de kernel/registry/skill_market.py (Fase A del plan de
 comunidad): listar/traer skills desde un "market" Git remoto.
 
 Usa un repositorio Git LOCAL sintético bajo tmp_path como "market" —
@@ -12,8 +12,8 @@ import subprocess
 
 import pytest
 
-from tool_integration.skill_market import MarketError, fetch_skill_from_market, list_market_skills
-from tool_integration.skill_signing import SkillSigner, verify_skill_signature
+from kernel.registry.skill_market import MarketError, fetch_skill_from_market, list_market_skills
+from kernel.registry.skill_signing import SkillSigner, verify_skill_signature
 
 _SKILL_YAML_TEMPLATE = """name: {name}
 description: "{description}"

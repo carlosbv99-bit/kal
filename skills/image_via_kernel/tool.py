@@ -1,6 +1,6 @@
 """
 Skill de referencia para el Kernel Service Bus (ver
-kernel_bus/__init__.py y tool_integration/kernel_client.py): genera una
+kernel/__init__.py y sdk/context.py): genera una
 imagen SIN NINGUNA dependencia de ML propia (ni torch ni diffusers) —
 le pide la imagen al servicio "image" del kernel, que comparte el mismo
 pipeline de SDXL-Turbo que ya usa
@@ -13,8 +13,9 @@ parameters_schema/kernel_services viven en skill.yaml.
 """
 from __future__ import annotations
 
-from tool_integration.base_tool import Artifact, Tool
-from tool_integration.kernel_client import call as kernel_call
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
+from sdk.context import call as kernel_call
 
 
 class ImageViaKernelTool(Tool):

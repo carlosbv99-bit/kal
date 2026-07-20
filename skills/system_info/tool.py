@@ -1,6 +1,6 @@
 """
 Skill de ejemplo/plantilla del sistema de skills (ver
-tool_integration/skills.py). Sin dependencias externas ni credenciales:
+kernel/registry/skills.py). Sin dependencias externas ni credenciales:
 sirve para probar el pipeline completo (manifiesto -> registro ->
 disponible para el agente) de punta a punta con algo real.
 
@@ -8,7 +8,7 @@ Nota para autores de skills: esta clase NO declara `manifest =
 ToolManifest(...)` como atributo — nombre/descripción/permisos/
 parameters_schema viven en skill.yaml, la única fuente de verdad
 (load_skills() nunca importa este archivo en el proceso principal, ver
-tool_integration/skills.py). Un atributo `manifest` acá no rompería
+kernel/registry/skills.py). Un atributo `manifest` acá no rompería
 nada, pero tampoco lo lee nadie — se omite para no sugerir que importa.
 """
 from __future__ import annotations
@@ -16,7 +16,8 @@ from __future__ import annotations
 import platform
 import shutil
 
-from tool_integration.base_tool import Artifact, Tool
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
 
 
 class SystemInfoTool(Tool):

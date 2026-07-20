@@ -1,7 +1,7 @@
 """
 Tests de versionado de herramientas dinámicas:
-  - tool_integration/versioning.py::ToolVersionStore (persistencia en disco)
-  - tool_integration/registry.py::ToolRegistry (activación versionada,
+  - kernel/registry/versioning.py::ToolVersionStore (persistencia en disco)
+  - kernel/registry/registry.py::ToolRegistry (activación versionada,
     rollback_tool, verify_tool_integrity), integrando firma real vía
     ToolSigner sobre un key_dir aislado (tmp_path) — no el key_dir real
     del proyecto.
@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from sandbox.docker_runner import SandboxResult
-from tool_integration.base_tool import ToolManifest
-from tool_integration.registry import ToolRegistry
-from tool_integration.signing import ToolSigner
-from tool_integration.versioning import ToolVersionStore
+from kernel.lifecycle.docker_runner import SandboxResult
+from sdk.skill import ToolManifest
+from kernel.registry.registry import ToolRegistry
+from kernel.registry.signing import ToolSigner
+from kernel.registry.versioning import ToolVersionStore
 
 
 class FakeSandboxExecutor:
@@ -152,7 +152,8 @@ def test_verify_tool_integrity_detects_tampering_of_active_version(registry, ver
 
 
 def test_verify_tool_integrity_is_true_for_static_tools(registry):
-    from tool_integration.base_tool import Artifact, Tool
+    from sdk.skill import Tool
+    from sdk.artifacts import Artifact
 
     class DummyStaticTool(Tool):
         manifest = _manifest(name="estatica", created_by="system")
