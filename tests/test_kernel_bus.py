@@ -1,5 +1,5 @@
 """
-Tests de kernel_bus/bus.py::KernelServiceBus — registro de servicios +
+Tests de kernel/api/bus.py::KernelServiceBus — registro de servicios +
 despacho por nombre de método. Con un servicio falso (sin tocar
 ImageService/SDXL-Turbo real).
 """
@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import pytest
 
-from kernel_bus.bus import ActionNotFoundError, ArtifactNotFoundError, KernelServiceBus, ServiceNotFoundError
+from kernel.api.bus import ActionNotFoundError, ArtifactNotFoundError, KernelServiceBus, ServiceNotFoundError
 
 
 class FakeEchoService:
+    ALLOWED_ACTIONS = frozenset({"echo", "boom", "with_artifact", "describe"})
+
     def echo(self, text):
         return {"echoed": text}
 
@@ -22,6 +24,10 @@ class FakeEchoService:
 
     def describe(self, path):
         return {"received_path": path}
+
+    def not_an_action(self):
+        """Público y callable, pero deliberadamente fuera de ALLOWED_ACTIONS."""
+        return {"esto": "no debería ser invocable vía el bus"}
 
 
 @pytest.fixture
@@ -44,6 +50,21 @@ def test_dispatch_unknown_service_raises(bus):
 def test_dispatch_unknown_action_raises(bus):
     with pytest.raises(ActionNotFoundError):
         bus.dispatch("test.no_existe", {})
+
+
+def test_dispatch_rejects_a_public_method_not_in_allowed_actions(bus):
+    """
+    Hallazgo de la revisión de seguridad 2026-07-09: antes, dispatch()
+    resolvía la acción con getattr genérico — CUALQUIER método público
+    del servicio era invocable, no solo los pensados como "acciones"
+    del bus. ALLOWED_ACTIONS es la lista explícita; un método público
+    fuera de esa lista debe rechazarse igual que uno inexistente.
+    """
+    bus.dispatch("test.echo", {"text": "hola"})  # sanity: "echo" sí es acción
+    with pytest.raises(ActionNotFoundError):
+        # "not_an_action" no está en ALLOWED_ACTIONS aunque exista como
+        # atributo público en la clase (agregado más abajo en este archivo).
+        bus.dispatch("test.not_an_action", {})
 
 
 def test_dispatch_lets_action_exceptions_propagate(bus):

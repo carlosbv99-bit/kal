@@ -14,7 +14,6 @@ directamente, para reducir superficie de ataque.
 from __future__ import annotations
 
 import os
-import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -32,11 +31,6 @@ logger = get_logger(__name__)
 # Configurable vía entorno para poder apuntar a una imagen propia
 # minimizada (ver Etapa 1, paso 3 del plan) sin tocar código.
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "python:3.11-slim")
-
-# UID/GID con el que corre el proceso dentro del contenedor. Debe
-# coincidir con los permisos que aplicamos al bind mount (ver _prepare_workdir).
-SANDBOX_UID = 1000
-SANDBOX_GID = 1000
 
 
 @dataclass
@@ -72,10 +66,25 @@ class DockerSandboxRunner:
         workdir: Path, source_code: str, workspace_files: dict[str, str | bytes] | None
     ) -> None:
         """
-        Escribe los archivos de trabajo con permisos que el usuario
-        1000:1000 dentro del contenedor pueda leer, independientemente
-        del UID que tenga el proceso host. Sin esto, el bind mount es
-        ilegible para el contenedor en la mayoría de hosts Linux nativos.
+        Escribe los archivos de trabajo. El contenedor corre con el
+        mismo UID/GID que este proceso (ver run(): user=f"{os.getuid()}:
+        {os.getgid()}"), así que el dueño real ya alcanza para que el
+        contenedor lea/escriba — no hace falta abrir permisos a
+        grupo/otros.
+
+        Antes el contenedor corría con un UID hardcodeado (1000:1000)
+        distinto del proceso host, y para compensar el mismatch se
+        abría todo el árbol con chmod 0777 (rwx para CUALQUIER usuario
+        del sistema). Hallazgo real de la revisión de seguridad
+        2026-07-09: en un host compartido (no de un solo usuario), eso
+        dejaba el código a ejecutar (y cualquier archivo de la skill)
+        legible y ESCRIBIBLE por cualquier otro usuario local mientras
+        el contenedor corría. Al hacer coincidir el UID del contenedor
+        con el del proceso que lo lanza, ya no hay mismatch que
+        compensar — los permisos por defecto (0700 de
+        tempfile.TemporaryDirectory(), 0644/0755 de write_text/mkdir)
+        alcanzan porque el dueño real y el usuario del contenedor son
+        la misma cuenta.
 
         `workspace_files` acepta contenido `str` (texto, p.ej. código
         fuente) o `bytes` (binario, p.ej. un asset que una skill traiga
@@ -83,24 +92,16 @@ class DockerSandboxRunner:
         — necesario para copiar una skill completa, no un único archivo
         plano como antes.
         """
-        # rwx para todos en el directorio, para que el contenedor pueda
-        # atravesarlo (traverse) aunque no coincida el UID.
-        os.chmod(workdir, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-
         script_path = workdir / "main.py"
         script_path.write_text(source_code, encoding="utf-8")
-        os.chmod(script_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
 
         for filename, content in (workspace_files or {}).items():
             file_path = workdir / filename
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            if file_path.parent != workdir:
-                os.chmod(file_path.parent, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
             if isinstance(content, bytes):
                 file_path.write_bytes(content)
             else:
                 file_path.write_text(content, encoding="utf-8")
-            os.chmod(file_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
 
     def run(
         self,
@@ -119,7 +120,7 @@ class DockerSandboxRunner:
         (p.ej. datos de entrada), nunca credenciales.
         image: sobrescribe SANDBOX_IMAGE solo para esta ejecución (útil
         para probar imágenes alternativas, p.ej. la minimizada de
-        sandbox/images/minimal/, sin cambiar el default global).
+        kernel/lifecycle/images/minimal/, sin cambiar el default global).
         network_mode: sobrescribe el "none" por defecto SOLO para esta
         ejecución. Usar con extremo cuidado — ver
         error_handling/strategies.py:ImportErrorStrategy para el único
@@ -137,8 +138,8 @@ class DockerSandboxRunner:
         extra_mounts: bind mounts adicionales, host_path -> container_path
         (además del /workspace principal). Caso de uso real: montar el
         directorio que contiene el socket Unix del Kernel Service Bus
-        (ver kernel_bus/socket_server.py,
-        tool_integration/sandboxed_skill.py) — ese socket vive en un
+        (ver kernel/api/socket_server.py,
+        kernel/registry/sandboxed_skill.py) — ese socket vive en un
         directorio temporal APARTE del workdir de esta función (que no
         es accesible desde afuera hasta que ya se creó adentro de este
         método), así que no alcanza con workspace_files para esto.
@@ -150,7 +151,7 @@ class DockerSandboxRunner:
         esto, el contenedor se mataba por timeout ANTES de que el
         servicio terminara de responder por el socket, aunque el
         servicio en sí nunca falló. Ver
-        tool_integration/sandboxed_skill.py, que sube este valor
+        kernel/registry/sandboxed_skill.py, que sube este valor
         específicamente cuando la skill declara kernel_services.
         """
         target_image = image or SANDBOX_IMAGE
@@ -164,7 +165,6 @@ class DockerSandboxRunner:
             if output_dir:
                 output_path = workdir / output_dir
                 output_path.mkdir(parents=True, exist_ok=True)
-                os.chmod(output_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
 
             volumes = {str(workdir): {"bind": "/workspace", "mode": "rw"}}
             for host_path, container_path in (extra_mounts or {}).items():
@@ -185,7 +185,11 @@ class DockerSandboxRunner:
                     nano_cpus=int(self.cfg.cpu_limit * 1e9),
                     pids_limit=self.cfg.pids_limit,
                     read_only=True,
-                    user=f"{SANDBOX_UID}:{SANDBOX_GID}",
+                    # Mismo UID/GID que este proceso, no un valor
+                    # hardcodeado — ver _prepare_workdir() para el motivo
+                    # (evita el mismatch que antes se compensaba abriendo
+                    # el bind mount a cualquier usuario del host).
+                    user=f"{os.getuid()}:{os.getgid()}",
                     cap_drop=["ALL"],
                     security_opt=["no-new-privileges"],
                     detach=True,

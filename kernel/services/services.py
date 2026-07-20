@@ -1,9 +1,9 @@
 """
 Servicios reales expuestos en el Kernel Service Bus (ver
-kernel_bus/__init__.py). Cada servicio es un objeto de Python normal,
+kernel/__init__.py). Cada servicio es un objeto de Python normal,
 vive en el proceso principal — nunca se serializa ni se envía a un
 contenedor; lo único que cruza la frontera es el resultado (un dict
-JSON-serializable), vía kernel_bus/socket_server.py.
+JSON-serializable), vía kernel/api/socket_server.py.
 
 ImageService es, en la práctica, el "Model Manager" que motivó todo
 este bus: antes, cada llamador (image_gen.py) tenía su PROPIA
@@ -22,11 +22,12 @@ cualquier skill que declare el `kernel_services` correspondiente.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from kernel_bus.resource_broker import resource_broker
+from kernel.broker.resource_broker import resource_broker
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -57,6 +58,11 @@ class ImageService:
     dominio ("image"), no la misma config ni el mismo pipeline.
     """
 
+    # Lista explícita de acciones invocables vía el Kernel Service Bus
+    # (ver kernel/api/bus.py::dispatch) — cualquier otro método público
+    # de esta clase NO es una acción del bus, aunque exista.
+    ALLOWED_ACTIONS = frozenset({"generate", "inpaint"})
+
     def __init__(self, cfg=None, editing_cfg=None):
         # cfg/editing_cfg inyectables: mismo motivo que en el resto del
         # proyecto — un test que monkeypatchea settings.multimodal.image
@@ -65,15 +71,26 @@ class ImageService:
         # instancia compartida real de producción (usada por el Kernel
         # Service Bus) es una instancia aparte, registrada una sola vez
         # al arrancar — ver
-        # tool_integration/registry.py::_register_default_static_tools().
+        # kernel/registry/registry.py::_register_default_static_tools().
         self.cfg = cfg or settings.multimodal.image
         self.editing_cfg = editing_cfg or settings.multimodal.image_editing
         self._pipeline = None
         self._inpaint_pipeline = None
+        # Hallazgo de la revisión de seguridad 2026-07-09: sin esto, el
+        # agente y cualquier cantidad de skills concurrentes (vía el
+        # bus) podían llamar al mismo objeto de pipeline de PyTorch al
+        # mismo tiempo, sin ninguna sincronización — diffusers no
+        # garantiza que una misma instancia de pipeline sea segura para
+        # llamadas concurrentes desde threads distintos (estado interno
+        # compartido del scheduler/generador). Un lock por pipeline (no
+        # uno solo para toda la clase) para no serializar generate() e
+        # inpaint() entre sí sin necesidad — son pipelines distintos.
+        self._generate_lock = threading.Lock()
+        self._inpaint_lock = threading.Lock()
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
         Path(self.editing_cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
 
-        # Ver kernel_bus/resource_broker.py — libera estos pipelines solo
+        # Ver kernel/broker/resource_broker.py — libera estos pipelines solo
         # tras un rato sin uso, o de inmediato si la RAM del sistema está
         # baja (nunca se descargaban antes, bug real confirmado en uso).
         resource_broker.register(
@@ -109,23 +126,24 @@ class ImageService:
         if not prompt:
             raise KernelServiceError("'prompt' es requerido")
 
-        pipeline = self._get_pipeline()
+        with self._generate_lock:
+            pipeline = self._get_pipeline()
 
-        # BUG REAL ENCONTRADO EN USO: el log y los metadatos citaban
-        # self.cfg.num_inference_steps (el default de config.yaml) aunque
-        # se haya pasado un override por kwargs — la imagen se generaba
-        # con el valor correcto, pero el metadato devuelto MENTÍA sobre
-        # cuántos pasos se usaron de verdad.
-        actual_steps = kwargs.get("num_inference_steps", self.cfg.num_inference_steps)
-        logger.info(f"Generando imagen ({actual_steps} pasos): {prompt!r}")
-        result = pipeline(
-            prompt=prompt,
-            num_inference_steps=actual_steps,
-            guidance_scale=kwargs.get("guidance_scale", self.cfg.guidance_scale),
-            height=kwargs.get("height", self.cfg.height),
-            width=kwargs.get("width", self.cfg.width),
-        )
-        image = result.images[0]
+            # BUG REAL ENCONTRADO EN USO: el log y los metadatos citaban
+            # self.cfg.num_inference_steps (el default de config.yaml) aunque
+            # se haya pasado un override por kwargs — la imagen se generaba
+            # con el valor correcto, pero el metadato devuelto MENTÍA sobre
+            # cuántos pasos se usaron de verdad.
+            actual_steps = kwargs.get("num_inference_steps", self.cfg.num_inference_steps)
+            logger.info(f"Generando imagen ({actual_steps} pasos): {prompt!r}")
+            result = pipeline(
+                prompt=prompt,
+                num_inference_steps=actual_steps,
+                guidance_scale=kwargs.get("guidance_scale", self.cfg.guidance_scale),
+                height=kwargs.get("height", self.cfg.height),
+                width=kwargs.get("width", self.cfg.width),
+            )
+            image = result.images[0]
 
         artifact_id = str(uuid4())
         path = Path(self.cfg.artifact_dir) / f"{artifact_id}.png"
@@ -168,25 +186,26 @@ class ImageService:
 
         from PIL import Image, ImageDraw
 
-        pipeline = self._get_inpaint_pipeline()
+        with self._inpaint_lock:
+            pipeline = self._get_inpaint_pipeline()
 
-        with Image.open(image_path) as source:
-            img = source.convert("RGB")
+            with Image.open(image_path) as source:
+                img = source.convert("RGB")
 
-        mask = Image.new("L", img.size, 0)  # negro = mantener, blanco = regenerar
-        ImageDraw.Draw(mask).rectangle(tuple(box), fill=255)
+            mask = Image.new("L", img.size, 0)  # negro = mantener, blanco = regenerar
+            ImageDraw.Draw(mask).rectangle(tuple(box), fill=255)
 
-        logger.info(f"Inpainting ({self.editing_cfg.inpaint_num_inference_steps} pasos): {prompt!r}")
-        result = pipeline(
-            prompt=prompt,
-            image=img,
-            mask_image=mask,
-            height=img.height,
-            width=img.width,
-            num_inference_steps=self.editing_cfg.inpaint_num_inference_steps,
-            guidance_scale=self.editing_cfg.inpaint_guidance_scale,
-        )
-        edited = result.images[0]
+            logger.info(f"Inpainting ({self.editing_cfg.inpaint_num_inference_steps} pasos): {prompt!r}")
+            result = pipeline(
+                prompt=prompt,
+                image=img,
+                mask_image=mask,
+                height=img.height,
+                width=img.width,
+                num_inference_steps=self.editing_cfg.inpaint_num_inference_steps,
+                guidance_scale=self.editing_cfg.inpaint_guidance_scale,
+            )
+            edited = result.images[0]
 
         artifact_id = str(uuid4())
         path = Path(self.editing_cfg.artifact_dir) / f"{artifact_id}.png"
@@ -216,9 +235,15 @@ class AudioService:
     criterio que ImageGenerationTool._generate_via_api).
     """
 
+    ALLOWED_ACTIONS = frozenset({"synthesize"})
+
     def __init__(self, cfg=None):
         self.cfg = cfg or settings.multimodal.audio
         self._voice = None
+        # Mismo motivo que ImageService._generate_lock: la voz de piper
+        # es un único objeto compartido entre el agente y cualquier
+        # skill concurrente vía el bus.
+        self._lock = threading.Lock()
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
         _VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -273,20 +298,21 @@ class AudioService:
 
         import wave
 
-        voice = self._get_voice()
+        with self._lock:
+            voice = self._get_voice()
 
-        artifact_id = str(uuid4())
-        path = Path(self.cfg.artifact_dir) / f"{artifact_id}.wav"
+            artifact_id = str(uuid4())
+            path = Path(self.cfg.artifact_dir) / f"{artifact_id}.wav"
 
-        sample_rate = getattr(getattr(voice, "config", None), "sample_rate", 22050)
+            sample_rate = getattr(getattr(voice, "config", None), "sample_rate", 22050)
 
-        logger.info(f"Sintetizando audio ({len(text)} caracteres) con voz {self.cfg.voice_model}")
-        with wave.open(str(path), "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)  # PCM de 16 bits
-            wav_file.setframerate(sample_rate)
-            for chunk in voice.synthesize(text):
-                wav_file.writeframes(self._audio_chunk_to_pcm_bytes(chunk))
+            logger.info(f"Sintetizando audio ({len(text)} caracteres) con voz {self.cfg.voice_model}")
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)  # PCM de 16 bits
+                wav_file.setframerate(sample_rate)
+                for chunk in voice.synthesize(text):
+                    wav_file.writeframes(self._audio_chunk_to_pcm_bytes(chunk))
 
         return {
             "artifact": f"artifact://audio/{artifact_id}",
@@ -326,9 +352,15 @@ class STTService:
     Sin backend "api" (el adaptador tampoco lo tenía).
     """
 
+    ALLOWED_ACTIONS = frozenset({"transcribe"})
+
     def __init__(self, cfg=None):
         self.cfg = cfg or settings.multimodal.stt
         self._model = None
+        # Mismo motivo que ImageService._generate_lock: el modelo de
+        # Whisper es un único objeto compartido entre el agente y
+        # cualquier skill concurrente vía el bus.
+        self._lock = threading.Lock()
 
         resource_broker.register("stt.transcribe", is_loaded=lambda: self._model is not None, unload=self._unload_model)
 
@@ -348,10 +380,16 @@ class STTService:
         if not Path(audio_path).exists():
             raise KernelServiceError(f"No existe el archivo de audio: {audio_path}")
 
-        model = self._get_model()
-        logger.info(f"Transcribiendo audio: {audio_path}")
-        segments, info = model.transcribe(audio_path, language=self.cfg.language)
-        text = " ".join(segment.text.strip() for segment in segments).strip()
+        with self._lock:
+            model = self._get_model()
+            logger.info(f"Transcribiendo audio: {audio_path}")
+            segments, info = model.transcribe(audio_path, language=self.cfg.language)
+            # faster-whisper devuelve un generador perezoso — el cómputo
+            # real ocurre al iterarlo, así que hay que consumirlo DENTRO
+            # del lock (si no, la sincronización sería un espejismo: el
+            # trabajo pesado seguiría corriendo fuera de la sección
+            # protegida).
+            text = " ".join(segment.text.strip() for segment in segments).strip()
 
         return {
             "metadata": {

@@ -1,7 +1,7 @@
 """
 Pipeline real de self-modification.
 
-Diferencia con tool_integration/registry.py (creación de herramientas
+Diferencia con kernel/registry/registry.py (creación de herramientas
 dinámicas): aquella valida y ejecuta código NUEVO como una herramienta
 standalone (un script que se corre y se observa su salida). Esto aquí
 valida una MODIFICACIÓN a un archivo EXISTENTE del proyecto, y la
@@ -10,7 +10,7 @@ aislada del proyecto con el cambio ya aplicado — nunca in-place, nunca
 contra el proyecto real hasta que un humano aprueba explícitamente.
 
 Flujo de propose():
-  1. Si target_path es núcleo (agent_core/, error_handling/, sandbox/):
+  1. Si target_path es núcleo (agent_core/, error_handling/, kernel/):
      bloqueo inmediato, ni siquiera se valida ni se prueba. Ver
      CORE_PATHS_HARDCODED — deliberadamente independiente de
      config.yaml para que no se pueda desactivar alterando la config.
@@ -54,7 +54,9 @@ logger = get_logger(__name__)
 # Última barrera, independiente de config.yaml — igual criterio que en
 # el resto del proyecto: aunque la config fuera corrompida por código
 # generado dinámicamente, estas rutas nunca se auto-modifican.
-CORE_PATHS_HARDCODED = ("agent_core/", "error_handling/", "sandbox/")
+# "sandbox/" (2026-07-20: renombrado a "kernel/" en la reestructuración
+# a kernel/ + sdk/ — mismo alcance de protección, ninguna regla nueva).
+CORE_PATHS_HARDCODED = ("agent_core/", "error_handling/", "kernel/")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -199,7 +201,7 @@ class SelfModificationManager:
                     detail=(
                         f"target_path '{target_path}' no existe en el proyecto actual — "
                         "self-modification solo modifica archivos existentes, no crea nuevos "
-                        "(usar tool_integration/registry.py para herramientas nuevas)."
+                        "(usar kernel/registry/registry.py para herramientas nuevas)."
                     ),
                 )
                 self._proposals[proposal_id] = proposal

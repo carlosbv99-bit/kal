@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from agent_core.memory.mid_term import MidTermMemory
 from audit.audit_log import AuditEvent, audit_log
-from sandbox.docker_runner import DockerSandboxRunner
+from kernel.lifecycle.docker_runner import DockerSandboxRunner
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 # Imagen usada específicamente para instalar paquetes: necesita pip,
 # a propósito distinta de SANDBOX_IMAGE (que puede ser la minimizada
-# sin pip, ver sandbox/images/minimal/). Instalar es una operación
+# sin pip, ver kernel/lifecycle/images/minimal/). Instalar es una operación
 # deliberada y estrecha, no ejecución de código arbitrario del agente.
 INSTALLER_IMAGE = os.environ.get("INSTALLER_IMAGE", "python:3.11-slim")
 
@@ -183,7 +183,7 @@ class ImportErrorStrategy(RepairStrategy):
     necesidad de aprobación humana y devuelve success=False. Esto es
     deliberado: instalar código de terceros con acceso a red es
     exactamente el tipo de acción que este proyecto trata como
-    sensible en todos los demás contextos (ver tool_integration/registry.py).
+    sensible en todos los demás contextos (ver kernel/registry/registry.py).
     """
 
     def __init__(self, runner: DockerSandboxRunner | None = None):
@@ -262,7 +262,7 @@ class ImportErrorStrategy(RepairStrategy):
         # IMPORTANTE: se instala con --target /workspace/.deps, NO en el
         # site-packages del sistema. El contenedor corre con
         # read_only=True en todo el filesystem salvo /workspace y /tmp
-        # (ver sandbox/docker_runner.py) — esa garantía de seguridad no
+        # (ver kernel/lifecycle/docker_runner.py) — esa garantía de seguridad no
         # se relaja para esto. Un intento inicial de instalar sin
         # --target falló exactamente por esto: "Read-only file system"
         # al escribir en site-packages, confirmado en pruebas reales.

@@ -17,7 +17,7 @@ from agent_core.memory.base import MemoryItem
 from agent_core.memory.mid_term import MidTermMemory
 from error_handling.detector import ErrorDetector, classify_sandbox_error
 from error_handling.strategies import ImportErrorStrategy, RepairContext, RuntimeErrorStrategy
-from sandbox.executor import SandboxExecutor
+from kernel.lifecycle.executor import SandboxExecutor
 from task_execution.task import Task, TaskStatus
 from utils.logger import get_logger
 

@@ -1,5 +1,5 @@
 """
-Tests de kernel_bus/socket_server.py::KernelBusSocketServer — la
+Tests de kernel/api/socket_server.py::KernelBusSocketServer — la
 plomería del socket Unix en sí (permisos declarados, auditoría,
 límites), con un cliente de socket real pero SIN Docker (el contenedor
 solo le agrega una frontera de proceso/filesystem al mismo socket, la
@@ -16,11 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from kernel_bus.bus import KernelServiceBus
-from kernel_bus.socket_server import _MAX_LINE_BYTES, KernelBusSocketServer, LineTooLongError
+from kernel.api.bus import KernelServiceBus
+from kernel.api.socket_server import _MAX_LINE_BYTES, KernelBusSocketServer, LineTooLongError
 
 
 class FakeService:
+    ALLOWED_ACTIONS = frozenset({"echo", "boom"})
+
     def echo(self, text):
         return {"echoed": text}
 
@@ -79,7 +81,14 @@ def test_method_not_declared_is_rejected_before_touching_the_bus(bus, socket_pat
     assert "no está declarado" in response["error"]["message"]
 
 
-def test_action_exception_becomes_clear_error_response(bus, socket_path):
+def test_action_exception_becomes_a_sanitized_error_response(bus, socket_path):
+    """
+    Hallazgo de la revisión de seguridad 2026-07-09: el detalle real de
+    la excepción (que podría revelar rutas u otros detalles del host) ya
+    no cruza el socket hacia la skill — solo un mensaje genérico. El
+    detalle completo sigue disponible server-side (ver
+    test_calls_and_denials_are_audited).
+    """
     server = KernelBusSocketServer(bus, allowed_methods=["test.boom"], socket_path=socket_path, skill_name="prueba")
     server.start()
     try:
@@ -88,7 +97,8 @@ def test_action_exception_becomes_clear_error_response(bus, socket_path):
         server.stop()
 
     assert response["error"]["code"] == -32000  # INTERNAL_ERROR
-    assert "boom interno" in response["error"]["message"]
+    assert "boom interno" not in response["error"]["message"]
+    assert "test.boom" in response["error"]["message"]
 
 
 def test_calls_and_denials_are_audited(bus, socket_path, monkeypatch, tmp_path):
@@ -179,7 +189,7 @@ def test_oversized_line_is_rejected_over_a_real_socket_and_audited(bus, socket_p
     assert response["result"] == {"echoed": "sigo vivo"}
     entries = audit_log.tail(5)
     event_types = {e["event_type"] for e in entries}
-    assert "kernel_bus_line_too_long" in event_types
+    assert "kernel_line_too_long" in event_types
 
 
 def test_max_requests_stops_accepting_after_the_limit(bus, socket_path):

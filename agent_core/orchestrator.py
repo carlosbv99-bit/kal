@@ -35,6 +35,7 @@ from agent_core.llm_settings import (
     LLMSettingsError,
     activate_cloud_profile,
     get_llm_settings,
+    get_ollama_model_capabilities,
     list_local_ollama_models,
     list_model_sources,
     pull_ollama_model,
@@ -49,10 +50,11 @@ from agent_core.vscode_integration import VSCodeIntegrationError, get_status as 
 from audit.audit_log import AuditEvent, audit_log
 from error_handling.circuit_breaker import circuit_breaker
 from task_execution.executor import TaskExecutor
-from tool_integration.base_tool import Artifact
-from tool_integration.filesystem_access_manager import FilesystemAccessError, filesystem_access_manager
-from tool_integration.permissions import Permission
-from tool_integration.registry import tool_registry
+from sdk.artifacts import Artifact
+from kernel.permissions.filesystem_access_manager import FilesystemAccessError, filesystem_access_manager
+from kernel.permissions.network_access_manager import NetworkAccessError, network_access_manager
+from sdk.permissions import Permission
+from kernel.registry.registry import tool_registry
 from utils.admin_token import get_or_create_admin_token
 from utils.config import settings
 from utils.logger import get_logger
@@ -182,7 +184,7 @@ class ChatRequest(BaseModel):
     use_planner: bool | None = None  # None = usar el default de config.yaml (llm.planning_enabled)
     session_id: str | None = None  # None = sesión nueva (ver agent_core/sessions.py)
     # Override de la cascada de permisos para esta sesión (ver
-    # tool_integration/permissions.py::PermissionCascade). None = no tocar
+    # sdk/permissions.py::PermissionCascade). None = no tocar
     # lo que ya había (default); [] = limpiar cualquier restricción previa;
     # una lista = REEMPLAZA el override completo (no se acumula turno a
     # turno, para que nunca quede algo bloqueado "para siempre" sin que el
@@ -221,7 +223,7 @@ class MemoryVerifyRequest(BaseModel):
 
 class FilesystemAccessApproveRequest(BaseModel):
     # "once" | "session" | "project" | "skill" — ver
-    # tool_integration/filesystem_access_manager.py::GrantLevel.
+    # kernel/permissions/filesystem_access_manager.py::GrantLevel.
     level: str = "once"
 
 
@@ -232,6 +234,12 @@ class FilesystemAccessOutcomeRequest(BaseModel):
     # con datos reales, no solo "se permitió").
     outcome: str  # "written" | "discarded"
     files_written: list[str] = Field(default_factory=list)
+
+
+class NetworkAccessApproveRequest(BaseModel):
+    # "once" | "session" | "project" | "skill" — ver
+    # kernel/permissions/network_access_manager.py::GrantLevel.
+    level: str = "once"
 
 
 class SelfDiagnosisRequest(BaseModel):
@@ -359,11 +367,18 @@ def list_local_ollama_models_endpoint():
     lista los del proveedor activo). Ollama caído no es un error del
     endpoint, es un estado real y esperable: se informa como lista
     vacía + un aviso, no como 500.
+
+    `capabilities`: un mapa {modelo: ["tools", "vision", ...]} — para
+    que la interfaz explique POR QUÉ un modelo como llava:13b no
+    aparece en el selector de cerebro (sin soporte de "tools"), en vez
+    de dejarlo como una ausencia sin explicación.
     """
     try:
-        return {"models": list_local_ollama_models(), "ollama_available": True}
+        models = list_local_ollama_models()
+        capabilities = {m: get_ollama_model_capabilities(m) for m in models}
+        return {"models": models, "capabilities": capabilities, "ollama_available": True}
     except LLMSettingsError as e:
-        return {"models": [], "ollama_available": False, "detail": str(e)}
+        return {"models": [], "capabilities": {}, "ollama_available": False, "detail": str(e)}
 
 
 @app.post("/settings/llm/ollama/pull", dependencies=[Depends(require_admin_token)])
@@ -384,9 +399,21 @@ def _artifact_url(uri: str) -> str | None:
     servida por el mount /artifacts (solo lectura, ver más abajo) para
     que el frontend pueda mostrarla en <img src=...>. None si la ruta
     no está bajo data/artifacts/ (no se puede servir).
+
+    Hallazgo de la revisión de seguridad 2026-07-09: la versión anterior
+    comparaba con Path.relative_to() SIN resolver antes — un uri como
+    "data/artifacts/../../etc/passwd" tiene ('data', 'artifacts') como
+    prefijo literal de sus partes, así que relative_to() lo aceptaba
+    igual (devolviendo "../../etc/passwd"), dependiendo enteramente de
+    que Starlette bloqueara el traversal real al servir el archivo. Hoy
+    no hay ningún llamador que pase un uri controlado por un tercero,
+    pero la función debe ser segura POR SÍ SOLA, no solo por la capa que
+    la usa después. resolve() normaliza ".." y símlinks ANTES de
+    comparar, así que un intento de escape termina en una ruta absoluta
+    fuera de _ARTIFACTS_DIR y relative_to() lo rechaza de verdad.
     """
     try:
-        return f"/artifacts/{Path(uri).relative_to('data/artifacts')}"
+        return f"/artifacts/{Path(uri).resolve().relative_to(_ARTIFACTS_DIR)}"
     except ValueError:
         return None
 
@@ -655,7 +682,7 @@ def get_self_modification(proposal_id: str):
     return proposal
 
 
-# --- Permission Manager de filesystem (tool_integration/filesystem_access_manager.py) ---
+# --- Permission Manager de filesystem (kernel/permissions/filesystem_access_manager.py) ---
 #
 # La política default (config.yaml: filesystem_access.auto_allow) ya
 # auto-permite crear/modificar dentro del workspace de VS Code — hoy
@@ -709,6 +736,44 @@ def report_filesystem_access_outcome(request_id: str, req: FilesystemAccessOutco
         )
     )
     return {"id": request_id, "outcome": req.outcome}
+
+
+# --- Permission Manager de red (kernel/permissions/network_access_manager.py) ---
+#
+# Mismo mecanismo que el de filesystem de arriba (comparten el motor
+# genérico kernel/permissions/access_manager.py) — sin un equivalente a
+# report-outcome: una descarga sucede enteramente DENTRO del backend,
+# que ya sabe el resultado real sin que nadie se lo reporte (a
+# diferencia de la escritura de archivos, que ocurre del lado de la
+# extensión de VS Code, fuera del conocimiento del backend).
+
+@app.get("/network-access")
+def list_pending_network_access():
+    return [
+        {
+            "id": p.id, "skill_name": p.skill_name, "scope": p.scope.value,
+            "action": p.action.value, "resource_key": p.resource_key,
+        }
+        for p in network_access_manager.list_pending()
+    ]
+
+
+@app.post("/network-access/{request_id}/approve", dependencies=[Depends(require_admin_token)])
+def approve_network_access(request_id: str, req: NetworkAccessApproveRequest):
+    try:
+        network_access_manager.approve(request_id, level=req.level)
+    except (NetworkAccessError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": request_id, "status": "approved"}
+
+
+@app.post("/network-access/{request_id}/deny", dependencies=[Depends(require_admin_token)])
+def deny_network_access(request_id: str):
+    try:
+        network_access_manager.deny(request_id)
+    except NetworkAccessError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": request_id, "status": "denied"}
 
 
 # --- Auto-diagnóstico ---

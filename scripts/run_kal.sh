@@ -27,4 +27,17 @@ else
 fi
 
 echo "== Arrancando kal en http://localhost:8000 =="
-uvicorn agent_core.orchestrator:app --host 0.0.0.0 --port 8000 --reload
+# BUG REAL ENCONTRADO EN USO: --reload sin restricciones vigila TODO el
+# proyecto, incluida data/ — un artefacto real (una imagen generada, un
+# archivo de versión de herramienta dinámica) o la suite de tests
+# corriendo en paralelo (que escribe en data/tool_versions/) dispara un
+# reinicio completo del servidor A MITAD de una conversación real,
+# cortando la respuesta al usuario con un error de red en el frontend.
+# Los --reload-exclude de abajo son solo RUNTIME (nunca código fuente
+# que sí deba recargarse), así que esto no esconde ningún cambio real.
+uvicorn agent_core.orchestrator:app --host 0.0.0.0 --port 8000 --reload \
+  --reload-exclude 'data/*' \
+  --reload-exclude 'logs/*' \
+  --reload-exclude 'docs/*' \
+  --reload-exclude 'tests/*' \
+  --reload-exclude '*.log'

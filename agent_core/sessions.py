@@ -19,7 +19,7 @@ no de `Session` (antes tenía esa lógica mezclada: `history_messages()`/
 
 Estado en memoria del proceso — no persiste a disco ni sobrevive un
 reinicio del backend, mismo criterio que error_handling/circuit_breaker.py
-y tool_integration/registry.py: alcanza para una sesión de trabajo, se
+y kernel/registry/registry.py: alcanza para una sesión de trabajo, se
 resetea con `uvicorn --reload` como el resto del estado en memoria de
 kal (ver README: nota sobre --reload).
 """
@@ -28,8 +28,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 
-from tool_integration.base_tool import Artifact
-from tool_integration.permissions import Permission
+from sdk.artifacts import Artifact
+from sdk.permissions import Permission
 
 
 @dataclass
@@ -43,7 +43,7 @@ class Session:
     id: str
     turns: list[Turn] = field(default_factory=list)
     active_artifact: Artifact | None = None
-    # Override de la cascada de permisos (ver tool_integration/permissions.py::
+    # Override de la cascada de permisos (ver sdk/permissions.py::
     # PermissionCascade) para ESTA conversación — vacío por defecto, no
     # restringe nada más allá del techo global y el nivel de confianza de
     # cada herramienta. Se puede fijar vía POST /chat (ChatRequest.

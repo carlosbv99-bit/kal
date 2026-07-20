@@ -111,7 +111,7 @@ def test_error_handling_path_is_also_blocked(manager):
 
 def test_sandbox_path_is_also_blocked(manager):
     proposal = manager.propose(
-        target_path="sandbox/docker_runner.py",
+        target_path="kernel/lifecycle/docker_runner.py",
         proposed_source="# cualquier cosa",
         justification="intento",
     )

@@ -42,7 +42,7 @@ def classify_sandbox_error(stderr: str) -> tuple[str, str]:
     ejecución" es la descripción más honesta cuando no se sabe más).
 
     BUG REAL ENCONTRADO EN USO: un rechazo de VALIDACIÓN ESTÁTICA (ver
-    sandbox/executor.py, mensaje "Validación estática falló: ..." —
+    kernel/lifecycle/executor.py, mensaje "Validación estática falló: ..." —
     p.ej. un import prohibido por el denylist) caía en el fallback
     genérico de RuntimeError. RuntimeErrorStrategy reintenta el mismo
     código ciegamente (ver su docstring) asumiendo que el fallo podría
