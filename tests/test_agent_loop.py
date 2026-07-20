@@ -13,8 +13,8 @@ from __future__ import annotations
 from agent_core.llm.agent_loop import AgentLoop, AgentTool, _agent_tool_from_tool
 from agent_core.llm.ollama_client import OllamaError
 from agent_core.llm.provider import ChatResponse, ToolCall
-from tool_integration.base_tool import Artifact
-from tool_integration.permissions import Permission
+from sdk.artifacts import Artifact
+from sdk.permissions import Permission
 
 
 class FakeOllamaClient:
@@ -113,18 +113,20 @@ def test_single_tool_call_then_final_answer():
     assert fake_llm.calls[1]["messages"][-1]["role"] == "tool"
 
 
-def test_reconstructed_tool_call_arguments_are_a_json_string_not_a_raw_object():
+def test_reconstructed_tool_call_arguments_stay_as_a_dict_ollama_native_format():
     """
-    BUG REAL ENCONTRADO EN USO: Groq (a diferencia de Ollama, tolerante)
-    valida ESTRICTO el formato OpenAI — tool_calls[].function.arguments
-    tiene que ser un string con JSON adentro, nunca el objeto ya
-    parseado. Sin serializarlo, cualquier tarea de más de un paso
-    contra un proveedor en la nube rompía con 400 en el segundo turno
-    ("arguments: value must be a string"), confirmado en vivo contra el
-    agente IDE de VS Code.
+    BUG REAL ENCONTRADO EN USO (2026-07-19): esto antes serializaba
+    `arguments` a un string JSON acá mismo, para satisfacer a Groq (que
+    sí lo exige así, ver test_openai_compatible_client.py). Pero Ollama
+    NATIVO rechaza ese formato con 400 ("Value looks like object, but
+    can't find closing '}' symbol") en cualquier turno posterior a una
+    llamada a herramienta — confirmado en vivo contra un Ollama real
+    (qwen2.5-coder:14b), rompía hasta con un solo tool call de por
+    medio ("hola" -> audio_generation -> segundo turno ya fallaba).
+    agent_loop.py arma el formato CANÓNICO (dict) — cada proveedor
+    concreto adapta a su propio wire format en su propio cliente
+    (ver OpenAICompatibleClient._with_stringified_tool_call_arguments).
     """
-    import json
-
     responses = [
         ChatResponse(content="", tool_calls=[ToolCall(name="run_code", arguments={"code": "print(4)"})]),
         ChatResponse(content="El resultado es 4."),
@@ -136,8 +138,7 @@ def test_reconstructed_tool_call_arguments_are_a_json_string_not_a_raw_object():
     assistant_message = fake_llm.calls[1]["messages"][-2]
     assert assistant_message["role"] == "assistant"
     sent_arguments = assistant_message["tool_calls"][0]["function"]["arguments"]
-    assert isinstance(sent_arguments, str)
-    assert json.loads(sent_arguments) == {"code": "print(4)"}
+    assert sent_arguments == {"code": "print(4)"}
 
 
 def test_a_missing_tool_call_id_is_generated_and_correlated_with_the_tool_message():
@@ -235,7 +236,7 @@ def test_tool_handler_exception_is_caught_not_propagated():
     assert "boom interno" in result.steps[0].observation
 
 
-# --- Cascada de permisos (tool_integration/permissions.py::PermissionCascade) ---
+# --- Cascada de permisos (sdk/permissions.py::PermissionCascade) ---
 
 
 def test_tool_requiring_permission_outside_its_trust_tier_is_never_called():
@@ -424,6 +425,95 @@ def test_max_tool_repeats_counts_independently_per_tool_name():
     assert all("ERROR" not in s.observation for s in result.steps)
 
 
+def _generative_tool(name: str, calls: list, artifact_dir: str = "data/artifacts/images") -> AgentTool:
+    """Simula una herramienta que genera un Artifact real (con .uri) —
+    a diferencia de _counting_tool(), necesario para probar el tope más
+    estricto por autochequeo (que rastrea artifact.uri -> tool_name)."""
+    agent_tool = AgentTool(name=name, description="d", parameters_schema={"type": "object", "properties": {}}, handler=None)
+
+    def handler(**kwargs):
+        calls.append(kwargs)
+        artifact = Artifact(modality="image", uri=f"{artifact_dir}/{len(calls)}.png", metadata={})
+        agent_tool.last_artifact = artifact
+        return f"imagen generada en {artifact.uri}"
+
+    agent_tool.handler = handler
+    return agent_tool
+
+
+def _analyze_image_tool(calls: list) -> AgentTool:
+    agent_tool = AgentTool(name="analyze_image", description="d", parameters_schema={"type": "object", "properties": {}}, handler=None)
+    agent_tool.handler = lambda **kwargs: calls.append(kwargs) or "descripción de la imagen"
+    return agent_tool
+
+
+def test_self_check_via_analyze_image_lowers_the_repeat_limit_to_one_retry():
+    """
+    BUG REAL ENCONTRADO EN USO: "crea una naranja (solo una)" generó
+    bien la primera vez, pero analyze_image sobre esa MISMA imagen
+    (SDXL-turbo no respeta cantidades exactas de forma confiable)
+    empujó al modelo a regenerar sin ningún límite hasta agotar
+    max_steps, sin darle nunca una respuesta al usuario. Tope
+    estructural: una vez que analyze_image se llama sobre un artefacto
+    generado EN ESTE TURNO, esa herramienta generativa queda limitada a
+    2 llamadas totales (la original + un solo reintento) — sin importar
+    que max_tool_repeats configurado sea mayor.
+    """
+    gen_calls: list = []
+    analyze_calls: list = []
+    tools = [_generative_tool("image_generation", gen_calls), _analyze_image_tool(analyze_calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una naranja"})]),
+        ChatResponse(
+            content="",
+            tool_calls=[ToolCall(name="analyze_image", arguments={"image_path": "data/artifacts/images/1.png", "question": "¿es una sola?"})],
+        ),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una naranja de nuevo"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una naranja, tercera vez"})]),
+        ChatResponse(content="no logré exactamente una, pero acá está la última versión"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("crea una naranja (solo una)", max_steps=10, max_tool_repeats=5)
+
+    # Solo 2 generaciones reales (la original + 1 reintento) — nunca 3,
+    # aunque max_tool_repeats configurado (5) lo permitiría de no ser
+    # por el autochequeo detectado.
+    assert len(gen_calls) == 2
+    assert len(analyze_calls) == 1
+    assert "ERROR" in result.steps[-1].observation
+    assert "image_generation" in result.steps[-1].observation
+    assert result.status == "success"
+
+
+def test_analyze_image_on_an_unrelated_path_does_not_tighten_the_limit():
+    """Solo cuenta como autochequeo si analyze_image mira un artefacto
+    generado EN ESTE MISMO turno — una imagen subida por el usuario (u
+    otra ruta cualquiera) no debe activar el tope más estricto."""
+    gen_calls: list = []
+    analyze_calls: list = []
+    tools = [_generative_tool("image_generation", gen_calls), _analyze_image_tool(analyze_calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "algo"})]),
+        ChatResponse(
+            content="",
+            tool_calls=[ToolCall(name="analyze_image", arguments={"image_path": "data/artifacts/uploads/otra.png", "question": "describí"})],
+        ),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "algo más"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "algo más, otra vez"})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("hacé algo", max_steps=10, max_tool_repeats=3)
+
+    # Las 3 llamadas a image_generation corren normal (tope configurado
+    # de 3, no el más estricto de 2) — analyze_image miró una ruta que
+    # NO es de este turno, no cuenta como autochequeo.
+    assert len(gen_calls) == 3
+    assert all("ERROR" not in s.observation for s in result.steps)
+
+
 def test_default_max_tool_repeats_comes_from_settings(monkeypatch):
     from utils.config import settings
 
@@ -570,6 +660,24 @@ def test_vscode_client_gets_the_propose_project_files_tool():
     assert "propose_project_files" in tool_names_sent
 
 
+def test_web_client_never_gets_the_import_resource_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "import_resource" not in tool_names_sent
+
+
+def test_vscode_client_gets_the_import_resource_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola", client="vscode")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "import_resource" in tool_names_sent
+
+
 def test_a_raw_json_array_of_files_is_detected_as_a_propose_project_files_call():
     """
     BUG REAL ENCONTRADO EN USO: el modelo a veces "imitaba" la llamada a
@@ -659,6 +767,32 @@ def test_project_files_artifact_summarizes_without_leaking_full_content():
     assert "index.html" in observation
     assert "mucho contenido" not in observation
     assert "1 archivo" in observation
+
+
+def test_text_artifact_with_summary_key_is_shown_verbatim_as_observation():
+    """
+    BUG REAL ENCONTRADO EN USO (analyze_image, 2026-07-19): un Artifact
+    modality="text" con "status": "success" cae en la rama pensada para
+    run_code (espera "stdout") y devuelve "(sin salida)" — el modelo
+    nunca ve la respuesta real de una herramienta de solo-texto como
+    analyze_image o speech_to_text. La convención correcta es "summary"
+    (sin "status" en absoluto), que se muestra tal cual.
+    """
+
+    class FakeTextTool:
+        class manifest:
+            description = "analiza algo"
+            parameters_schema = {"type": "object", "properties": {}}
+            permissions = frozenset()
+
+        def execute(self, **kwargs):
+            return Artifact(modality="text", uri="", metadata={"summary": "Es una foto de un colibrí."})
+
+    agent_tool = _agent_tool_from_tool("analyze_image", FakeTextTool())
+
+    observation = agent_tool.handler()
+
+    assert observation == "Es una foto de un colibrí."
 
 
 def test_project_files_artifact_requiring_approval_is_a_clear_error():
