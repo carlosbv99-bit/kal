@@ -17,7 +17,7 @@ piper-tts y moviepy.
 Esta llamada HTTP la hace el proceso principal del agente hacia un
 servicio local (Ollama en localhost:11434), no código sandboxeado —
 por eso no pasa por las restricciones de red del sandbox (ver
-sandbox/docker_runner.py): es el propio agente usando un servicio local
+kernel/lifecycle/docker_runner.py): es el propio agente usando un servicio local
 de la máquina, igual que los adaptadores multimodales usan modelos
 locales directamente.
 """
@@ -30,7 +30,7 @@ from typing import Any, Callable
 import requests
 
 from agent_core.llm.provider import ChatResponse, ProviderError, ToolCall
-from kernel_bus.resource_broker import resource_broker as _default_resource_broker
+from kernel.broker.resource_broker import resource_broker as _default_resource_broker
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -80,7 +80,7 @@ class OllamaClient:
         self._get = get_fn or requests.get
         self._sleep = sleep_fn or time.sleep
         # inyectable para tests; el default real es el singleton
-        # compartido de kernel_bus/resource_broker.py.
+        # compartido de kernel/broker/resource_broker.py.
         self._resource_broker = resource_broker or _default_resource_broker
 
     def chat(
@@ -88,17 +88,25 @@ class OllamaClient:
         messages: list[dict[str, Any]],
         model: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        images: list[str] | None = None,
     ) -> ChatResponse:
         """
         Llama a POST /api/chat. `messages` sigue el formato
         {"role": "system"|"user"|"assistant"|"tool", "content": str}.
         `tools` sigue el formato de function-calling estilo OpenAI:
         [{"type": "function", "function": {"name", "description", "parameters"}}].
+        `images`: strings base64 (sin prefijo "data:") para modelos de
+        visión (p.ej. llama3.2-vision) — se adjuntan al ÚLTIMO mensaje,
+        formato documentado de /api/chat de Ollama. No modifica
+        `messages` in-place (evita mutar la lista del llamador).
         """
         # Libera RAM de servicios multimedia inactivos ANTES de pedirle a
         # Ollama (local, misma RAM del sistema) que genere — ver
-        # kernel_bus/resource_broker.py, bug real de contención de RAM.
+        # kernel/broker/resource_broker.py, bug real de contención de RAM.
         self._resource_broker.evict_idle_and_pressured()
+
+        if images:
+            messages = [*messages[:-1], {**messages[-1], "images": images}]
 
         payload: dict[str, Any] = {
             "model": model or settings.llm.default_model,

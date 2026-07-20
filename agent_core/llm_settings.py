@@ -10,7 +10,7 @@ con hardware muy distinto (ver docs/HISTORY.md), no todos pueden
 correr un modelo local grande.
 
 Reemplazo de texto DIRIGIDO, nunca yaml.dump()/reescritura completa —
-mismo criterio que tool_integration/skills.py::set_skill_enabled():
+mismo criterio que kernel/registry/skills.py::set_skill_enabled():
 config.yaml tiene comentarios explicativos reales (ejemplos de
 base_url por proveedor, benchmarks de default_model) que un
 yaml.dump() destruiría.
@@ -143,6 +143,21 @@ def update_llm_settings(
         # propósito (p.ej. un puerto no estándar).
         base_url = _OLLAMA_DEFAULT_BASE_URL
 
+    # BUG REAL ENCONTRADO EN USO: aceptar acá un modelo Ollama local sin
+    # soporte de tool-calling (p.ej. llava:13b, un modelo de solo
+    # visión) rompía CUALQUIER mensaje posterior, hasta un simple
+    # "hola", con 400 ("does not support tools") — el selector web ya
+    # no lo ofrece (ver list_model_sources), pero esta es la validación
+    # real que lo bloquea también si alguien lo pide por fuera del
+    # selector (p.ej. una llamada directa a este endpoint).
+    if provider == "ollama" and default_model is not None and not _ollama_model_supports_tools(default_model):
+        raise LLMSettingsError(
+            f"'{default_model}' no soporta llamadas a herramientas (tool-calling) — kal necesita "
+            "esa capacidad en CUALQUIER modelo que actúe como cerebro del agente, ya que siempre "
+            "ofrece herramientas en cada mensaje. Elegí otro modelo (o usalo solo para "
+            "multimodal.vision.model en config.yaml, si es un modelo de visión)."
+        )
+
     if base_url is not None:
         _update_yaml_field("base_url", base_url)
         settings.llm.base_url = base_url
@@ -228,6 +243,46 @@ def _is_chat_capable_model_name(name: str) -> bool:
     return not any(keyword in lowered for keyword in _NON_CHAT_MODEL_KEYWORDS)
 
 
+def get_ollama_model_capabilities(name: str) -> list[str]:
+    """
+    Consulta las capacidades REALES de un modelo Ollama local vía
+    `/api/show` (p.ej. `["completion", "tools"]` para un modelo de
+    chat/código, `["completion", "vision"]` para uno de solo visión) —
+    la misma fuente de verdad usada para diagnosticar en vivo por qué
+    llava:13b rompía el chat como modelo principal. Lista vacía ante
+    cualquier error (Ollama caído, modelo no encontrado) — informativo,
+    no gatea nada por sí solo (ver `_ollama_model_supports_tools`, que
+    sí es fail-closed para esa decisión específica).
+    """
+    try:
+        response = requests.post(f"{_OLLAMA_DEFAULT_BASE_URL}/api/show", json={"name": name}, timeout=5)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"No se pudieron consultar las capacidades de '{name}': {e}")
+        return []
+    return response.json().get("capabilities", [])
+
+
+def _ollama_model_supports_tools(name: str) -> bool:
+    """
+    BUG REAL ENCONTRADO EN USO: el selector de modelo de la web dejaba
+    elegir CUALQUIER modelo local (incluido uno de solo visión como
+    llava:13b, sin soporte de tool-calling) como default_model — el
+    agente SIEMPRE manda `tools` en cada request, así que Ollama
+    rechazaba con 400 ("does not support tools") absolutamente
+    cualquier mensaje, hasta un simple "hola", rompiendo el chat
+    entero apenas se lo seleccionaba. A diferencia de
+    `_is_chat_capable_model_name` (heurística por palabras clave, la
+    única opción para proveedores en la nube sin una API de
+    capacidades), esto usa `get_ollama_model_capabilities()` — la
+    fuente de verdad real de Ollama, no una adivinanza por el nombre.
+    Fail-closed ante cualquier error (capabilities vacío): un modelo
+    que no se puede confirmar no aparece en el selector, en vez de
+    arriesgarse a ofrecer una opción rota.
+    """
+    return "tools" in get_ollama_model_capabilities(name)
+
+
 def _first_chat_capable_model(base_url: str, api_key: str) -> str | None:
     """Usado por update_llm_settings() para elegir un default_model
     razonable al activar un proveedor en la nube distinto sin uno
@@ -251,16 +306,23 @@ def list_model_sources() -> list[dict]:
     el selector de modelo del chat — no depende de cuál proveedor esté
     ACTIVO en este momento.
 
-    Filtra dos casos reales de "aparece pero no está listo para usar":
-    modelos que no son de chat (ver _NON_CHAT_MODEL_KEYWORDS) y modelos
+    Filtra tres casos reales de "aparece pero no está listo para usar":
+    modelos que no son de chat (ver _NON_CHAT_MODEL_KEYWORDS), modelos
     Ollama con sufijo ":cloud" — esos son en realidad un proxy al
     servicio en la nube DE OLLAMA MISMO, que necesita una sesión propia
     (`ollama signin`) sin relación con esta configuración; sin ella,
-    devuelven 401 al primer uso, confirmado en vivo.
+    devuelven 401 al primer uso, confirmado en vivo — y modelos locales
+    SIN soporte de tool-calling (ver _ollama_model_supports_tools): un
+    modelo de solo visión como llava:13b elegido acá rompe CUALQUIER
+    mensaje, hasta un simple "hola", con 400 ("does not support
+    tools"), confirmado en vivo.
     """
     sources: list[dict] = []
     try:
-        local_models = [m for m in list_local_ollama_models() if not m.endswith(":cloud")]
+        local_models = [
+            m for m in list_local_ollama_models()
+            if not m.endswith(":cloud") and _ollama_model_supports_tools(m)
+        ]
         sources.append({"name": "ollama", "label": "Local (Ollama)", "models": local_models})
     except LLMSettingsError:
         pass

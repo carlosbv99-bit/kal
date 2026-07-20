@@ -198,22 +198,35 @@ document.getElementById("model-select").addEventListener("change", async (ev) =>
   const modelName = ev.target.value;
   if (!source) return;
   
-  if (source === "ollama") {
-    // Para Ollama, verificar que el modelo no sea un modelo de nube
-    if (modelName.endsWith(":cloud")) {
-      alert(`El modelo ${modelName} requiere una sesión de Ollama en la nube. Inicia sesión con 'ollama login' primero.`);
-      // Restaurar el modelo anterior
-      await loadModels();
-      return;
+  // BUG REAL ENCONTRADO EN USO: esto no tenía try/catch — si el backend
+  // rechazaba el cambio (p.ej. un modelo local sin soporte de
+  // tool-calling, ver agent_core/llm_settings.py::update_llm_settings),
+  // la falla quedaba silenciosa (una promesa rechazada sin manejar) y
+  // el selector quedaba mostrando una opción que en realidad nunca se
+  // activó, sin ninguna explicación visible para el usuario.
+  try {
+    if (source === "ollama") {
+      // Para Ollama, verificar que el modelo no sea un modelo de nube
+      if (modelName.endsWith(":cloud")) {
+        alert(`El modelo ${modelName} requiere una sesión de Ollama en la nube. Inicia sesión con 'ollama login' primero.`);
+        await loadModels();
+        return;
+      }
+
+      await api("/settings/llm", { method: "POST", body: JSON.stringify({ provider: "ollama", default_model: modelName }) });
+    } else {
+      // Para proveedores en la nube, activamos el perfil y luego actualizamos el modelo
+      await api("/settings/llm/activate-profile", { method: "POST", body: JSON.stringify({ name: source }) });
+      await api("/settings/llm", { method: "POST", body: JSON.stringify({ default_model: modelName }) });
     }
-    
-    await api("/settings/llm", { method: "POST", body: JSON.stringify({ provider: "ollama", default_model: modelName }) });
-  } else {
-    // Para proveedores en la nube, activamos el perfil y luego actualizamos el modelo
-    await api("/settings/llm/activate-profile", { method: "POST", body: JSON.stringify({ name: source }) });
-    await api("/settings/llm", { method: "POST", body: JSON.stringify({ default_model: modelName }) });
+  } catch (e) {
+    // El mensaje ya viene explicado en detalle desde el backend (p.ej.
+    // "no soporta llamadas a herramientas... elegí otro modelo").
+    alert(e.message);
+    await loadModels(); // restaura el selector al modelo realmente activo
+    return;
   }
-  
+
   await refreshStatus();
 });
 
@@ -832,8 +845,23 @@ async function refreshModelSettings() {
   } else if (ollamaModels.models.length === 0) {
     modelLocalList.appendChild(el("div", "dash-empty", "Sin modelos descargados todavía."));
   } else {
+    // Anota cada modelo con lo que puede hacer de verdad (ver
+    // GET /settings/llm/ollama/models -> "capabilities", vía Ollama
+    // /api/show) — BUG REAL ENCONTRADO EN USO: sin esto, un modelo de
+    // solo visión (llava:13b) simplemente desaparecía del selector de
+    // arriba sin ninguna explicación de por qué.
+    const capabilities = ollamaModels.capabilities || {};
     for (const name of ollamaModels.models) {
-      modelLocalList.appendChild(el("div", "dash-item", name));
+      const caps = capabilities[name] || [];
+      const item = el("div", "dash-item", name);
+      if (caps.includes("tools")) {
+        item.appendChild(el("span", "dash-item-meta", " — puede ser el cerebro del chat"));
+      } else if (caps.includes("vision")) {
+        item.appendChild(
+          el("span", "dash-item-meta", " — solo visión, no soporta herramientas (no aparece como cerebro)")
+        );
+      }
+      modelLocalList.appendChild(item);
     }
   }
 }

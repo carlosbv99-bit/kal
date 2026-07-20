@@ -169,6 +169,25 @@ class STTConfig(BaseModel):
     language: str | None = None  # None = auto-detección
 
 
+class VisionConfig(BaseModel):
+    backend: Literal["local"] = "local"
+    # BUG REAL ENCONTRADO EN USO: NO reusar llm.base_url — ese campo
+    # cambia cuando el usuario activa un perfil de nube (p.ej. Groq,
+    # ver LLMConfig más arriba), y esta herramienta necesita hablar
+    # SIEMPRE con el Ollama LOCAL (el modelo de visión corre ahí, no en
+    # la nube), sin importar qué proveedor use el "cerebro" del agente.
+    base_url: str = "http://localhost:11434"
+    # Modelo de Ollama con soporte de visión (necesita `ollama pull
+    # llava:13b` u otro modelo de visión — no se descarga solo, a
+    # diferencia de los demás modelos multimodales de este archivo que
+    # sí se auto-bajan la primera vez que se usan). BUG REAL ENCONTRADO
+    # EN USO: llama3.2-vision (arquitectura "mllama") no carga en
+    # Ollama >=0.30.0 — regresión conocida, sin arreglo todavía (ver
+    # github.com/ollama/ollama/issues/16547). llava usa arquitectura
+    # CLIP, sí soportada.
+    model: str = "llava:13b"
+
+
 class ImageEditingConfig(BaseModel):
     artifact_dir: str = "data/artifacts/images_edited"
     # Inpainting real con IA (operación "inpaint"): modelo de difusión
@@ -194,6 +213,7 @@ class MultimodalConfig(BaseModel):
     audio: AudioGenConfig = AudioGenConfig()
     video: VideoGenConfig = VideoGenConfig()
     stt: STTConfig = STTConfig()
+    vision: VisionConfig = VisionConfig()
     image_editing: ImageEditingConfig = ImageEditingConfig()
     composition: ImageCompositionConfig = ImageCompositionConfig()
     uploads: UploadsConfig = UploadsConfig()
@@ -201,13 +221,13 @@ class MultimodalConfig(BaseModel):
 
 class ResourceBrokerConfig(BaseModel):
     """
-    ImageService/AudioService/STTService (kernel_bus/services.py) cargan
+    ImageService/AudioService/STTService (kernel/services/services.py) cargan
     su modelo perezosamente pero nunca lo descargaban — BUG REAL
     ENCONTRADO EN USO: en una máquina sin GPU (todo corre en CPU), un
     pipeline de varios GB se queda en RAM para siempre una vez usado,
     compitiendo con Ollama por la misma RAM del sistema — confirmado en
     logs/agent.log: Ollama quedaba con "Connection refused" 1-2 minutos
-    justo después de generar una imagen. Ver kernel_bus/resource_broker.py.
+    justo después de generar una imagen. Ver kernel/broker/resource_broker.py.
     """
     idle_timeout_seconds: int = 300
     min_available_ram_mb: int = 2048
@@ -229,7 +249,7 @@ class ToolIntegrationConfig(BaseModel):
 
 class PermissionCascadeConfig(BaseModel):
     """
-    Cascada de permisos de varios niveles (ver tool_integration/permissions.py::
+    Cascada de permisos de varios niveles (ver sdk/permissions.py::
     PermissionCascade) — "más restrictivo gana". Strings planos (no el enum
     Permission) para no acoplar utils/config.py a tool_integration, mismo
     criterio que ToolIntegrationConfig.require_human_approval_for de arriba.
@@ -239,7 +259,7 @@ class PermissionCascadeConfig(BaseModel):
       acá, pase lo que pase.
     - trust_tier_caps: techo por CÓMO se registró la herramienta (nunca por
       lo que la propia herramienta se autodeclare — ver
-      tool_integration/permissions.py::trust_tier_for(), que decide el tier
+      sdk/permissions.py::trust_tier_for(), que decide el tier
       por el tipo del wrapper en el registry, no por un campo leído del
       manifiesto). "agent" ya alineado con
       tool_integration.require_human_approval_for: no bloquea nada que hoy
@@ -260,7 +280,7 @@ class PermissionCascadeConfig(BaseModel):
 class FilesystemAccessConfig(BaseModel):
     """
     Política del Permission Manager de filesystem (ver
-    tool_integration/filesystem_access_manager.py) — ORTOGONAL a
+    kernel/permissions/filesystem_access_manager.py) — ORTOGONAL a
     PermissionCascadeConfig de arriba: aquella decide "¿esta herramienta
     puede pedir tocar el filesystem en absoluto?" (FILESYSTEM_READ/WRITE
     por nivel de confianza); esta decide "¿esta acción concreta, en este
@@ -321,6 +341,22 @@ class BrowserConfig(BaseModel):
     user_agent: str = "kal-browser-agent/1.0"
 
 
+class DownloadsConfig(BaseModel):
+    """
+    Política de tool_integration/download_manager.py (Artifact
+    Service — descarga real de recursos, hoy solo imágenes, ver
+    tool_integration/adapters/vscode_files.py::ImportResourceTool).
+    Deliberadamente SEPARADA de BrowserConfig aunque comparta el
+    espíritu deny-by-default: semántica distinta (sin JS/cookies, con
+    tope de tamaño real) — un dominio confiable para navegar
+    interactivamente no implica confiar en descargar binarios de ahí,
+    y viceversa.
+    """
+    allow_http: bool = False  # solo https por default — una respuesta http puede alterarse en tránsito
+    allowed_domains: list[str] = Field(default_factory=list)  # deny-by-default, igual que browser.allowed_domains
+    max_size_mb: int = 10
+
+
 class AgentConfig(BaseModel):
     name: str = "kal"
     max_concurrent_tasks: int = 4
@@ -347,6 +383,7 @@ class Settings(BaseModel):
     tool_integration: ToolIntegrationConfig
     permissions: PermissionCascadeConfig = PermissionCascadeConfig()
     filesystem_access: FilesystemAccessConfig = FilesystemAccessConfig()
+    downloads: DownloadsConfig = DownloadsConfig()
     self_modification: SelfModificationConfig
     audit: AuditConfig
     signing: SigningConfig = SigningConfig()

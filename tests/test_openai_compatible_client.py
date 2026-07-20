@@ -90,6 +90,44 @@ def test_chat_parses_tool_calls_with_arguments_as_json_string():
     assert result.tool_calls[0].id == "call_1"
 
 
+def test_chat_stringifies_outgoing_tool_call_arguments_before_sending():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-19): agent_core/llm/agent_loop.py
+    arma `messages` en formato CANÓNICO (arguments como dict — lo que
+    Ollama nativo espera). Groq/OpenAI-strict, en cambio, exige que
+    tool_calls[].function.arguments sea un STRING JSON — sin esta
+    conversión ACÁ (no en agent_loop.py, que no debe conocer el wire
+    format de un proveedor concreto), Groq rechazaba con 400 cualquier
+    turno posterior a una llamada a herramienta.
+    """
+    import json
+
+    payloads = []
+
+    def post_fn(url, json=None, **kw):
+        payloads.append(json)
+        return FakeResponse({"choices": [{"message": {"role": "assistant", "content": "listo"}}]})
+
+    client = _client(post_fn=post_fn)
+    messages = [
+        {"role": "user", "content": "ejecutá esto"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "run_code", "arguments": {"code": "print(1)"}}}],
+        },
+        {"role": "tool", "content": "1", "tool_call_id": "call_1"},
+    ]
+
+    client.chat(messages)
+
+    sent_arguments = payloads[0]["messages"][1]["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(sent_arguments, str)
+    assert json.loads(sent_arguments) == {"code": "print(1)"}
+    # No debe mutar la lista original del llamador.
+    assert isinstance(messages[1]["tool_calls"][0]["function"]["arguments"], dict)
+
+
 def test_chat_raises_provider_error_on_connection_failure():
     import requests
 

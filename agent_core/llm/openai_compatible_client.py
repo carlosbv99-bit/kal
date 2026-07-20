@@ -61,6 +61,37 @@ def _tool_use_failed_fallback_content(exc: requests.exceptions.HTTPError) -> str
     return error.get("failed_generation") or None
 
 
+def _with_stringified_tool_call_arguments(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
+    ESTRICTO, a diferencia de Ollama que es tolerante) exige que
+    tool_calls[].function.arguments sea un STRING con JSON adentro,
+    nunca el objeto ya parseado — sin esto, Groq rechazaba CUALQUIER
+    turno posterior a una llamada a herramienta con 400 ("arguments:
+    value must be a string"). agent_core/llm/agent_loop.py arma
+    `messages` en formato CANÓNICO (arguments como dict, lo que espera
+    Ollama nativo) — este cliente es el único responsable de adaptarlo
+    a SU wire format antes de mandarlo, no el núcleo del loop. No muta
+    `messages` in-place (mismo criterio que OllamaClient.chat() con
+    `images`).
+    """
+    result = []
+    for message in messages:
+        tool_calls = message.get("tool_calls")
+        if not tool_calls:
+            result.append(message)
+            continue
+        new_tool_calls = []
+        for tc in tool_calls:
+            function = tc.get("function", {})
+            arguments = function.get("arguments")
+            if isinstance(arguments, dict):
+                tc = {**tc, "function": {**function, "arguments": json.dumps(arguments)}}
+            new_tool_calls.append(tc)
+        result.append({**message, "tool_calls": new_tool_calls})
+    return result
+
+
 def _response_detail(exc: requests.exceptions.RequestException) -> str:
     """
     `str(exc)` de un HTTPError solo trae la línea de estado ("400
@@ -118,7 +149,7 @@ class OpenAICompatibleClient:
         """
         payload: dict[str, Any] = {
             "model": model or settings.llm.default_model,
-            "messages": messages,
+            "messages": _with_stringified_tool_call_arguments(messages),
         }
         if tools:
             payload["tools"] = tools

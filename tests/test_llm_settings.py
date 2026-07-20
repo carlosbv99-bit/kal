@@ -16,6 +16,7 @@ from agent_core.llm_settings import (
     LLMSettingsError,
     activate_cloud_profile,
     get_llm_settings,
+    get_ollama_model_capabilities,
     list_cloud_profiles,
     list_local_ollama_models,
     list_model_sources,
@@ -216,6 +217,30 @@ def test_switching_back_to_ollama_respects_an_explicit_custom_base_url(_fake_pat
     update_llm_settings(provider="ollama", base_url="http://localhost:12345")
 
     assert settings.llm.base_url == "http://localhost:12345"
+
+
+def test_update_rejects_an_ollama_default_model_without_tool_support(_fake_paths, monkeypatch):
+    """
+    BUG REAL ENCONTRADO EN USO: activar llava:13b (un modelo de solo
+    visión, sin tool-calling) como default_model rompía CUALQUIER
+    mensaje posterior con 400 ("does not support tools"), hasta un
+    simple "hola" — validado ANTES de escribir nada, como ya promete el
+    docstring de esta función.
+    """
+    monkeypatch.setattr(llm_settings, "_ollama_model_supports_tools", lambda name: False)
+
+    with pytest.raises(LLMSettingsError, match="no soporta llamadas a herramientas"):
+        update_llm_settings(provider="ollama", default_model="llava:13b")
+
+    assert settings.llm.default_model == "qwen3-coder:30b"  # el de _FAKE_CONFIG_YAML, sin tocar
+
+
+def test_update_accepts_an_ollama_default_model_with_tool_support(_fake_paths, monkeypatch):
+    monkeypatch.setattr(llm_settings, "_ollama_model_supports_tools", lambda name: True)
+
+    update_llm_settings(provider="ollama", default_model="qwen2.5-coder:14b")
+
+    assert settings.llm.default_model == "qwen2.5-coder:14b"
 
 
 def test_switching_to_a_new_cloud_endpoint_without_an_explicit_model_picks_one_automatically(
@@ -431,6 +456,7 @@ def test_update_llm_settings_with_profile_name_also_saves_it_as_reusable():
 
 def test_list_model_sources_includes_ollama_and_working_cloud_profiles(monkeypatch):
     monkeypatch.setattr(llm_settings, "list_local_ollama_models", lambda: ["qwen3-coder:30b"])
+    monkeypatch.setattr(llm_settings, "_ollama_model_supports_tools", lambda name: True)
     save_cloud_profile("groq", base_url="https://api.groq.com/openai/v1", api_key="gsk_real")
 
     class FakeClient:
@@ -525,8 +551,76 @@ def test_list_model_sources_excludes_ollama_cloud_models(monkeypatch):
     solo porque `ollama list` lo muestre como instalado.
     """
     monkeypatch.setattr(llm_settings, "list_local_ollama_models", lambda: ["qwen3-coder:30b", "glm-5.1:cloud"])
+    monkeypatch.setattr(llm_settings, "_ollama_model_supports_tools", lambda name: True)
 
     sources = list_model_sources()
 
     ollama_models = next(s["models"] for s in sources if s["name"] == "ollama")
     assert ollama_models == ["qwen3-coder:30b"]
+
+
+# --- Filtro de tool-calling para modelos Ollama locales ---
+#
+# BUG REAL ENCONTRADO EN USO: el selector dejaba elegir llava:13b (sin
+# soporte de tools) como default_model — Ollama rechazaba con 400
+# ("does not support tools") CUALQUIER mensaje, hasta un simple "hola",
+# rompiendo el chat entero apenas se lo seleccionaba.
+
+
+def test_get_ollama_model_capabilities_returns_the_real_list(monkeypatch):
+    monkeypatch.setattr(
+        llm_settings.requests, "post",
+        lambda url, json=None, timeout=None: _fake_response({"capabilities": ["completion", "vision"]}),
+    )
+
+    assert get_ollama_model_capabilities("llava:13b") == ["completion", "vision"]
+
+
+def test_get_ollama_model_capabilities_returns_empty_list_when_ollama_is_unreachable(monkeypatch):
+    def _raise(*a, **k):
+        raise requests.exceptions.ConnectionError("no route")
+
+    monkeypatch.setattr(llm_settings.requests, "post", _raise)
+
+    assert get_ollama_model_capabilities("qwen2.5-coder:14b") == []
+
+
+def test_ollama_model_supports_tools_reads_capabilities_from_api_show(monkeypatch):
+    def fake_post(url, json=None, timeout=None):
+        assert json == {"name": "llava:13b"}
+        return _fake_response({"capabilities": ["completion", "vision"]})
+
+    monkeypatch.setattr(llm_settings.requests, "post", fake_post)
+
+    assert llm_settings._ollama_model_supports_tools("llava:13b") is False
+
+
+def test_ollama_model_supports_tools_true_when_tools_in_capabilities(monkeypatch):
+    monkeypatch.setattr(
+        llm_settings.requests, "post",
+        lambda url, json=None, timeout=None: _fake_response({"capabilities": ["completion", "tools"]}),
+    )
+
+    assert llm_settings._ollama_model_supports_tools("qwen2.5-coder:14b") is True
+
+
+def test_ollama_model_supports_tools_fails_closed_when_ollama_is_unreachable(monkeypatch):
+    def _raise(*a, **k):
+        raise requests.exceptions.ConnectionError("no route")
+
+    monkeypatch.setattr(llm_settings.requests, "post", _raise)
+
+    assert llm_settings._ollama_model_supports_tools("qwen2.5-coder:14b") is False
+
+
+def test_list_model_sources_excludes_local_ollama_models_without_tool_support(monkeypatch):
+    monkeypatch.setattr(llm_settings, "list_local_ollama_models", lambda: ["qwen2.5-coder:14b", "llava:13b"])
+    monkeypatch.setattr(
+        llm_settings, "_ollama_model_supports_tools",
+        lambda name: name == "qwen2.5-coder:14b",
+    )
+
+    sources = list_model_sources()
+
+    ollama_models = next(s["models"] for s in sources if s["name"] == "ollama")
+    assert ollama_models == ["qwen2.5-coder:14b"]

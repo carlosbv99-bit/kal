@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tool_integration.base_tool import Artifact
+from sdk.artifacts import Artifact
 from utils.config import settings
 
 
@@ -96,7 +96,19 @@ _VSCODE_CLIENT_INSTRUCTION = (
     "forma mínima (p.ej., para Android: el manifest, el build.gradle, y la actividad principal con su "
     "layout), decile al usuario en tu respuesta qué archivos faltan y que te los pida a continuación, "
     "y esperá el siguiente pedido para agregarlos con otra llamada a propose_project_files. Mejor "
-    "una propuesta chica que sí se aplica, que una enorme que falla a la mitad."
+    "una propuesta chica que sí se aplica, que una enorme que falla a la mitad.\n\n"
+    "BUG REAL ENCONTRADO EN USO: pedido de agregar una foto real a una página, el modelo navegó "
+    "bien con browser (action='images') para conseguir una URL real, pero después la puso "
+    "directamente en un <img src=\"...\"> del HTML en vez de llamar import_resource — eso es un "
+    "ENLACE remoto (hotlink), NO una descarga real, y es exactamente lo que este pedido pide evitar. "
+    "Por eso, siempre que el pedido sea agregar una foto/imagen REAL (no generada por IA) que el "
+    "usuario se lleve como archivo propio del proyecto: (1) usá browser con action='images' sobre "
+    "una página real del sitio permitido para conseguir URLs de imagen REALES — nunca inventes una "
+    "URL de Unsplash/Pexels/etc. a ciegas; (2) llamá import_resource con una de esas URLs "
+    "confirmadas y un destination_path dentro de una carpeta de assets del proyecto (p.ej. "
+    "'<proyecto>/assets/foto.jpg'). NUNCA pongas esa URL directamente en el HTML como <img "
+    "src=\"https://...\"> ni la menciones como enlace — eso NO descarga ni guarda nada real, tenés "
+    "que llamar import_resource de verdad para que el archivo termine siendo parte del proyecto."
 )
 
 
@@ -137,6 +149,23 @@ class ContextService:
                 f"{active_artifact.modality} en '{active_artifact.uri}'. Si el usuario se refiere a "
                 '"la imagen"/"el audio"/"el video" sin dar más detalle, probablemente hable de este.'
             )
+            if active_artifact.modality == "image":
+                # BUG REAL ENCONTRADO EN USO: pedido "describe esta imagen"
+                # (sobre una imagen recién generada, ya anunciada como
+                # artefacto activo arriba) respondió "no puedo ver o
+                # analizar imágenes en este entorno" — el modelo tenía el
+                # path del artefacto activo Y la herramienta analyze_image
+                # disponible, pero nunca conectó una cosa con la otra,
+                # cayendo en su respuesta genérica de "no tengo visión".
+                # Mismo patrón que otros hallazgos de esta sesión: tener la
+                # herramienta disponible no alcanza sin una instrucción
+                # explícita que la conecte con la intención del usuario.
+                parts.append(
+                    "Si el usuario pide describir, analizar, o identificar qué hay en esta imagen "
+                    "(o hace una pregunta sobre su contenido), NUNCA respondas que no podés ver "
+                    "imágenes — llamá a la herramienta analyze_image con "
+                    f"image_path='{active_artifact.uri}' y question igual al pedido del usuario."
+                )
         if editor_context is not None:
             label = "selección" if editor_context.is_selection else "archivo completo"
             parts.append(

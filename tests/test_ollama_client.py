@@ -30,7 +30,7 @@ class FakeResponse:
 
 
 class FakeResourceBroker:
-    """Doble de kernel_bus/resource_broker.py::ResourceBroker — solo
+    """Doble de kernel/broker/resource_broker.py::ResourceBroker — solo
     cuenta llamadas, sin recursos reales ni psutil."""
 
     def __init__(self):
@@ -104,7 +104,7 @@ def test_chat_evicts_idle_resources_before_calling_ollama():
     de varios GB se queda en RAM para siempre, compitiendo con Ollama
     por la misma RAM del sistema (confirmado: Ollama quedaba con
     "Connection refused" justo después de generar una imagen). Ver
-    kernel_bus/resource_broker.py."""
+    kernel/broker/resource_broker.py."""
 
     def post_fn(*a, **kw):
         return FakeResponse({"message": {"content": "hola"}})
@@ -183,3 +183,46 @@ def test_is_available_false_on_connection_error():
 
     client = _client(get_fn=broken_get)
     assert client.is_available() is False
+
+
+def test_chat_attaches_images_to_last_message():
+    """Formato de /api/chat de Ollama para modelos de visión
+    (llama3.2-vision): 'images' es una lista de base64 en el mensaje,
+    no un campo separado del payload."""
+    payloads = []
+
+    def post_fn(url, json, **kw):
+        payloads.append(json)
+        return FakeResponse({"message": {"content": "una foto de un gato"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat(
+        [{"role": "user", "content": "¿qué hay en esta imagen?"}],
+        model="llama3.2-vision:latest",
+        images=["ZmFrZWJhc2U2NA=="],
+    )
+
+    assert payloads[0]["messages"][-1]["images"] == ["ZmFrZWJhc2U2NA=="]
+    assert payloads[0]["messages"][-1]["content"] == "¿qué hay en esta imagen?"
+
+
+def test_chat_without_images_does_not_add_the_key():
+    payloads = []
+
+    def post_fn(url, json, **kw):
+        payloads.append(json)
+        return FakeResponse({"message": {"content": "hola"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert "images" not in payloads[0]["messages"][-1]
+
+
+def test_chat_with_images_does_not_mutate_caller_messages():
+    original_messages = [{"role": "user", "content": "hola"}]
+    client = _client(post_fn=lambda *a, **kw: FakeResponse({"message": {"content": "ok"}}))
+
+    client.chat(original_messages, images=["abc"])
+
+    assert "images" not in original_messages[0]

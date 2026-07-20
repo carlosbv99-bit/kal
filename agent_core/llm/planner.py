@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from agent_core.llm.agent_loop import AgentLoop, AgentRunResult
 from agent_core.llm.json_extraction import extract_json_object
 from agent_core.llm.ollama_client import OllamaClient
-from tool_integration.permissions import Permission
+from sdk.permissions import Permission
 from agent_core.llm.provider import LLMProvider, ProviderError
 from utils.logger import get_logger
 
