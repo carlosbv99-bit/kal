@@ -5,7 +5,7 @@ esas capacidades durante su propia ejecución — nunca acceso implícito
 a nada que no haya declarado.
 
 De estos 9 permisos, hoy solo NETWORK tiene un motor real que lo
-aplica de forma diferenciada (network_mode en sandbox/docker_runner.py).
+aplica de forma diferenciada (network_mode en kernel/lifecycle/docker_runner.py).
 Los demás (GPU/CAMERA/MICROPHONE/CLIPBOARD/BROWSER/DOCKER) se pueden
 declarar y quedan sujetos al mismo pipeline de aprobación, pero
 SandboxExecutor los rechaza explícitamente en tiempo de ejecución
@@ -13,13 +13,13 @@ SandboxExecutor los rechaza explícitamente en tiempo de ejecución
 correspondiente — mejor negar con un error claro que fingir un
 permiso que no se puede confinar de verdad.
 
-IMPORTANTE — este archivo se copia TAL CUAL dentro de cada contenedor
-de skill (ver tool_integration/sandboxed_skill.py::_kal_runtime_files(),
-toda skill necesita `Permission` a través de `base_tool.py`). Por eso
+IMPORTANTE — este archivo forma parte del SDK (ver sdk/__init__.py) y
+se copia TAL CUAL dentro de cada contenedor de skill (ver
+kernel/registry/sandboxed_skill.py::_kal_runtime_files()). Por eso
 debe seguir siendo 100% stdlib, sin ningún import de utils.config ni de
 nada que no exista dentro del contenedor — la cascada de permisos que sí
 necesita settings.permissions vive aparte, en
-tool_integration/permission_cascade.py, que NUNCA se envía a un
+kernel/permissions/permission_cascade.py, que NUNCA se envía a un
 contenedor (solo lo usa el proceso principal, en agent_loop.py).
 """
 from __future__ import annotations

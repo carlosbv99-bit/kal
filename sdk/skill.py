@@ -1,6 +1,10 @@
 """
 Interfaz común de herramientas, tanto las predefinidas (adaptadores
-multimodales) como las creadas dinámicamente por el agente (Fase 3).
+multimodales) como las creadas dinámicamente por el agente, como las
+que declara una Skill de terceros vía skill.yaml. Parte del SDK
+público (ver sdk/__init__.py) — toda Skill subclasea `Tool` y usa
+`ToolManifest`/`Artifact` (sdk/artifacts.py) importándolos de acá,
+nunca de una ruta interna del kernel.
 
 Toda herramienta declara un Manifest explícito de permisos. El sandbox
 y el registro usan ese manifiesto para decidir aislamiento y si requiere
@@ -10,9 +14,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
 
-from tool_integration.permissions import Permission
+from sdk.artifacts import Artifact
+from sdk.permissions import Permission
 
 
 @dataclass
@@ -45,14 +49,6 @@ class ToolManifest:
             derived.add(Permission.FILESYSTEM_WRITE)
         derived.add(Permission.FILESYSTEM_READ)  # implícito: todo el workspace es legible
         self.permissions = frozenset(derived)
-
-
-@dataclass
-class Artifact:
-    """Resultado de una herramienta que genera contenido (imagen/audio/video/etc)."""
-    modality: str          # "image" | "audio" | "video" | "text" | ...
-    uri: str                # referencia en almacenamiento de objetos, no el binario en sí
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class Tool(ABC):

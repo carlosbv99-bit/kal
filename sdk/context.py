@@ -1,14 +1,13 @@
 """
-SDK minúsculo para que una skill le pida algo a un servicio del kernel
+Cliente para que una Skill le pida algo a un servicio del kernel
 (p.ej. generar una imagen) sin tener que cargar ella misma un modelo
-pesado — ver kernel_bus/__init__.py para el porqué completo.
+pesado — ver kernel/__init__.py para el porqué completo.
 
-IMPORTANTE — igual que tool_integration/base_tool.py y
-tool_integration/permissions.py, este archivo se copia TAL CUAL dentro
-de cada contenedor de skill (ver
-tool_integration/sandboxed_skill.py::_kal_runtime_files()). Por eso
+IMPORTANTE — igual que sdk/skill.py y sdk/permissions.py, este archivo
+se copia TAL CUAL dentro de cada contenedor de skill (ver
+kernel/registry/sandboxed_skill.py::_kal_runtime_files()). Por eso
 debe seguir siendo 100% stdlib (`socket`, `json`) — nunca importa nada
-de `kernel_bus` en sí: la skill solo habla el protocolo (JSON-RPC 2.0
+de `kernel` en sí: la skill solo habla el protocolo (JSON-RPC 2.0
 sobre un socket Unix), nunca recibe una referencia a un objeto Python
 del kernel.
 """
@@ -18,8 +17,8 @@ import json
 import socket
 from typing import Any
 
-# Ruta fija dentro del contenedor — sandbox/skill_runner.py y
-# tool_integration/sandboxed_skill.py se ponen de acuerdo en este mismo
+# Ruta fija dentro del contenedor — kernel/lifecycle/skill_runner.py y
+# kernel/registry/sandboxed_skill.py se ponen de acuerdo en este mismo
 # valor (el segundo monta el socket ahí antes de arrancar el contenedor).
 SOCKET_PATH = "/workspace/.kal/kernel.sock"
 
@@ -27,14 +26,14 @@ SOCKET_PATH = "/workspace/.kal/kernel.sock"
 class KernelError(Exception):
     """Un llamado al Kernel Service Bus falló — método no declarado
     para esta skill, servicio/acción inexistente, o la acción misma
-    falló del lado del kernel (ver kernel_bus/socket_server.py)."""
+    falló del lado del kernel (ver kernel/api/socket_server.py)."""
 
 
 def call(method: str, **params: Any) -> dict[str, Any]:
     """
     Le pide algo a un servicio del kernel:
 
-        from tool_integration.kernel_client import call
+        from sdk.context import call
         result = call("image.generate", prompt="un castillo medieval")
         result["artifact"]  # "artifact://image/<uuid>"
 
