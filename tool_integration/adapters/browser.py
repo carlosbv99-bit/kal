@@ -3,7 +3,7 @@ Adaptador de navegación web: extrae texto/enlaces o captura pantalla de
 una página real, vía Playwright (Chromium).
 
 A diferencia de las herramientas dinámicas que el propio agente puede
-proponer (tool_integration/registry.py), esta es una herramienta de
+proponer (kernel/registry/registry.py), esta es una herramienta de
 PRIMERA PARTE — código nuestro, no generado por el agente — y por eso
 corre fuera del sandbox de Docker, igual que ya hacen los adaptadores
 de imagen/audio/video (tampoco pasan por SandboxExecutor). El permiso
@@ -74,41 +74,29 @@ segura, aunque esto pueda rechazar de más algún caso legítimo raro.
 """
 from __future__ import annotations
 
-import ipaddress
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
 from audit.audit_log import AuditEvent, audit_log
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
-from tool_integration.permissions import Permission
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
+from kernel.permissions.network_access_manager import network_access_manager
+from kernel.permissions.network_permissions import NetworkAction, NetworkScope
+from kernel.permissions.network_safety import is_unsafe_ip
+from sdk.permissions import Permission
 from utils.config import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
-def _is_unsafe_ip(remote_ip: str | None) -> bool:
-    """
-    True si `remote_ip` no es una dirección pública "normal" — privada,
-    loopback, link-local, reservada, multicast, o no determinable. Fail
-    closed: None (no se pudo saber a qué IP se conectó Chromium de
-    verdad) se trata como inseguro, nunca como "asumimos que está bien".
-    """
-    if not remote_ip:
-        return True
-    try:
-        addr = ipaddress.ip_address(remote_ip)
-    except ValueError:
-        return True
-    return (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_multicast
-        or addr.is_unspecified
-    )
+# Nombre estable usado como skill_name ante el Access Manager de red
+# (kernel/permissions/network_access_manager.py) — mismo criterio que
+# vscode_files.py::VSCODE_INTEGRATION_SKILL_NAME. BrowserTool es
+# consumida por ambos clientes (web y VS Code), por eso un nombre
+# genérico en vez de uno atado a un cliente en particular.
+BROWSER_SKILL_NAME = "browser"
 
 
 def _server_addr_ip(response) -> str | None:
@@ -134,6 +122,22 @@ class PlaywrightBrowserDriver:
     navegación (evita contaminación de estado entre llamadas, mismo
     espíritu que "contenedor efímero por ejecución" del sandbox, aunque
     acá reutilizamos el browser en sí por costo de arranque).
+
+    BUG REAL ENCONTRADO EN USO: la API sync de Playwright no puede
+    correr en un hilo que ya tiene un event loop de asyncio asociado —
+    y el pool de threads que FastAPI/Starlette usa para despachar un
+    endpoint sync (`run_in_threadpool`, vía anyio) SÍ lo tiene, aunque
+    `/chat` esté definido como `def` normal, no `async def`. Playwright
+    lo detecta y falla con "Please use the Async API instead" apenas
+    Chromium está instalado de verdad (antes de instalarlo, el error
+    era otro y este bug quedaba escondido detrás). Fix: todas las
+    llamadas reales a Playwright corren en un `ThreadPoolExecutor`
+    propio, de UN solo worker — un hilo del sistema operativo crudo,
+    nunca tocado por anyio/sniffio — así Playwright nunca ve un event
+    loop asociado. `max_workers=1` es necesario además por Playwright
+    mismo: sus objetos (browser/page) están atados al hilo que los
+    creó, así que TODAS las llamadas de una instancia tienen que caer
+    siempre en el mismo hilo, nunca uno nuevo por llamada.
     """
 
     def __init__(self, headless: bool = True, timeout_seconds: int = 30, user_agent: str = ""):
@@ -142,6 +146,7 @@ class PlaywrightBrowserDriver:
         self.user_agent = user_agent
         self._playwright = None
         self._browser = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kal-playwright")
 
     def _ensure_browser(self):
         if self._browser is None:
@@ -158,7 +163,13 @@ class PlaywrightBrowserDriver:
         page.set_default_timeout(self.timeout_ms)
         return page
 
+    def _run(self, fn, *args):
+        return self._executor.submit(fn, *args).result()
+
     def extract_text(self, url: str, selector: str | None = None) -> tuple[str, str, str | None]:
+        return self._run(self._extract_text_impl, url, selector)
+
+    def _extract_text_impl(self, url: str, selector: str | None) -> tuple[str, str, str | None]:
         page = self._new_page()
         try:
             response = page.goto(url)
@@ -168,6 +179,9 @@ class PlaywrightBrowserDriver:
             page.close()
 
     def extract_links(self, url: str) -> tuple[list[str], str, str | None]:
+        return self._run(self._extract_links_impl, url)
+
+    def _extract_links_impl(self, url: str) -> tuple[list[str], str, str | None]:
         page = self._new_page()
         try:
             response = page.goto(url)
@@ -176,7 +190,24 @@ class PlaywrightBrowserDriver:
         finally:
             page.close()
 
+    def extract_images(self, url: str) -> tuple[list[str], str, str | None]:
+        return self._run(self._extract_images_impl, url)
+
+    def _extract_images_impl(self, url: str) -> tuple[list[str], str, str | None]:
+        page = self._new_page()
+        try:
+            response = page.goto(url)
+            # e.src (no getAttribute("src")): el DOM ya resuelve relativas a
+            # absolutas al leer la propiedad, igual que e.href en extract_links.
+            images = page.eval_on_selector_all("img[src]", "els => els.map(e => e.src)")
+            return images, page.url, _server_addr_ip(response)
+        finally:
+            page.close()
+
     def screenshot(self, url: str, path: Path) -> tuple[str, str | None]:
+        return self._run(self._screenshot_impl, url, path)
+
+    def _screenshot_impl(self, url: str, path: Path) -> tuple[str, str | None]:
         page = self._new_page()
         try:
             response = page.goto(url)
@@ -186,6 +217,10 @@ class PlaywrightBrowserDriver:
             page.close()
 
     def close(self) -> None:
+        self._run(self._close_impl)
+        self._executor.shutdown(wait=True)
+
+    def _close_impl(self) -> None:
         if self._browser is not None:
             self._browser.close()
         if self._playwright is not None:
@@ -196,13 +231,16 @@ class BrowserTool(Tool):
     manifest = ToolManifest(
         name="browser",
         description=(
-            "Navega una página web REAL (http/https) y extrae texto, enlaces, o una "
+            "Navega una página web REAL (http/https) y extrae texto, enlaces, imágenes, o una "
             "captura de pantalla. Solo funciona sobre dominios explícitamente "
             "permitidos en config.yaml (browser.allowed_domains) — si el dominio no "
             "está en la lista, la navegación se rechaza sin tocar la red. No sirve "
             "para 'ver' o inspeccionar archivos ya generados en disco (imágenes, "
             "audio, video) — esos artefactos ya quedaron guardados en la ruta que "
-            "devolvió la herramienta que los generó, no hace falta navegarlos."
+            "devolvió la herramienta que los generó, no hace falta navegarlos. "
+            "Con action='images': devuelve las URLs REALES de las imágenes de la página — usalo "
+            "para conseguir una URL de imagen real antes de import_resource, nunca inventes una "
+            "URL de un sitio de fotos a ciegas."
         ),
         requires_network=True,
         permissions=frozenset({Permission.BROWSER}),
@@ -213,9 +251,9 @@ class BrowserTool(Tool):
                 "url": {"type": "string", "description": "URL completa a visitar"},
                 "action": {
                     "type": "string",
-                    "enum": ["text", "screenshot", "links"],
+                    "enum": ["text", "screenshot", "links", "images"],
                     "default": "text",
-                    "description": "Qué extraer: texto visible, captura de pantalla, o enlaces de la página",
+                    "description": "Qué extraer: texto visible, captura de pantalla, enlaces, o URLs de imágenes de la página",
                 },
                 "selector": {
                     "type": "string",
@@ -238,12 +276,35 @@ class BrowserTool(Tool):
             )
         return self.driver
 
-    def _is_domain_allowed(self, url: str) -> bool:
-        allowed = self.cfg.allowed_domains
-        if not allowed:
-            return False  # deny-by-default: sin dominios configurados, nada permitido
-        domain = (urlparse(url).hostname or "").lower()
-        return any(domain == d or domain.endswith(f".{d}") for d in (d.lower() for d in allowed))
+    def _is_network_access_allowed(self, hostname: str) -> bool:
+        """
+        BUG REAL CORREGIDO: antes chequeaba `is_domain_allowed()`
+        directo contra `self.cfg.allowed_domains` — un dominio no
+        listado rechazaba con un error inmediato, sin ningún camino de
+        escalar a un humano ni de recordar una concesión (a diferencia
+        de kernel/permissions/filesystem_access_manager.py, que sí tenía
+        ese camino). Ahora pasa por el mismo Access Manager que ya
+        adoptó tool_integration/adapters/vscode_files.py::ImportResourceTool
+        — un dominio nuevo puede aprobarse en vivo (GET/POST /network-access),
+        con las mismas 4 escalas de concesión.
+        """
+        return network_access_manager.evaluate(
+            skill_name=BROWSER_SKILL_NAME, scope=NetworkScope.INTERNET, action=NetworkAction.BROWSE,
+            resource_key=hostname,
+        ) == "auto_allowed"
+
+    def _create_network_pending_artifact(self, hostname: str, reason: str) -> Artifact:
+        pending = network_access_manager.create_pending_request(
+            skill_name=BROWSER_SKILL_NAME, scope=NetworkScope.INTERNET, action=NetworkAction.BROWSE,
+            resource_key=hostname,
+        )
+        return Artifact(
+            modality="text", uri="",
+            metadata={
+                "status": "requires_approval", "resource_kind": "network", "request_id": pending.id,
+                "stderr": reason,
+            },
+        )
 
     def execute(self, url: str, action: str = "text", selector: str | None = None, **kwargs) -> Artifact:
         scheme = urlparse(url).scheme.lower()
@@ -258,13 +319,14 @@ class BrowserTool(Tool):
             return Artifact(modality="text", uri="", metadata={"status": "error", "stderr": reason})
 
         domain = urlparse(url).netloc or url
-        if not self._is_domain_allowed(url):
+        hostname = urlparse(url).hostname or url
+        if not self._is_network_access_allowed(hostname):
             reason = (
-                f"Dominio no permitido: '{domain}'. Agregarlo a config.yaml: "
-                "browser.allowed_domains para habilitar la navegación."
+                f"Dominio no permitido: '{domain}'. Agregarlo a config.yaml: browser.allowed_domains "
+                "para habilitar la navegación, o pedile al usuario que lo apruebe (GET /network-access)."
             )
             self._audit("failure", url, action, reason)
-            return Artifact(modality="text", uri="", metadata={"status": "error", "stderr": reason})
+            return self._create_network_pending_artifact(hostname, reason)
 
         try:
             driver = self._get_driver()
@@ -286,6 +348,15 @@ class BrowserTool(Tool):
                     return rejection
                 self._audit("success", url, action)
                 summary = "\n".join(links) if links else "(sin enlaces encontrados)"
+                return Artifact(modality="text", uri="", metadata={"summary": summary})
+
+            if action == "images":
+                images, final_url, remote_ip = driver.extract_images(url)
+                rejection = self._reject_if_unsafe_destination(url, action, final_url, remote_ip)
+                if rejection is not None:
+                    return rejection
+                self._audit("success", url, action)
+                summary = "\n".join(images) if images else "(sin imágenes encontradas)"
                 return Artifact(modality="text", uri="", metadata={"summary": summary})
 
             text, final_url, remote_ip = driver.extract_text(url, selector=selector)
@@ -317,15 +388,17 @@ class BrowserTool(Tool):
         alguno falla — el contenido ya extraído nunca se expone en ese
         caso.
         """
-        if not self._is_domain_allowed(final_url):
+        final_hostname = urlparse(final_url).hostname or final_url
+        if not self._is_network_access_allowed(final_hostname):
             reason = (
                 f"Un redirect llevó de '{original_url}' a un dominio no permitido: "
-                f"'{urlparse(final_url).hostname}'. El contenido de ese destino no se expone."
+                f"'{final_hostname}'. El contenido de ese destino no se expone — pedile al usuario que "
+                "lo apruebe (GET /network-access) antes de reintentar."
             )
             self._audit("failure", original_url, action, reason)
-            return Artifact(modality="text", uri="", metadata={"status": "error", "stderr": reason})
+            return self._create_network_pending_artifact(final_hostname, reason)
 
-        if _is_unsafe_ip(remote_ip):
+        if is_unsafe_ip(remote_ip):
             reason = (
                 f"El dominio '{urlparse(final_url).hostname}' resolvió a una dirección IP "
                 f"privada/reservada/no determinable ({remote_ip!r}) al conectar — posible DNS "

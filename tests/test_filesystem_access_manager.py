@@ -1,5 +1,5 @@
 """
-Tests de tool_integration/filesystem_access_manager.py — Permission
+Tests de kernel/permissions/filesystem_access_manager.py — Permission
 Manager del Kernel para filesystem: decide auto_allowed vs
 requires_approval por política (scope×acción), recuerda concesiones ya
 otorgadas en 4 escalas (once/session/project/skill), y audita cada
@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 
 from audit.audit_log import audit_log
-from tool_integration.filesystem_access_manager import FilesystemAccessError, FilesystemAccessManager
-from tool_integration.filesystem_permissions import FilesystemAction, FilesystemScope
+from kernel.permissions.filesystem_access_manager import FilesystemAccessError, FilesystemAccessManager
+from kernel.permissions.filesystem_permissions import FilesystemAction, FilesystemScope
 
 
 @pytest.fixture(autouse=True)
