@@ -3786,3 +3786,996 @@ tolerancia a salto de línea literal en ambos extractores), 3 en
 `test_agent_loop.py` (array crudo detectado / ignorado sin la
 herramienta ofrecida / salto de línea literal tolerado). Suite
 relacionada completa, 0 regresiones.
+
+## Dominios de assets habilitados + Playwright sync API rompía dentro del threadpool de FastAPI (2026-07-15)
+
+El usuario pidió dominios seguros para descargar imágenes/sonidos/
+plantillas web. Agregados a `config.yaml: browser.allowed_domains`
+(vacío por defecto, deny-by-default): `unsplash.com`, `pexels.com`,
+`pixabay.com` (imágenes), `freesound.org` (sonidos), `html5up.net` y
+`startbootstrap.com` (plantillas) — todas licencias permisivas
+(CC0/MIT/CC BY), sin necesitar login.
+
+Probando en vivo (con el binario de Chromium de Playwright recién
+instalado — no estaba antes, `playwright install chromium`, ~290MB),
+apareció un bug real y distinto:
+`BrowserTool` fallaba con "It looks like you are using Playwright Sync
+API inside the asyncio loop. Please use the Async API instead." — un
+error que **solo podía aparecer una vez que Chromium estuviera
+instalado de verdad** (antes fallaba antes, con "executable doesn't
+exist", escondiendo este problema).
+
+Causa real: `PlaywrightBrowserDriver` (`tool_integration/adapters/browser.py`)
+usa la API SYNC de Playwright, que no puede correr en un hilo con un
+event loop de asyncio asociado — y el pool de threads que FastAPI/
+Starlette usa para despachar `/chat` (`run_in_threadpool` vía anyio)
+SÍ lo tiene, aunque el endpoint esté definido como `def` normal, no
+`async def`.
+
+Fix: todas las llamadas reales a Playwright (`_ensure_browser`,
+`extract_text`, `extract_links`, `screenshot`, `close`) ahora corren
+en un `ThreadPoolExecutor` propio de UN solo worker — un hilo crudo
+del sistema operativo, nunca tocado por anyio, donde Playwright nunca
+detecta un event loop. `max_workers=1` no es solo por simplicidad: los
+objetos de Playwright (browser/page) quedan atados al hilo que los
+creó, así que todas las llamadas de una misma instancia tienen que
+caer siempre en el mismo hilo. Ningún otro archivo del pipeline de
+herramientas (`Tool.execute()`, `agent_loop.py`, `orchestrator.py`)
+cambió — sigue siendo síncrono de punta a punta, el aislamiento queda
+contenido dentro del driver.
+
+**Verificado real, de punta a punta**: navegar a `https://unsplash.com`
+ahora devuelve texto real de la página (el banner de cookies) en vez
+de fallar — confirmado tanto el permiso de dominio como el fix de
+threading juntos. `tests/test_browser_tool.py` (usa un driver falso
+inyectado, nunca ejercita `PlaywrightBrowserDriver` directamente) sigue
+pasando sin cambios — 0 regresiones.
+
+## VS Code: diálogos de vista previa de archivos se encolaban, mostrando siempre el más viejo (2026-07-15)
+
+El usuario pegó una captura real: después de pedir un menú con fotos
+(3 archivos) y luego, en un pedido SEPARADO, corregir la indentación
+de `index.html` (1 archivo — la respuesta de texto en el chat lo
+confirmaba correctamente: "Se prepararon 1 archivo(s)..."), el diálogo
+de VS Code que aparecía en pantalla seguía mostrando los 3 archivos
+del pedido ANTERIOR — desincronizado con lo que el chat ya mostraba.
+
+Causa real: `media/chat.js::send()` nunca deshabilitaba el
+input/botón de enviar — el usuario podía mandar un pedido nuevo
+mientras la vista previa de archivos (`showInformationMessage`
+modal) de un pedido ANTERIOR todavía esperaba una decisión. VS Code
+encola varios diálogos nativos abiertos a la vez y los muestra de a
+uno, EN ORDEN — así que el usuario seguía viendo el más viejo sin
+resolver, sin importar cuántos pedidos nuevos hiciera después. De
+paso, `handleAsk()` en `chatPanel.ts`/`chatViewProvider.ts` mandaba el
+mensaje `"answer"` (que en el webview no deshabilitaba nada, pero de
+todos modos) ANTES de esperar `maybeHandleProjectFiles()` — ningún
+lado del sistema sabía que había que esperar a que la vista previa
+se resolviera antes de aceptar un pedido nuevo.
+
+**Fix**: `chat.js::send()` deshabilita `input`/`send` al mandar un
+pedido; un mensaje nuevo `"ready"` los vuelve a habilitar — pero
+`chatPanel.ts`/`chatViewProvider.ts::handleAsk()` solo lo mandan en un
+`finally` que envuelve TODO el flujo, incluida
+`await maybeHandleProjectFiles(...)` — así el usuario físicamente no
+puede mandar un pedido nuevo hasta resolver (Aplicar/Descartar/Ver
+detalle) la vista previa del actual, eliminando la posibilidad de que
+se encolen diálogos desincronizados.
+
+Extensión reempaquetada e instalada de nuevo (lección ya conocida:
+un cambio en `vscode-extension/` no alcanza sin
+`POST /integrations/vscode/install`). Sin test de UI para esto (la
+lógica de deshabilitar/habilitar vive en `chat.js`, que corre dentro
+de un webview real — fuera del alcance de `node --test`, mismo límite
+que el resto de `media/`); `tsc` + los 29 tests existentes de la
+extensión (lógica pura, sin `vscode`) siguen pasando sin cambios.
+
+## Artifact Service (Fase 1): descarga real de imágenes desde sitios permitidos (2026-07-15)
+
+El usuario preguntó cómo pedirle a kal que agregue fotos "descargadas"
+a una página web. Investigando: no era posible — `BrowserTool` solo
+extraía texto/enlaces/captura completa (nunca `<img src>` ni el
+binario de una imagen), y `propose_project_files` solo maneja texto.
+Lo único que funcionaba era referenciar la imagen por URL directa
+(hotlink), sin copia local real.
+
+En la discusión, el usuario propuso un "Artifact Service" del Kernel
+completo (Import/Export/Download Manager, Registry de metadatos,
+múltiples orígenes: URL/GitHub/Drive/Dropbox/clipboard, cualquier tipo
+de binario). Confirmado explícitamente (`AskUserQuestion`, sobre mi
+propuesta de escopar solo imágenes): diseñar el mecanismo genérico
+completo AHORA — mismo criterio ya aplicado al Permission Manager de
+filesystem (kal se distribuye al público, no espera demanda validada
+para infraestructura de seguridad). Alcance acordado: el mecanismo es
+genérico (`type` extensible), pero el ÚNICO tipo real implementado y
+validado es `"image"` — otros orígenes/tipos quedan documentados como
+extensión futura, sin construir (sin consumidor real todavía).
+
+**Reuso real, no reinventado**: `tool_integration/malware_scan.py::scan_bytes()`
+(ClamAV, fail-closed, ya construido para artefactos de skills) —
+reusado tal cual para los bytes descargados. `filesystem_access_manager.evaluate()`
+— misma decisión de política y auditoría que ya usa
+`propose_project_files`. El mismo `Artifact(modality="project_files")`
+— se extiende con un campo `encoding` (`"utf-8"`/`"base64"`) en vez de
+un flujo de UI paralelo. El log de auditoría ya hash-encadenado sirve
+como "Metadata Index" (nuevo `EventType`: `artifact_imported`, con
+url/sha256/mime/tamaño) — no hace falta una base de datos nueva. La
+protección contra DNS rebinding y el allowlist de dominios (ya
+construidos en `browser.py`) se EXTRAEN a
+`tool_integration/network_safety.py` — el download manager los
+necesita igual, sin duplicar la lógica.
+
+**Implementado**:
+- `tool_integration/network_safety.py` (nuevo): `is_unsafe_ip()`/
+  `is_domain_allowed()`, extraídas de `browser.py` (que ahora importa
+  de acá en vez de tener su propia copia).
+- `tool_integration/download_manager.py` (nuevo): `DownloadManager.download_and_validate(url, expected_type)`
+  — fail-closed en cada paso: esquema (https siempre, http solo si
+  `downloads.allow_http`), dominio (`downloads.allowed_domains`,
+  deny-by-default), IP insegura (resuelve el host, rechaza
+  privada/reservada — mismo límite conocido que `browser.py`: ventana
+  de carrera entre resolución y conexión, aceptado, documentado),
+  streaming con tope real de tamaño (`downloads.max_size_mb`, nunca
+  descarga todo primero para recién ahí medir), escaneo ClamAV,
+  validación real de imagen (Pillow `Image.verify()` — rechaza bytes
+  basura con extensión de imagen), hash SHA-256.
+- `config/config.yaml: downloads:` — nueva sección, deliberadamente
+  SEPARADA de `browser:` (semántica distinta: sin JS/cookies, con tope
+  de tamaño) aunque con los mismos dominios ya confiados
+  (unsplash/pexels/pixabay/freesound/html5up/startbootstrap).
+- `tool_integration/adapters/browser.py`: acción nueva `"images"`
+  (`img[src]`, mismo patrón que `"links"` con `a[href]`) — para que el
+  modelo consiga una URL de imagen REAL antes de importarla, en vez de
+  inventar una a ciegas.
+- `tool_integration/adapters/vscode_files.py::ImportResourceTool`
+  (`import_resource`, nueva): descarga+valida, llama al Permission
+  Manager (mismo `evaluate()` que `propose_project_files`), audita
+  `artifact_imported`, y devuelve el archivo como
+  `project_files`/`encoding: "base64"` — el mismo flujo de vista previa
+  y Aplicar/Descartar ya construido, sin UI paralela.
+- `vscode-extension/src/kalClient.ts`/`projectFiles.ts`: soporte de
+  `encoding: "base64"` al escribir (`Buffer.from(content, "base64")`)
+  y un placeholder (`[archivo binario, ~N KB]`) en "Ver detalle" en vez
+  de volcar el blob base64 crudo.
+- `agent_core/context_service.py::_VSCODE_CLIENT_INSTRUCTION`: nueva
+  instrucción — navegar con `browser action='images'` primero para
+  conseguir una URL real, y LLAMAR `import_resource` de verdad
+  (reforzado tras un hallazgo real: la primera versión de la
+  instrucción hizo que el modelo navegara bien pero después pusiera la
+  URL encontrada directo en un `<img src="...">` del HTML — un hotlink,
+  no una descarga real, exactamente lo que el pedido quería evitar).
+
+**Verificado real, de punta a punta, contra el proceso vivo**: pedido
+real ("agregá una foto real de comida descargada a la página web del
+restaurante") — el modelo navegó con `browser action='images'`,
+consiguió URLs reales de Unsplash, y llamó `import_resource` de
+verdad. `logs/audit.log` muestra `artifact_imported` con la URL real,
+`sha256`, `mime: "image/jpeg"`, y `size_bytes: 1974639` — una imagen
+JPEG real de ~2MB, descargada, escaneada con ClamAV real (confirmado
+instalado), validada como imagen real con Pillow, y hasheada. 29 tests
+nuevos: 7 en `test_network_safety.py`, 10 en `test_download_manager.py`
+(incluido un test con ClamAV real sin mockear, mismo criterio que
+`test_malware_scan.py`), 7 en `test_import_resource_tool.py`, 2 en
+`test_browser_tool.py` (acción `images`), 2 en `test_agent_loop.py`
+(exclusión de `import_resource` para el cliente web), 1 en
+`test_context_service.py` (instrucción de navegar antes de importar).
+Suite completa sin regresiones.
+
+**Fuera de alcance de esta fase, documentado explícitamente**: otros
+orígenes de importación (GitHub, Google Drive, Dropbox, clipboard,
+archivo local) y otros tipos de recurso (PDF, video, SVG, ZIP, modelos
+3D) — el mecanismo (`type`/`url`/validación/auditoría) queda listo
+para agregar cualquiera de estos, pero ninguno tiene un consumidor
+real hoy; `type` rechaza cualquier valor sin validador implementado,
+nunca acepta un binario sin poder confirmar de verdad qué es. Tampoco
+hay un "Artifact Registry" como estructura de datos propia y
+consultable (el log de auditoría cumple ese rol por ahora) ni un
+Export Manager (sin pedido real de "exportar" nada todavía).
+
+## Análisis de imágenes con modelo de visión — y una regresión real de Ollama descubierta probando en vivo (2026-07-19)
+
+El usuario descargó `llama3.2-vision:latest` localmente y pidió poder
+subir una imagen para que kal la analice/describa. La interfaz web ya
+tenía subida de imágenes propias (botón 📎, `POST /uploads`), pero solo
+para herramientas de EDICIÓN
+(`tool_integration/adapters/image_editing.py`) — ningún componente
+llamaba nunca a un modelo de visión: `OllamaClient.chat()` no soportaba
+el campo `images` de la API de Ollama.
+
+**Implementado, mismo patrón que `SpeechToTextTool`** (una herramienta
+que devuelve texto, no un artefacto nuevo):
+- `agent_core/llm/ollama_client.py::OllamaClient.chat()`: parámetro
+  nuevo `images: list[str] | None` (base64), se adjunta al ÚLTIMO
+  mensaje sin mutar la lista del llamador — formato real de `/api/chat`
+  de Ollama para modelos de visión. Default `None`, cero cambio para
+  los 3 call sites existentes.
+- `utils/config.py`/`config/config.yaml`: `multimodal.vision` nuevo
+  (`backend`, `model`, y un `base_url` PROPIO).
+- `tool_integration/adapters/image_analysis.py::ImageAnalysisTool`
+  (`analyze_image`, nueva): `image_path` + `question` → lee el
+  archivo, base64, llama al modelo de visión, devuelve
+  `Artifact(modality="text", metadata={"answer": ...})`. Fail-closed:
+  archivo inexistente o error del proveedor nunca crashea. Registrada
+  en `tool_integration/registry.py`, disponible para ambos clientes
+  (sin restricción, a diferencia de `propose_project_files`/
+  `import_resource`).
+
+**Bug real encontrado probando en vivo (el primero, antes de tocar el
+modelo)**: `OllamaClient()` sin argumentos toma `settings.llm.base_url`
+por defecto — pero ese campo ahora apunta a Groq (perfil de nube activo
+en esta sesión, ver "default_model quedaba pegado a Ollama..." arriba).
+La primera corrida del smoke test le pegó a
+`https://api.groq.com/openai/v1/api/chat` (404) en vez de al Ollama
+local. Corregido con un `base_url` PROPIO en `VisionConfig`
+(`http://localhost:11434`, fijo) — la capacidad de visión, como
+`image_gen`/`audio_gen`/`speech_to_text`, tiene que hablar siempre con
+su modelo local, sin importar qué proveedor use el "cerebro" del agente
+para decidir qué herramienta llamar.
+
+**Segundo bug real, mucho más serio — no era de este código**: con el
+`base_url` ya corregido, la llamada seguía fallando: `500 Internal
+Server Error: llama-server process has terminated ... unknown model
+architecture: 'mllama'`. Confirmado con `ollama run llama3.2-vision`
+directo desde la CLI (sin pasar por kal): falla igual. Investigado
+(GitHub `ollama/ollama#16547`): Ollama ≥0.30.0 migró a un motor
+`llama.cpp` unificado que NUNCA soportó de forma nativa la arquitectura
+`mllama` de Llama 3.2 Vision — el soporte anterior era un parche
+privado de Ollama, no upstream, y se perdió al migrar de motor. Sin
+arreglo ni ETA de ningún lado (ni Ollama ni llama.cpp) al momento de
+escribir esto. La versión instalada en esta máquina (0.31.1) está
+afectada.
+
+**Solución real**: en vez de esperar el fix de Ollama, se bajó
+`llava:13b` (arquitectura CLIP, sí soportada de forma nativa) como
+modelo de visión por defecto — decisión del usuario entre 3
+alternativas presentadas (llava:13b/minicpm-v/moondream). Cero cambio
+de código necesario: `multimodal.vision.model` ya era configurable.
+Verificado real, de punta a punta: una imagen de prueba (círculo azul +
+rectángulo amarillo generada con Pillow) → `analyze_image` real →
+`llava:13b` real vía Ollama real → descripción correcta de forma y
+colores. `llama3.2-vision:latest` queda descargado en la máquina pero
+inutilizable hasta que Ollama o llama.cpp resuelvan la regresión —
+documentado en el comentario de `VisionConfig.model`, no escondido.
+
+4 tests nuevos en `test_ollama_client.py` (adjunta `images` al último
+mensaje sin mutar la lista original, no agrega la clave si no se pasa),
+5 en `test_image_analysis_tool.py` (archivo inexistente, éxito con
+cliente falso, error del proveedor, manifest, `base_url` propio vs.
+`llm.base_url`). Suite completa sin regresiones.
+
+## Tercer bug real, mucho más grave: el fix de Groq para `arguments` rompía CUALQUIER conversación de más de un paso contra Ollama nativo (2026-07-19)
+
+Al probar el feature de arriba en vivo (usuario cambió el modelo del
+selector "Modelo" del chat), apareció un error nuevo y aparentemente
+sin relación: `Ollama devolvió un error HTTP: 400 Client Error: Bad
+Request` — hasta con un simple "hola" (que dispara `audio_generation`
+como comportamiento default de la interfaz web) volvía a fallar en el
+turno SIGUIENTE al de la llamada a la herramienta. Investigado en
+vivo, con el body real de la respuesta de Ollama capturado (envolviendo
+`OllamaClient._post` con un wrapper de depuración, ya que
+`OllamaError` solo guarda `str(exc)`, sin el cuerpo): `{"error":"Value
+looks like object, but can't find closing '}' symbol"}`.
+
+Aislado con variantes mínimas contra el Ollama real de esta máquina:
+la causa NO era el `content` (que en el camino de fallback trae texto
+crudo con forma de JSON) sino `tool_calls[].function.arguments` — Ollama
+nativo (`/api/chat`) exige que sea el OBJETO ya parseado, nunca un
+string con JSON adentro. Ese string es exactamente lo que
+`agent_core/llm/agent_loop.py` empezó a mandar SIEMPRE
+(`json.dumps(tc.arguments)`) tras el fix de interoperabilidad con Groq
+del 2026-07-14 (ver "Groq rompía cualquier tarea de más de un paso" más
+arriba) — ese fix estaba documentado como algo que "Ollama tolera", pero
+en la práctica Ollama no tolera el string, rechaza con 400 la plantilla
+de su motor de chat al intentar renderizarlo. Como el `provider` activo
+en esta sesión venía siendo `openai_compatible` (Groq) hasta hace poco,
+esta regresión llevaba días sin manifestarse — recién se hizo visible
+al volver a `provider: ollama` como parte de las pruebas de hoy.
+
+**Corregido en la capa correcta**: `agent_loop.py` ahora arma
+`tool_calls[].function.arguments` en formato CANÓNICO (el dict ya
+parseado, sin `json.dumps`) — el núcleo del loop no debe conocer el
+wire format de un proveedor concreto (mismo principio que ya documenta
+`agent_core/llm/provider.py`). La necesidad real de un string
+(Groq/OpenAI-strict) se resolvió DENTRO de
+`OpenAICompatibleClient.chat()`
+(`_with_stringified_tool_call_arguments()`, nueva): serializa
+`arguments` a JSON string en el payload saliente, sin mutar la lista
+`messages` del llamador (mismo criterio que `OllamaClient.chat()` con
+`images`, ver más arriba). `OllamaClient` no necesitó ningún cambio —
+ya reenviaba `messages` tal cual.
+
+Además, un bug aparte encontrado en el camino (arreglado hoy mismo,
+independiente): el modelo elegido en el selector "Modelo" de la web
+(`llava:13b`, un modelo de VISIÓN sin soporte de tool-calling) había
+quedado como `llm.default_model` — Ollama rechaza con 400
+("does not support tools") CUALQUIER request con `tools` contra ese
+modelo, rompiendo el chat de punta a punta con solo escribir "hola".
+Restaurado a `qwen2.5-coder:14b` (con capacidad `tools` confirmada vía
+`/api/show`) usando el propio endpoint `POST /settings/llm` del
+servidor en vivo. El selector de modelo hoy no distingue entre modelos
+con y sin soporte de herramientas — queda como deuda conocida, no
+corregida en esta sesión (fuera del alcance del pedido original).
+
+Verificado real, de punta a punta, contra el servidor vivo:
+`ejecutá este código: print(sum(range(1,11)))` → llamó `run_code`,
+ejecutó de verdad, devolvió "55", respuesta final correcta — el mismo
+flujo de dos turnos que antes rompía con 400 en cuanto había una
+herramienta de por medio. 1 test de `test_agent_loop.py` reescrito
+(`test_reconstructed_tool_call_arguments_stay_as_a_dict_ollama_native_format`,
+antes asumía el comportamiento viejo) + 1 test nuevo en
+`test_openai_compatible_client.py`
+(`test_chat_stringifies_outgoing_tool_call_arguments_before_sending`).
+Suite completa sin regresiones.
+
+## Dos bugs reales más probando analyze_image en vivo: el modelo no conectaba la herramienta, y su respuesta se perdía en el camino (2026-07-19)
+
+Con los bugs de arriba corregidos, el usuario probó el flujo real:
+generó una imagen ("generame una imagen de un león") y después pidió
+"describe esta imagen". Primera vuelta: kal respondió "Lo siento, pero
+no puedo ver o analizar imágenes en este entorno" — ni siquiera
+INTENTÓ llamar a `analyze_image`, pese a tenerla disponible y pese a
+que el artefacto activo (con su path real) ya se anunciaba en el
+contexto. Mismo patrón que ya documentó
+[[technical_vscode_client_tool_restriction]] y otros hallazgos de esta
+sesión: tener la herramienta disponible, y hasta mencionar el path del
+artefacto activo, no alcanza para que el modelo conecte un pedido
+conversacional ("describe esta imagen") con la llamada real — sin una
+instrucción explícita, cae en su respuesta genérica de "no tengo
+visión".
+
+**Corregido**: `agent_core/context_service.py::_build_session_context()`
+ahora agrega, específicamente cuando el artefacto activo es
+`modality="image"`, una instrucción explícita: si piden describir/
+analizar/identificar contenido de la imagen, llamar a `analyze_image`
+con `image_path` igual al artefacto activo — nunca responder que no
+se pueden ver imágenes.
+
+Con eso corregido, apareció un SEGUNDO bug real en la misma prueba: el
+modelo SÍ llamó a `analyze_image` con el path correcto, pero la
+`observation` que le llegó de vuelta fue literalmente `"(sin salida)"`
+— la respuesta real de `llava:13b` se perdía por completo.
+Investigado: `agent_core/llm/agent_loop.py::_artifact_to_observation()`
+tiene una convención de dos ramas para `modality="text"`: si
+`"status"` está en `metadata`, asume la forma de `run_code` (espera
+`"stdout"`); si no, y hay `"summary"`, lo muestra tal cual (la
+convención que ya usa `speech_to_text.py`). `ImageAnalysisTool` había
+usado `{"status": "success", "answer": ...}` — cayó en la rama
+equivocada, buscando una clave `"stdout"` que nunca existía. Corregido
+adoptando la convención de `"summary"` (sin `"status"` en el caso de
+éxito; el caso de error sigue usando `"status": "error"` +
+`"stderr"`, que sí toma la rama correcta).
+
+Verificado real, de punta a punta, en una sola sesión sin reinicios de
+por medio: "generame una imagen de un gato" → "describe esta imagen"
+→ `analyze_image` real, con el path correcto, devolvió una
+descripción real y detallada (correctamente notó que era una foto
+díptico de un gato, con detalles de la postura y el entorno) — ni
+placeholder ni "no puedo ver imágenes". 4 tests nuevos
+(`test_context_service.py`: 2 sobre la instrucción nueva;
+`test_agent_loop.py`: 1 sobre la convención `"summary"` de
+`_artifact_to_observation`; `test_image_analysis_tool.py`: actualizado
+a la nueva convención). Suite completa (742 tests) sin regresiones.
+
+## El selector de modelo dejaba elegir un modelo sin tool-calling y rompía TODO el chat — corregido de raíz (2026-07-19)
+
+El usuario volvió a cambiar el modelo del selector web a `llava:13b`
+(esta vez ya con el flujo generar+describir imagen funcionando bien
+antes del cambio) y el chat "dejó de responder". Mismo error de fondo
+que ya se había visto y "resuelto a mano" horas antes (restaurando
+`default_model` vía `POST /settings/llm`): Ollama rechaza con 400
+(`"llava:13b does not support tools"`) CUALQUIER mensaje con `tools`
+en el payload — y kal SIEMPRE manda `tools`, así que cualquier modelo
+sin esa capacidad como `default_model` rompe el chat entero, hasta un
+simple "hola". Esta vez, en vez de dejarlo como "deuda conocida" (como
+se documentó horas antes), se corrigió de raíz: nada impedía
+elegirlo, ni en el selector ni en el backend.
+
+**Corregido en dos capas**:
+1. `agent_core/llm_settings.py::_ollama_model_supports_tools()`
+   (nueva): consulta `POST /api/show` de Ollama (la MISMA fuente de
+   verdad ya usada para diagnosticar este bug, `capabilities` incluye
+   `"tools"` o no) — a diferencia de `_is_chat_capable_model_name()`
+   (heurística por palabras clave, la única opción para proveedores en
+   la nube sin API de capacidades), acá SÍ hay una respuesta real y
+   confiable. Fail-closed: si Ollama no responde, el modelo no aparece
+   (mismo criterio que un perfil de nube roto).
+2. `list_model_sources()` ahora filtra los modelos Ollama locales por
+   esta capacidad — `llava:13b` (y cualquier otro modelo de solo
+   visión) ya NO aparece en el selector del chat.
+3. `update_llm_settings()` valida lo mismo ANTES de escribir nada (ya
+   prometía esto en su docstring) — defensa en profundidad por si se
+   pide un modelo sin soporte de tools por fuera del selector (llamada
+   directa al endpoint): rechaza con un `LLMSettingsError` claro en vez
+   de aceptar un estado roto.
+
+Nota real encontrada de paso: `llama3.2-vision:latest` SÍ reporta
+`"tools"` en sus capabilities (arquitectónicamente cierto), pese a
+estar roto por la regresión de `mllama` documentada más arriba — ese
+es un fallo de CARGA del modelo (500, recién al intentar usarlo),  no
+de capacidad declarada, así que este filtro no lo detecta; ya estaba
+documentado como inutilizable en el comentario de `VisionConfig.model`
+y no se resuelve acá.
+
+Verificado en vivo contra el servidor real: `POST /settings/llm` con
+`default_model: "llava:13b"` ahora devuelve 400 con el mensaje claro,
+sin tocar la config; `GET /settings/llm/sources` ya no incluye
+`llava:13b` en la lista de modelos locales. 6 tests nuevos
+(`test_llm_settings.py`): 3 sobre `_ollama_model_supports_tools()`
+(lee capabilities, true/false, fail-closed), 1 sobre el filtro en
+`list_model_sources()`, 2 sobre la validación en
+`update_llm_settings()` (rechaza/acepta). Suite completa sin
+regresiones.
+
+## Explicar, no solo bloquear: capacidades visibles + ventana con motivo real (2026-07-19)
+
+El usuario probó de nuevo el mismo cambio de modelo problemático
+("¿tendré problemas si necesito un modelo en la nube?" — no, el filtro
+es específico de `provider: "ollama"`) y después pidió, para el caso de
+elegir un modelo de visión como cerebro: "que salte una ventana con una
+explicación". El filtro de la sección anterior ya lo IMPIDE (llava:13b
+ni aparece en el selector), pero eso deja dos huecos reales: (1) el
+usuario no entiende POR QUÉ un modelo que sí ve en "modelos locales
+descargados" no aparece arriba en el selector del chat, y (2) el
+listener de "change" del selector no tenía ningún `try/catch` — si el
+backend llegara a rechazar el cambio por cualquier motivo (este u
+otro), la falla quedaba silenciosa (promesa sin manejar), sin ningún
+aviso visible.
+
+**Corregido**:
+- `agent_core/llm_settings.py::get_ollama_model_capabilities()`
+  (nueva, extraída de `_ollama_model_supports_tools()` sin duplicar la
+  llamada a `/api/show`): devuelve la lista real de capacidades de un
+  modelo (`["completion", "tools"]`, `["completion", "vision"]`, etc.),
+  no solo un booleano.
+- `GET /settings/llm/ollama/models` ahora incluye
+  `capabilities: {modelo: [...]}` junto a la lista de modelos.
+- `frontend/app.js::refreshModelSettings()`: cada modelo en la lista
+  de "modelos locales" de la pestaña Modelo ahora se anota con lo que
+  puede hacer ("puede ser el cerebro del chat" / "solo visión, no
+  soporta herramientas") — así el usuario entiende por qué falta del
+  selector de arriba SIN necesitar que nada falle primero.
+- `model-select` (listener de "change"): ahora envuelto en
+  `try/catch` — cualquier rechazo del backend (mismo mensaje claro que
+  ya arma `update_llm_settings()`) dispara una ventana (`alert()`) con
+  la explicación real, y restaura el selector al modelo que sigue
+  activo de verdad (mismo patrón que ya existía para el caso
+  `:cloud`, ahora generalizado a cualquier error).
+
+Verificado en vivo: `GET /settings/llm/ollama/models` devuelve
+`capabilities` reales para los 5 modelos locales de esta máquina
+(`llava:13b` → `["completion", "vision"]`, `qwen2.5-coder:14b` →
+`["completion", "tools", "insert"]`, etc.); `node --check` sobre
+`app.js` sin errores de sintaxis. 2 tests nuevos
+(`get_ollama_model_capabilities`: devuelve la lista real / vacía si
+Ollama no responde) + 1 test de endpoint actualizado a la nueva forma
+de la respuesta. Suite completa sin regresiones.
+
+## Access Manager genérico: Permission Manager unificado, Fase 1 (Filesystem + Network) (2026-07-19)
+
+El usuario propuso una evolución grande de arquitectura (kernel/ como
+módulo independiente, SDK oficial, Permission Manager unificado,
+Knowledge Service evolucionado, Integration Manager). Relevamiento
+completo del código real antes de diseñar: hoy NO hay un sistema de
+permisos disperso, hay TRES mecanismos ORTOGONALES —
+`PermissionCascade` (¿puede esta herramienta pedir esta CAPACIDAD en
+absoluto?, por nivel de confianza), `FilesystemAccessManager` (el más
+maduro: política + escalamiento humano + 4 escalas de concesión
+persistentes + auditoría) y Red (`network_safety.py`/`download_manager.py`
+— hoy solo una allowlist ESTÁTICA, sin ningún camino de escalar a un
+humano). Acordado con el usuario: Knowledge Service e Integration
+Manager siguen pospuestos (sin nueva evidencia); de los tres restantes
+(kernel/, SDK, Permission Manager), arrancar por Permission Manager —
+menor riesgo, mayor valor inmediato.
+
+**Decisión de diseño explícita del usuario** (la más importante de
+esta fase): NO extraer/generalizar `FilesystemAccessManager` tratando
+a Network como un caso derivado. En cambio, construir un motor
+`AccessManager` GENÉRICO e independiente de recurso, del que Filesystem
+y Network sean los dos primeros ADAPTADORES — para que un futuro
+adaptador de Terminal o Modelos se sienta como reusar el componente
+que siempre fue para arbitrar acceso a cualquier recurso, no como
+"adaptar un gestor de archivos".
+
+**Implementado**:
+- `tool_integration/access_manager.py` (nuevo): motor genérico —
+  `scope`/`action` como `str` libres (no un enum específico), política
+  inyectada vía callback `is_auto_allowed(scope, action, resource_key)`
+  (a diferencia del `_is_policy_auto_allowed(scope, action)` viejo de
+  filesystem, que ignoraba `resource_key` — Network SÍ necesita mirar
+  el dominio concreto), 4 escalas de concesión (once/session/project/skill),
+  auditoría con `event_type_prefix` parametrizado. Sin ningún `import`
+  de utils.config — el core no sabe qué consumidor lo usa.
+- `tool_integration/filesystem_access_manager.py` reescrito como
+  ADAPTADOR delgado sobre el motor — API pública IDÉNTICA
+  (`evaluate()`, `create_pending_request()`, `list_pending()`,
+  `approve()`, `deny()`, `PendingFilesystemAccess`,
+  `FilesystemAccessError`), cero cambios para sus consumidores
+  actuales (`vscode_files.py`, endpoints `/filesystem-access/*`, la
+  extensión de VS Code). Los 22 tests existentes pasan SIN
+  modificación — prueba de que el refactor no cambió comportamiento
+  observable.
+- `tool_integration/network_permissions.py` +
+  `tool_integration/network_access_manager.py` (nuevos): segundo
+  adaptador real. `resource_key` es el hostname (no la URL completa);
+  reusa la política YA existente (`downloads.allowed_domains`) — sin
+  ninguna config nueva. `NetworkAction.BROWSE` declarado pero sin
+  conectar todavía (mismo criterio que `FilesystemAction.DELETE/RENAME`:
+  taxonomía completa, sin consumidor real aún).
+- `tool_integration/network_safety.py`: extraído `is_hostname_allowed()`
+  (la lógica de matching pura); `is_domain_allowed()` pasa a ser un
+  wrapper delgado, sin cambiar su comportamiento público.
+- `tool_integration/adapters/vscode_files.py::ImportResourceTool`:
+  gate de red ANTES de descargar — dominio no permitido ahora crea una
+  solicitud pendiente real (`Artifact` con `status: "requires_approval"`,
+  `resource_kind: "network"`) en vez de fallar con un error inmediato
+  sin salida.
+- `agent_core/orchestrator.py`: endpoints `/network-access/*`
+  (`GET` lista pendientes, `POST .../approve` y `.../deny` con token
+  admin) — mismo patrón que `/filesystem-access/*`, SIN el equivalente
+  a `report-outcome` (una descarga sucede enteramente dentro del
+  backend, que ya sabe el resultado real sin que nadie se lo reporte).
+- `audit/audit_log.py`: 4 `EventType` nuevos
+  (`network_access_requested/granted/denied/escalated`).
+
+**Bug real encontrado probando el flujo completo en vivo (aprobar un
+dominio nuevo y reintentar)**: tras aprobar, la descarga SEGUÍA
+fallando — `download_manager.py` tenía SU PROPIO chequeo de allowlist
+de dominios (`is_domain_allowed` contra `settings.downloads.allowed_domains`
+estático), una SEGUNDA fuente de verdad que no sabía nada de la
+concesión recién otorgada por `network_access_manager`. Corregido
+quitando ese chequeo de `download_manager.py` — el gate de dominio
+pasa a ser responsabilidad exclusiva de quien llama (`ImportResourceTool`,
+que ya gatea vía `network_access_manager` ANTES de descargar). El
+resto de las validaciones de `download_manager` (IP segura, tamaño,
+malware, contenido real) siguen intactas.
+
+Verificado real, de punta a punta: URL de un dominio no listado →
+`requires_approval` con `request_id` real; `network_access_manager.approve(id, level="once")`
+→ el siguiente intento del MISMO dominio vuelve a pedir aprobación
+(once nunca se recuerda); `approve(id, level="project")` → el
+siguiente intento pasa el gate de red y llega hasta el paso real
+siguiente (resolución DNS) — confirmando que la concesión tiene efecto
+real, no solo en el gate sino en la descarga de verdad. 27 tests
+nuevos (`test_access_manager.py`: 16, motor genérico;
+`test_network_access_manager.py`: 11, adaptador de red) + tests
+existentes actualizados (`test_import_resource_tool.py`: nuevo caso de
+`requires_approval` de red; `test_download_manager.py`: quitado el
+test del chequeo de dominio ahora removido; `test_network_safety.py`:
+`is_hostname_allowed`; `test_orchestrator_admin_auth.py`: gate de
+token en `/network-access/*`). Suite completa sin regresiones.
+
+**Fuera de alcance de esta fase, documentado explícitamente**:
+`BrowserTool` (`adapters/browser.py`) sigue con su chequeo de
+allowlist directo, sin escalamiento — el mecanismo genérico queda
+listo para que lo adopte después, evitando duplicar el riesgo de
+tocar sus dos puntos de chequeo (pre-navegación + destino tras
+redirect) en la misma pasada que construye el motor nuevo.
+`PermissionCascade` sin cambios (capa aparte y complementaria).
+Terminal/Modelos como nuevos "resource_kind" — pospuestos, sin
+consumidor real todavía. Reestructuración a `kernel/` y SDK oficial —
+próximos pasos, fuera de esta fase.
+
+## BrowserTool adopta el Access Manager de red — segundo consumidor real (2026-07-20)
+
+Siguiendo lo pospuesto explícitamente en la fase anterior:
+`tool_integration/adapters/browser.py::BrowserTool` reemplaza su
+rechazo duro de dominio (`is_domain_allowed()` directo, sin ningún
+camino de escalar) por el mismo `network_access_manager` que ya usa
+`ImportResourceTool` — con las mismas 4 escalas de concesión y
+auditoría. Dos puntos de chequeo migrados: el gate PRE-navegación
+(antes de llamar a Playwright) y el chequeo POST-redirect
+(`_reject_if_unsafe_destination`, que valida el destino REAL tras
+seguir cualquier redirect — ver "BUG REAL ENCONTRADO EN HARDENING F5"
+en el docstring del módulo). El chequeo de IP insegura (DNS rebinding,
+Fase E6) queda intacto, sin relación con este cambio.
+
+`NetworkAction.BROWSE` (declarada pero sin conectar en la fase
+anterior) ahora tiene una fuente de política real:
+`network_access_manager.py::_is_policy_auto_allowed()` reusa
+`settings.browser.allowed_domains` para BROWSE (mismo criterio que
+DOWNLOAD con `downloads.allowed_domains`) — sin ninguna config nueva.
+Nuevo `BROWSER_SKILL_NAME = "browser"` (mismo patrón que
+`VSCODE_INTEGRATION_SKILL_NAME` de `vscode_files.py`) — genérico
+porque `BrowserTool` la usan ambos clientes (web y VS Code), no solo
+uno.
+
+**Bug real de aislamiento de tests encontrado en el camino**: un test
+nuevo (aprobar un dominio con `level="project"` y confirmar que un
+reintento ya no escala) usaba el singleton REAL de
+`network_access_manager` — que persiste concesiones en
+`data/keys/network_grants.json`, un archivo real en disco, NO aislado
+entre corridas de test. La primera corrida del test pasaba (creaba la
+concesión real); la segunda corrida del MISMO test fallaba (`KeyError:
+'request_id'`) porque el dominio ya estaba auto-permitido por la
+concesión que la corrida ANTERIOR había persistido de verdad —
+confirmado con `cat data/keys/network_grants.json` mostrando el grant
+real. Corregido inyectando una instancia propia de
+`NetworkAccessManager` con `grants_path` en `tmp_path` (mismo patrón
+de aislamiento que ya usan `test_filesystem_access_manager.py` y
+`test_network_access_manager.py`), vía
+`monkeypatch.setattr(browser_module, "network_access_manager", ...)`
+— el archivo real contaminado (con entradas de este mismo test y de
+smoke tests manuales anteriores) se eliminó (`data/keys/` está en
+`.gitignore`, solo estado local de desarrollo).
+
+Verificado en vivo contra el servidor real: `BrowserTool().execute(url="https://sitio-no-permitido.../")`
+devuelve `status: "requires_approval"` con un `request_id` real que
+aparece en `network_access_manager.list_pending()`. Suite del área (92
+tests) corrida DOS veces seguidas para confirmar idempotencia real
+(sin el fix, la segunda corrida fallaba) — ambas veces sin fallos.
+Tests nuevos/actualizados: 4 en `test_browser_tool.py` (2 casos
+existentes migrados a `requires_approval`, 2 nuevos: pending request
+real + ciclo aprobar→reintentar), 1 en `test_network_access_manager.py`
+(BROWSE ya conectado, reemplaza el test viejo de "sin política
+todavía"). Suite completa sin regresiones.
+
+**Fuera de alcance, sin cambios**: `PermissionCascade`, Terminal/Modelos
+como `resource_kind`, reestructuración a `kernel/` y SDK oficial —
+siguen siendo los próximos pasos acordados, todavía no abordados.
+
+## kernel/ como módulo independiente + SDK oficial (2026-07-20)
+
+Cierre de la evolución de arquitectura: tras el Permission Manager
+unificado (Access Manager genérico + BrowserTool como segundo
+adaptador de red), el usuario pidió terminar con los dos puntos
+restantes — reestructurar a `kernel/` y construir el SDK oficial.
+Relevamiento previo (conteo real de consumidores por grep, no
+estimación): ~90 archivos únicos importaban algo de
+`tool_integration.{permissions,permission_cascade,access_manager,
+filesystem_*,network_*,registry,skills,sandboxed_skill,versioning,
+signing,skill_market,skill_signing,base_tool,kernel_client}`,
+`kernel_bus.*` o `sandbox.*`.
+
+**Hallazgo clave que motivó el diseño**: el SDK YA EXISTÍA en forma
+embrionaria, sin nombrarse como tal —
+`tool_integration/sandboxed_skill.py::_kal_runtime_files()` ya copiaba
+literal `base_tool.py`/`permissions.py`/`kernel_client.py` dentro de
+cada contenedor de skill, y `kernel_client.py` se autodescribía en su
+propio docstring como "el SDK minúsculo que la skill usa del otro
+lado". El problema real ("una Skill conoce demasiados detalles
+internos") era concreto y verificable:
+`skills/qr_code/tool.py` hacía
+`from tool_integration.base_tool import Artifact, Tool` — un import
+directo a una ruta interna del kernel.
+
+**Decisión de diseño explícita del usuario** (confirmada antes de
+implementar): NO extraer/generalizar módulos existentes tratando al
+resto como derivado — construir `sdk/` como la base PURA (Tool,
+ToolManifest, Artifact, Permission, 100% stdlib) de la que `kernel/`
+DEPENDE (nunca al revés), y reorganizar TODO lo genérico
+(`tool_integration.{permission*,access_manager,filesystem_*,network_*,
+registry,skills,sandboxed_skill,versioning,signing,skill_market,
+skill_signing}`, `kernel_bus/*`, `sandbox/*`) bajo `kernel/` con una
+estructura de 6 subpaquetes: `api/` (protocolo+bus+socket_server+
+sandbox_api), `services/` (ImageService/AudioService/STTService),
+`broker/` (Resource Broker), `registry/` (alta/baja de herramientas y
+Skills), `permissions/` (Permission Manager unificado), `lifecycle/`
+(ejecución aislada: Docker runner/executor/skill_runner/skill_image_builder,
+Dockerfile, scripts eBPF). Sin `kernel/scheduler/` — mismo criterio ya
+aplicado a Terminal/Modelos: sin ningún candidato real hoy.
+`tool_integration/` queda reducido a lo que siempre fue realmente
+concreto: `adapters/`, `download_manager.py`, `malware_scan.py`.
+
+**Ejecución**: movimiento con `git mv` (preserva historia) en 5
+etapas (permisos → registro → lifecycle → api/services/broker →
+recorte de tool_integration), seguido de un script Python que migró
+~101 archivos de una sola pasada (imports dotted + referencias de
+prosa estilo `tool_integration/registro.py` en docstrings/comentarios,
+para que la documentación quedara consistente con el código real).
+Corte limpio sin shims de compatibilidad, confirmado explícitamente
+con el usuario antes de empezar (la alternativa — dejar
+`tool_integration/base_tool.py` como re-export — habría dejado
+conviviendo dos rutas de import, justo lo que se quería evitar).
+
+**Varios bugs reales del reemplazo mecánico, encontrados y corregidos
+uno por uno** (ninguno cambia comportamiento intencional, todos son
+consecuencia de mover código sin tocar lógica):
+1. Un regex que separaba `from tool_integration.base_tool import X, Y`
+   en dos imports (`sdk.skill`/`sdk.artifacts`) rompió 2 archivos de
+   prosa que YO MISMO escribí (`sdk/__init__.py`, `kernel/__init__.py`)
+   citando ese import como ejemplo dentro de un string — el reemplazo
+   ciego no distingue "código real" de "texto que menciona código".
+   Corregido a mano.
+2. El mismo patrón rompió 6 ocurrencias en `tests/test_sandboxed_skill.py`
+   donde el import viejo vivía DENTRO de un string literal de una sola
+   línea (código de prueba usado como fixture) — el reemplazo insertó
+   un salto de línea REAL adentro de un string comillado, rompiendo la
+   sintaxis. Detectado con un chequeo de sintaxis (`ast.parse`) sobre
+   TODO el repo — encontró también 2 casos más
+   (`test_tool_versioning.py`, `test_tool_registry.py`) donde el
+   import quedó indentado incorrectamente (una línea con 4 espacios,
+   la siguiente en columna 0) dentro de una función.
+3. Un fallback "bare word" (`kernel_bus` -> `kernel`, para prosa
+   suelta) hizo un reemplazo de SUBSTRING, no de palabra completa —
+   corrompió el nombre real del singleton del bus
+   (`kernel_bus = _build_default_bus()` pasó a `kernel = ...`, y
+   `default_kernel_bus` pasó a `default_kernel`) en 2 archivos
+   (`kernel/api/bus.py`, `kernel/registry/sandboxed_skill.py`,
+   `kernel/registry/registry.py`). Funcionalmente seguía siendo
+   consistente (definición y todos los usos coincidían), pero el
+   nombre `kernel` colisionaba confusamente con el propio paquete que
+   lo contiene — renombrado a `kernel_service_bus` para claridad, y
+   quedó UN bug real de verdad en el camino: una referencia a
+   `default_kernel` que mi propio Edit anterior había dejado sin
+   actualizar (variable inexistente, `NameError` en tiempo de
+   ejecución si `kernel_bus_instance` es `None`).
+4. `_kal_runtime_files()` (la función que arma los archivos a copiar
+   al contenedor de una skill) quedó con las CLAVES del diccionario ya
+   migradas (`"sdk/skill.py"`, etc., por el reemplazo de texto) pero
+   los VALORES seguían leyendo de `_TOOL_INTEGRATION_DIR / "base_tool.py"`
+   — un directorio/archivo que ya no existía tras borrar
+   `tool_integration/base_tool.py`. Reescrita para leer los 5 archivos
+   reales de `sdk/` (antes copiaba solo 3). `_RUNNER_PATH` (ruta
+   `__file__`-relativa a `skill_runner.py`) también apuntaba mal tras
+   el movimiento de directorio (`kernel/registry/` en vez de la vieja
+   `tool_integration/`, con `skill_runner.py` ahora en
+   `kernel/lifecycle/` en vez de `sandbox/`) — único otro caso de este
+   tipo de bug en todo el repo (confirmado por grep de `__file__`).
+5. `Dockerfile`s y scripts shell (`.sh`, no `.py` — el script de
+   migración solo tocó `.py`) con rutas hardcodeadas
+   (`COPY sandbox/`, `WORKDIR /app/sandbox`,
+   `CMD ["uvicorn", "sandbox.sandbox_api:app", ...]`,
+   `docker-compose.yml: dockerfile: sandbox/Dockerfile`) — corregidos
+   a mano uno por uno. El Dockerfile del sandbox_runner también ganó
+   `COPY sdk/` (antes no hacía falta copiar nada de eso porque
+   `sandbox_api.py`/`executor.py` no dependían de `Permission`
+   directamente por ese camino — ahora `executor.py` importa
+   `sdk.permissions`).
+6. **El más sutil**: firmar las 6 skills reales con
+   `scripts/sign_skill.py` (necesario porque migrar sus `tool.py` a
+   `sdk.*` invalida la firma existente — `verify_skill_signature()` es
+   fail-closed, una skill con firma inválida NO se registra) tiene que
+   pasar DESPUÉS de terminar TODOS los demás cambios de contenido — 3
+   de las 6 quedaron "tampered" de nuevo porque las firmé, y RECIÉN
+   DESPUÉS corregí referencias de prosa obsoletas
+   (`kernel_bus/__init__.py`) en sus propios `skill.yaml` (que SÍ
+   forma parte de lo firmado, a propósito — para que nadie pueda subir
+   permisos en el manifiesto sin invalidar la firma). Encontrado
+   comparando a mano el manifiesto canónico actual contra el firmado
+   (`_canonical_manifest()`); solucionado firmando una segunda vez,
+   ahora sí como paso verdaderamente final.
+
+**Verificado real, de punta a punta**: `python -c "import
+agent_core.orchestrator"` limpio; las 6 skills reales cargan con
+`status: "loaded"` y `signature_status: "verified"`; ejecución REAL de
+`qr_code` dentro de un contenedor Docker real (reusando la imagen
+`kal-skill-qr-code` ya construida) generó un PNG real de 551 bytes en
+`data/artifacts/skills/qr_code/` — confirma que el `sdk/` copiado
+dentro del contenedor (5 archivos: `__init__.py`, `skill.py`,
+`artifacts.py`, `permissions.py`, `context.py`) importa y funciona de
+verdad, no solo en teoría. Verificación de sintaxis (`ast.parse`)
+sobre los ~2000+ archivos `.py` del repo: 0 errores. Grep final de
+cualquier referencia residual a las rutas viejas (imports Python,
+YAML, shell, Dockerfiles): 0 resultados fuera de una mención histórica
+intencional en `sdk/__init__.py`. Suite completa de pytest, 0
+regresiones.
+
+**Fuera de alcance de esta fase, documentado explícitamente**:
+verificación de build real de `docker-compose.yml` (el subcomando
+`docker compose` no está disponible en este entorno de desarrollo —
+validado el YAML sintácticamente y revisado el Dockerfile a mano en
+su lugar); renombrar las claves de `config/config.yaml`
+(`tool_integration:`, `permissions:`, etc.) — son namespaces de
+configuración independientes del layout de carpetas, sin beneficio
+real de renombrarlas ahora.
+
+## Dos bugs reales encontrados en uso justo después de la reestructuración (2026-07-20)
+
+El usuario pidió "crea una naranja (solo una)" al servidor real y
+recibió `Error: NetworkError when attempting to fetch resource.` en el
+frontend. El log completo (no solo el fragmento inicial que compartió)
+reveló DOS problemas reales, independientes entre sí.
+
+**Bug 1 — `--reload` de uvicorn vigilaba `data/`**: mientras el
+usuario probaba el servidor en vivo, la suite de tests corría en
+paralelo (parte de la verificación final de la reestructuración a
+kernel/) y escribió archivos reales bajo `data/tool_versions/` (los
+tests de versionado de herramientas dinámicas persisten versiones de
+verdad). `uvicorn --reload`, sin restricciones, vigila TODO el árbol
+del proyecto — detectó esos cambios y reinició el servidor completo A
+MITAD de la conversación del usuario, cortando la respuesta con el
+`NetworkError` que vio. Corregido en `scripts/run_kal.sh`: agregados
+`--reload-exclude` para `data/*`, `logs/*`, `docs/*`, `tests/*`,
+`*.log` — ninguno es código fuente que deba disparar un reload, así
+que esto no esconde ningún cambio real, solo deja de reaccionar a
+efectos secundarios de ejecutar la app o los tests.
+
+**Bug 2, más importante — el modelo analizaba su propia imagen recién
+generada y la regeneraba**: tras el reinicio, el pedido original
+("crea una naranja (solo una)") siguió corriendo en segundo plano
+(`uvicorn` espera tareas en curso al apagarse) y el log completo
+mostró la secuencia real: `image_generation` (éxito, imagen real
+generada) → `analyze_image` sobre esa MISMA imagen recién creada →
+`image_generation` DE NUEVO (otra imagen real generada) →
+`analyze_image` de nuevo → intento de generar una TERCERA vez,
+rechazado por `max_tool_repeats` → agotó `max_agent_steps=8` sin
+ninguna respuesta final. El límite estructural (`max_tool_repeats`,
+ver `technical_agent_image_overgeneration` en memoria) funcionó
+exactamente como se diseñó — evitó una cuarta y quinta generación real
+— pero el usuario terminó sin ninguna respuesta pese a que la imagen
+YA se había generado bien la primera vez.
+
+Causa: `analyze_image` (agregado en una sesión posterior a la regla
+de "generá exactamente lo pedido" del `SYSTEM_PROMPT`) no estaba
+mencionado en esa regla — el modelo, tras generar con éxito, decidía
+por su cuenta "revisar" lo que había creado llamando a `analyze_image`
+sobre su propio resultado, y la descripción que volvía lo empujaba a
+generar de nuevo en vez de simplemente responder. Corregido con dos
+reglas nuevas en `agent_core/llm/agent_loop.py::SYSTEM_PROMPT`: (1) la
+regla existente de "no encadenes herramientas extra" ahora menciona
+explícitamente `analyze_image` como una de esas herramientas extra no
+pedidas; (2) regla nueva y explícita: nunca llamar `analyze_image`
+sobre una imagen generada en el MISMO turno para "confirmar" que salió
+bien — esa herramienta es solo para cuando el usuario pide describir/
+analizar una imagen (propia o ya existente), nunca como autochequeo.
+
+Verificado real, de punta a punta: el MISMO pedido exacto
+("crea una naranja (solo una)") contra `AgentLoop.run()` real (mismo
+modelo, mismo Ollama) ahora genera UNA sola imagen (1 paso) y responde
+directo con la ruta del archivo — sin `analyze_image`, sin
+regeneración. `tests/test_agent_loop.py` (45 tests) y
+`tests/test_self_modification.py` (17 tests, por el fix de
+`CORE_PATHS_HARDCODED` de la fase anterior) sin regresiones.
+
+## Autochequeo acotado (1 revisión + 1 reintento), no prohibición total, con aviso honesto (2026-07-20)
+
+El usuario, revisando las tres naranjas generadas por el bug anterior,
+notó algo importante: NINGUNA mostraba una sola naranja — todas eran
+grupos. Hipótesis correcta: el modelo probablemente regeneraba porque
+`analyze_image` SÍ detectaba el desajuste (no era un loop sin sentido)
+— pero sin límite, nunca llegaba a avisar la limitación, solo agotaba
+pasos. Confirmado revisando `kernel/services/services.py`: el prompt
+que kal le mandaba a SDXL-Turbo SÍ decía "una sola naranja" cada vez —
+el generador de imágenes en sí (2 pasos, optimizado para velocidad) es
+el que no respeta cantidades exactas de forma confiable, una
+limitación real y conocida de los modelos de difusión rápidos, no un
+error de razonamiento de kal.
+
+Dado esto, la corrección anterior (prohibir `analyze_image` sobre la
+propia generación) era demasiado tajante — el usuario pidió en cambio
+un término medio: permitir la auto-revisión, pero acotada a UN solo
+reintento, con aviso honesto si el resultado sigue sin coincidir.
+
+**Implementado, estructural (no solo texto de prompt — mismo criterio
+que `max_tool_repeats` general, que ya demostró que las instrucciones
+de prompt solas no alcanzan)**: `AgentLoop.run()` ahora rastrea
+`artifact_paths_this_turn` (uri del artefacto -> nombre de la
+herramienta que lo generó) y `self_checked_tools` (qué herramientas
+generativas ya se autochequearon con `analyze_image` en este turno,
+detectado comparando el `image_path` que recibe `analyze_image` contra
+esa tabla). Una herramienta marcada como autochequeada queda con un
+tope de `min(2, max_tool_repeats)` — la original + un solo reintento —
+en vez del `max_tool_repeats` configurado en general (que sigue
+aplicando sin cambios a todo lo demás). El mensaje de rechazo, cuando
+se corta por este tope MÁS estricto, le pide al modelo explícitamente
+que responda YA y que sea honesto si el resultado no coincide
+exactamente ("los modelos de generación de imágenes no siempre
+respetan cantidades exactas, reintentar más no lo garantiza").
+`SYSTEM_PROMPT` actualizado en el mismo sentido (autochequeo permitido
+pero acotado, en vez de prohibido).
+
+2 tests nuevos en `tests/test_agent_loop.py`: confirma que el tope se
+endurece a 2 SOLO cuando `analyze_image` miró un artefacto de ESTE
+turno (no una ruta cualquiera, como una imagen subida por el usuario),
+y que sigue rechazando un 3er intento aunque `max_tool_repeats`
+configurado sea mayor. Verificado en vivo contra el servidor real
+(mismo pedido: "crea una naranja (solo una)") — generó, se autorevisó
+una vez, reintentó una sola vez más, y esta vez SÍ llegó a una
+respuesta final (a diferencia de antes, que agotaba los 8 pasos sin
+responder nada). Suite completa de `test_agent_loop.py` (47 tests) sin
+regresiones.
+
+## Deuda de seguridad de la revisión 2026-07-09: los 5 hallazgos menores restantes, más el bug de "quién sos" (2026-07-20)
+
+Pedido explícito del usuario: cerrar los hallazgos menores documentados
+como "deuda aceptada" en la revisión de seguridad del 9 de julio (ver
+sección más arriba y [[project_security_review_2026_07_09]]) — de los 6
+originales, ya quedaba corregido el límite de línea del Kernel Bus
+(2026-07-11); quedaban 5 — y de paso, el bug ya diagnosticado de
+"quién sos" disparando `system_info` sin necesidad (ver
+[[technical_agent_overeager_tool_calling_on_identity_questions]]), cuyo
+fix ya estaba identificado pero nunca aplicado a propósito.
+
+Las rutas de todos estos hallazgos cambiaron con la reestructuración a
+`kernel/`+`sdk/` (`kernel_bus/` -> `kernel/api/`+`kernel/services/`,
+`sandbox/` -> `kernel/lifecycle/`) — se verificó el código real de cada
+uno antes de tocar nada, no se asumió nada de la memoria de la sesión
+anterior.
+
+**1. Sin lock sobre los pipelines compartidos.** `ImageService`/
+`AudioService`/`STTService` (`kernel/services/services.py`) exponen un
+único pipeline de PyTorch/piper/faster-whisper por proceso, invocable
+tanto por el adaptador de primera parte como por cualquier cantidad de
+skills concurrentes vía el bus — sin ninguna sincronización. Fix: un
+`threading.Lock()` por pipeline (no uno solo por servicio — `generate()`
+e `inpaint()` usan pipelines DISTINTOS, un solo lock los serializaría
+sin necesidad). En `STTService.transcribe()`, importante: el generador
+que devuelve `faster-whisper` es perezoso — el lock tiene que envolver
+también su consumo (`" ".join(...)`), si no la sincronización sería un
+espejismo (el cómputo real seguiría ocurriendo fuera de la sección
+protegida).
+
+**2. Errores internos del kernel bus se devolvían crudos a la skill.**
+`kernel/api/socket_server.py::_handle_line()` capturaba cualquier
+`Exception` de `bus.dispatch()` y devolvía `str(e)` tal cual por el
+socket — un servicio real puede fallar de formas que revelan detalles
+del host (p.ej. una ruta real ya resuelta desde un `artifact://` de
+entrada, mensajes de librerías de terceros). Si esa misma skill
+también tiene permiso de red, es una vía de exfiltración. Fix: los
+errores de protocolo del propio bus (`ServiceNotFoundError`/
+`ActionNotFoundError`/`ArtifactNotFoundError`, cuyo mensaje solo cita
+strings que la skill misma pasó como parámetro) se siguen devolviendo
+tal cual — son seguros por construcción. Cualquier otra excepción
+ahora devuelve un mensaje genérico (`"el servicio '{method}' falló
+procesando el pedido"`); el detalle completo se sigue registrando
+server-side (`logger.warning` + auditoría) para diagnóstico, solo deja
+de cruzar el socket.
+
+**3. `dispatch()` sin allowlist explícito de acciones por servicio.**
+Resolvía la acción con `getattr` genérico sobre el objeto del
+servicio — cualquier método público quedaba invocable como "acción" del
+bus, no solo los pensados como tal. Inofensivo hoy (cada servicio solo
+tiene los métodos que ya son sus acciones reales), pero frágil a
+futuro: un método público agregado más adelante para otro propósito
+quedaría expuesto por accidente. Fix: `ALLOWED_ACTIONS` (frozenset)
+explícito en cada clase de servicio
+(`ImageService`/`AudioService`/`STTService`), chequeado en
+`KernelServiceBus.dispatch()` antes de resolver el `getattr`. Test
+nuevo (`test_dispatch_rejects_a_public_method_not_in_allowed_actions`)
+agrega un método público deliberadamente fuera de la allowlist a un
+servicio de prueba y confirma que se rechaza igual que uno inexistente.
+
+**4. Directorio de trabajo del sandbox en 0777.**
+`kernel/lifecycle/docker_runner.py::_prepare_workdir()` hardcodeaba el
+contenedor a correr como UID/GID 1000:1000 y, para que el bind mount
+fuera legible pese a que el proceso host casi nunca corre con ese mismo
+UID, abría el árbol entero con `chmod 0777` — legible y ESCRIBIBLE por
+CUALQUIER usuario del sistema mientras el contenedor corría, no solo un
+riesgo teórico en un host compartido (no de un solo usuario). Fix real,
+no solo un chmod más angosto: en vez de hardcodear el UID del
+contenedor y compensar del lado del host, el contenedor ahora corre
+con `user=f"{os.getuid()}:{os.getgid()}"` — el MISMO UID/GID que el
+proceso que lo lanza, sea cual sea. Sin mismatch que compensar, ya no
+hace falta abrir ningún permiso: los defaults de
+`tempfile.TemporaryDirectory()` (0700) y `write_text`/`mkdir` alcanzan
+porque el dueño real y el usuario del contenedor son la misma cuenta.
+Eliminadas las constantes `SANDBOX_UID`/`SANDBOX_GID` (sin otro uso en
+el repo) y todos los `os.chmod` que compensaban el mismatch. Verificado
+con Docker real: los 16 tests de `test_sandbox_integration.py` pasan
+sin cambios (incluidos los de `output_dir`/`workspace_files`, que
+dependían de esos permisos).
+
+**5. `_artifact_url()` no era `..`-safe por sí sola.**
+`agent_core/orchestrator.py` comparaba con `Path(uri).relative_to(
+'data/artifacts')` SIN resolver antes — un `uri` armado como
+`"data/artifacts/../../etc/passwd"` tiene `('data', 'artifacts')` como
+prefijo literal de sus partes (relative_to no resuelve ".." antes de
+comparar), así que la función lo aceptaba igual, dependiendo
+enteramente de que Starlette bloqueara el traversal real al servir el
+archivo después. Hoy no hay ningún llamador que pase un `uri`
+controlado por un tercero, pero la función debe ser segura POR SÍ
+SOLA. Fix: `Path(uri).resolve()` antes de `relative_to(_ARTIFACTS_DIR)`
+— un intento de escape termina en una ruta absoluta fuera del
+directorio real y se rechaza de verdad, no solo en apariencia. 4 tests
+nuevos en `tests/test_orchestrator_artifact_url.py`, incluido uno que
+reproduce exactamente el escape que antes pasaba desapercibido.
+
+**Bug de "quién sos" disparando `system_info` — fix de prompt aplicado
+(el ya planeado, no el estructural de la sobregeneración de
+imágenes).** `SYSTEM_PROMPT` (`agent_core/llm/agent_loop.py`) ya tenía
+una regla contra esto, pero redactada pensando específicamente en "no
+generar audio" — el modelo, muy probablemente, interpretó que llamar a
+`system_info` no la violaba (no es audio). Generalizada la regla
+existente para decir explícitamente "sin llamar a NINGUNA herramienta
+(ni audio, ni system_info, ni ninguna otra)", agregando el caso real de
+`system_info` como segundo ejemplo concreto — mismo patrón que ya
+funcionó para el resto de esta lista de ejemplos. Cambio de texto de
+prompt únicamente, sin tests nuevos (mismo criterio que el fix
+equivalente para la sobregeneración de imágenes).
+
+**Verificación**: `test_sandbox_integration.py` (16, Docker real),
+`test_sandboxed_skill.py` + `test_skills.py` (56, Docker real,
+incluidos los 3 tests end-to-end del Kernel Service Bus actualizados
+con `ALLOWED_ACTIONS`), `test_kernel_bus.py` + `test_kernel_bus_socket_server.py`
++ `test_orchestrator_artifact_url.py` (23) — todos verdes antes de
+correr la suite completa.

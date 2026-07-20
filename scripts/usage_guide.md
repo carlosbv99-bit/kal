@@ -85,7 +85,8 @@ Si tienes dominios permitidos configurados:
 ## Configuración Avanzada
 
 ### Modelos de LLM
-Por defecto, Kal usa `qwen3-coder:30b`. Puedes cambiarlo:
+Por defecto, Kal usa el modelo declarado en `llm.default_model` de
+`config/config.yaml`. Puedes cambiarlo:
 - En `config/config.yaml`: `llm.default_model`
 - O usando el selector en la interfaz web
 

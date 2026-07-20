@@ -44,14 +44,15 @@ GPU required, everything ships CPU-first) and open source
 - **Kernel** (`agent_core/`) — coordinates the LLM conversation loop,
   permissions, sandboxing and auditing. It does not implement AI
   capabilities itself.
-- **Kernel Services** (`kernel_bus/services.py`) — shared, persistent
-  services that hold a heavy resource (a loaded ML model) so it's
-  never reloaded per call. Today: image generation, image inpainting,
-  audio synthesis, speech-to-text.
+- **Kernel Services** (`kernel/services/services.py`) — shared,
+  persistent services that hold a heavy resource (a loaded ML model) so
+  it's never reloaded per call. Today: image generation, image
+  inpainting, audio synthesis, speech-to-text.
 - **Skills** (`skills/`) — sandboxed capabilities. A Skill never loads
   a model or touches the filesystem/network directly; it asks a
-  Kernel Service for what it needs over the Kernel Bus.
-- **Kernel Bus** (`kernel_bus/`) — the JSON-RPC protocol (over a Unix
+  Kernel Service for what it needs over the Kernel Bus, through the
+  official **SDK** (`sdk/`) — never an internal kernel path.
+- **Kernel Bus** (`kernel/api/`) — the JSON-RPC protocol (over a Unix
   socket, never a network port) that lets a sandboxed Skill call a
   Kernel Service without ever leaving its container.
 
@@ -93,9 +94,12 @@ GPU required, everything ships CPU-first) and open source
 - Self-modification pipeline (human-approval gated, disabled by default)
 - Syscall-level observability via eBPF (Linux)
 - VS Code extension (in-editor chat)
+- Official Skill SDK (`sdk/`) — the only thing a Skill imports, pure
+  stdlib, independent from the rest of the kernel
+- Unified Access Manager (permissions) — filesystem and network share
+  one generic grant/approval engine instead of two parallel ones
 
 **In progress**
-- Kernel client SDK for Skill authors (minimal today, ~60 lines)
 - Broader Kernel Service coverage (only 4 today — browser/OCR remain
   direct adapters, not yet Kernel Services)
 
