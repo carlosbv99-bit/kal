@@ -5189,6 +5189,117 @@ incluida `test_image_inpaint_via_kernel_skill_edits_a_real_generated_image`,
 que había fallado una vez antes por contención real de recursos del
 sistema — swap al límite, no un bug de código) + 43 tests de Node
 (`npm test`) + reinstalación real de la extensión con timestamp
-verificado. Pendiente: probarlo en vivo con un escenario real
-multi-proyecto (farmacia/restaurante) una vez que el usuario recargue
-la ventana de VS Code.
+verificado.
+
+## "El chat se borra" al mirar el árbol de archivos (2026-07-20)
+
+Probando el feature de la sección anterior con un escenario real
+multi-proyecto (farmacia + restaurante en el mismo workspace, ver
+`docs/HISTORY.md`/memoria sobre esa consulta previa), el usuario
+reportó dos síntomas juntos: el chat de la barra lateral se vaciaba al
+mirar el árbol de archivos del Explorer (misma Activity Bar que kal), y
+un pedido concreto ("agrega una imagen de medicamentos en la página
+Sobre nosotros de Farmacia") nunca mostró ninguna respuesta.
+
+Investigado con logs reales (`logs/agent.log`+`logs/audit.log`, sin
+necesitar que el usuario reprodujera nada) en vez de preguntar: el
+servidor SÍ procesó el pedido completo (browser → unsplash.com →
+`import_resource` intentó descargar desde `unsplash-assets.imgix.net`,
+un dominio de CDN distinto del que ya está permitido para navegar, así
+que quedó escalado a aprobación humana — comportamiento correcto,
+`network_access_manager`) y el proceso seguía vivo y respondiendo a
+`/health` sin usar CPU — no estaba trabado. La causa real está del lado
+de VS Code, no del backend: `ChatViewProvider` (`vscode-extension/src/
+extension.ts`) se registraba con `registerWebviewViewProvider` SIN
+`retainContextWhenHidden` — la documentación propia de la API de
+vscode es explícita: sin esa opción, "el documento HTML del webview se
+destruye cuando la vista deja de estar visible (p.ej. al cambiar a
+otra vista de la misma Activity Bar) y se reconstruye vacío al volver a
+mostrarse" — exactamente "el chat se borra". Peor aún: "los mensajes
+solo se entregan si el webview está vivo (visible, o en segundo plano
+con retainContextWhenHidden)" — sin esa opción, si la respuesta de
+`postMessage({type:"answer",...})` llega justo mientras el usuario está
+mirando el Explorer, se pierde en silencio — el pedido queda "sin
+completar" para el usuario aunque el backend sí haya respondido bien.
+
+Dos fixes, uno de configuración y uno defensivo (por si la entrega de
+mensajes en segundo plano de VS Code tiene algún matiz no documentado
+del todo consistente entre sus propias dos páginas de referencia):
+
+- `extension.ts`: `retainContextWhenHidden: true` en el registro de
+  `ChatViewProvider` — el webview de esta vista queda vivo en segundo
+  plano en vez de destruirse/reconstruirse en cada ida y vuelta.
+- `chatViewProvider.ts`: los `postMessage()` de `handleAsk()` pasan a
+  una cola (`pendingMessages`) cuando `webviewView.visible` es falso, y
+  se reenvían apenas `onDidChangeVisibility` confirma que volvió a ser
+  visible — garantiza que ninguna respuesta se pierda en silencio
+  aunque llegue con la vista oculta, sin depender de un matiz de
+  entrega en segundo plano que la propia documentación de vscode no
+  deja 100% cerrado.
+
+`ChatPanel` (la pestaña "al costado", no la vista de la barra lateral)
+ya tenía `retainContextWhenHidden: true` desde su creación — este bug
+era específico de `ChatViewProvider`.
+
+## "No pudo completar mi solicitud": fetch() tiene un tope de 5 minutos (2026-07-20)
+
+Con los dos fixes anteriores ya reinstalados, el usuario probó un
+pedido real más ambicioso ("Aplica la barra de menú del index.html de
+restaurante al resto de páginas del sitio e implementa su
+funcionalidad") y recibió: `No se pudo conectar con kal en
+http://localhost:8000 — ¿está corriendo ./scripts/run_kal.sh?
+(TypeError: fetch failed)`.
+
+Investigado con logs reales (`logs/agent.log`, `journalctl -u ollama`,
+`ps`/`free`) antes de tocar código, en vez de asumir que el servidor
+estaba caído:
+
+- El servidor NUNCA se cayó ni se colgó — seguía respondiendo a
+  `/health` durante todo el incidente.
+- El pedido sí se procesó: `read_workspace_file` se llamó, después
+  `propose_project_files` — pero el modelo local (`qwen2.5-coder:14b`
+  vía Ollama, CPU, sin tool-calling nativo — cae en el fallback de
+  detección de texto plano) reintentó la MISMA herramienta ya
+  rechazada por el tope de una llamada por turno **6 veces seguidas**
+  para `read_workspace_file` (agotando `max_steps=8` sin ninguna
+  respuesta final) y otra vez para `propose_project_files` en el
+  pedido encadenado — cada reintento cuesta un turno completo de
+  inferencia local (10-170 segundos según los logs de Ollama:
+  `slot print_timing`).
+- El pedido encadenado (`resolvePendingWorkspaceFileReads`, ver la
+  sección anterior) sumó un SEGUNDO `/chat` completo arriba del
+  primero. La suma de ambos superó los 5 minutos.
+- Reproducido de forma aislada (servidor local de prueba que tarda
+  a propósito): el `fetch()` global de Node tira exactamente
+  `TypeError: fetch failed` (`Headers Timeout Error`) a los ~300.8
+  segundos — un tope FIJO del Agent por defecto de undici
+  (`headersTimeout`/`bodyTimeout`=300000ms) que no se puede extender
+  sin un `Dispatcher` a medida. Ese `Dispatcher` a su vez requiere el
+  paquete npm `undici` como dependencia REAL en tiempo de ejecución —
+  pero `.vscodeignore` excluye `node_modules/**` del `.vsix`
+  empaquetado, así que una dependencia nueva no estaría disponible sin
+  además cambiar el empaquetado a un bundler.
+- Confirmado con los logs del propio Ollama (`journalctl -u ollama`,
+  incluye `[GIN] ... POST "/api/chat"` con duración real): el backend
+  siguió trabajando y respondiendo bien DESPUÉS de que el cliente ya
+  había tirado el error — una respuesta real que nadie esperaba.
+
+Fix: `vscode-extension/src/nodeHttpFetch.ts` (nuevo) reimplementa el
+contrato exacto de `fetch()` (`(url, init) => Promise<Response>`) con
+`node:http`/`node:https` directamente — sin ningún tope de tiempo
+salvo el que se pida explícitamente (`timeout`, acá 20 minutos por
+defecto). `KalClient` lo usa como default de `fetchFn` en vez del
+`fetch()` global; como todos los tests existentes ya inyectan su
+propio `fetchFn` falso, ninguno necesitó cambiar. 5 tests nuevos
+(`nodeHttpFetch.test.ts`, con un servidor HTTP real en loopback):
+GET/POST reales, status de error reflejado sin lanzar, rechazo si no
+hay nada escuchando, y que un `timeoutMs` corto sí corta la espera.
+
+Nota aparte, no resuelta todavía: el modelo reintentando una
+herramienta ya rechazada 6-7 veces seguidas en vez de responder de
+una es un desperdicio real de tiempo/cómputo, más allá de este bug
+puntual — el mensaje de rechazo ya le pide explícitamente "da tu
+respuesta final ahora", pero este modelo local (vía el fallback de
+texto plano) no lo respeta de forma confiable. Con el tope de tiempo
+ya resuelto deja de ser bloqueante, pero sigue siendo lento — queda
+anotado para revisar si vuelve a ser un problema.

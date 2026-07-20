@@ -32,9 +32,19 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Vista fija en la barra lateral (icono propio en la Activity Bar,
     // junto a otras extensiones de agentes de IA) — ver ChatViewProvider.
+    //
+    // BUG REAL ENCONTRADO EN USO (2026-07-20): sin retainContextWhenHidden,
+    // VS Code destruye el documento HTML de esta vista cada vez que el
+    // usuario cambia a OTRA vista de la misma Activity Bar (p.ej. el
+    // Explorer, para mirar el árbol de archivos) y lo reconstruye vacío
+    // al volver — el usuario ve el chat "borrarse" en cada ida y vuelta.
+    // Costo real (más memoria por mantener el webview vivo en segundo
+    // plano) aceptado a propósito: es la única vista de kal pensada para
+    // quedar "siempre ahí" con una conversación en curso.
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
-      new ChatViewProvider(context.extensionUri, getClient())
+      new ChatViewProvider(context.extensionUri, getClient()),
+      { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
 

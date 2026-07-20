@@ -45,6 +45,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private view: vscode.WebviewView | undefined;
   private sessionId: string | undefined;
+  // BUG REAL ENCONTRADO EN USO (2026-07-20): "no se pueden mandar
+  // mensajes a un webview oculto" (documentado en la propia API de
+  // vscode, ver registerWebviewViewProvider) — incluso con
+  // retainContextWhenHidden. Si la respuesta de un pedido llega
+  // justo mientras el usuario está mirando OTRA vista (p.ej. el
+  // Explorer), postMessage() se pierde en silencio y el pedido queda
+  // "sin completar" para siempre del lado del usuario, aunque el
+  // backend sí haya respondido. Se encolan acá y se reenvían apenas
+  // la vista vuelve a ser visible (ver onDidChangeVisibility abajo).
+  private pendingMessages: unknown[] = [];
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -64,6 +74,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.handleAsk(message.text);
       }
     });
+
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        this.flushPendingMessages();
+      }
+    });
+  }
+
+  /** Manda `message` ya mismo si la vista está visible; si no, la encola (ver docstring de pendingMessages). */
+  private post(message: unknown): void {
+    if (this.view?.visible) {
+      this.view.webview.postMessage(message);
+    } else {
+      this.pendingMessages.push(message);
+    }
+  }
+
+  private flushPendingMessages(): void {
+    const queued = this.pendingMessages;
+    this.pendingMessages = [];
+    for (const message of queued) {
+      this.view?.webview.postMessage(message);
+    }
   }
 
   private async handleAsk(text: string): Promise<void> {
@@ -90,17 +123,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // transparente para el usuario, solo se muestra la respuesta FINAL.
       const finalResult = await resolvePendingWorkspaceFileReads(result, this.client, model, editorContext);
       this.sessionId = finalResult.session_id;
-      this.view?.webview.postMessage({ type: "answer", result: finalResult });
+      this.post({ type: "answer", result: finalResult });
       await maybeHandleProjectFiles(finalResult, this.client);
     } catch (e) {
-      this.view?.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
+      this.post({ type: "error", message: String(e instanceof Error ? e.message : e) });
     } finally {
       // Ver el comentario equivalente en chatPanel.ts — sin esto,
       // el usuario podía mandar un pedido nuevo mientras la vista
       // previa de archivos del pedido actual todavía esperaba una
       // decisión (VS Code encola los diálogos nativos, mostrando el
       // más viejo primero, no el último).
-      this.view?.webview.postMessage({ type: "ready" });
+      this.post({ type: "ready" });
     }
   }
 }

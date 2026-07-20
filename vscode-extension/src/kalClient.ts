@@ -3,9 +3,13 @@
  * FastAPI). Mismo contrato que ya consume frontend/app.js: POST /chat
  * con {goal, model, use_planner} -> {final_answer, status, plan, steps}.
  *
- * `fetchFn` es inyectable (por defecto el fetch global de Node 22+) para
- * poder testear sin red real — mismo patrón de DI que ya usa el backend
- * Python (ver tool_integration/adapters/browser.py::BrowserTool(driver=...)).
+ * `fetchFn` es inyectable (por defecto nodeHttpFetch, NO el fetch()
+ * global de Node) para poder testear sin red real — mismo patrón de DI
+ * que ya usa el backend Python (ver tool_integration/adapters/
+ * browser.py::BrowserTool(driver=...)). Ver nodeHttpFetch.ts para el
+ * motivo: el fetch() global tiene un tope fijo de ~5 minutos que un
+ * pedido real (varios pasos de un modelo local lento, ver
+ * readWorkspaceFile.ts) puede superar.
  *
  * `editor_context`: señal CRUDA del editor (ver
  * agent_core/context_service.py) — este cliente nunca la formatea a
@@ -13,6 +17,7 @@
  * final es responsabilidad del backend, no de esta extensión.
  */
 import { EditorSnapshot } from "./editorContextFormat";
+import { nodeHttpFetch } from "./nodeHttpFetch";
 
 export interface ProjectFile {
   path: string;
@@ -68,7 +73,7 @@ export type FetchFn = typeof fetch;
 export class KalClient {
   constructor(
     private readonly baseUrl: string,
-    private readonly fetchFn: FetchFn = fetch
+    private readonly fetchFn: FetchFn = nodeHttpFetch
   ) {}
 
   async chat(goal: string, model?: string, sessionId?: string, editorContext?: EditorSnapshot): Promise<ChatResult> {
