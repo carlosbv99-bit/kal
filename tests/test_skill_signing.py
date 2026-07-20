@@ -9,6 +9,7 @@ integridad del paquete, no autoridad del autor.
 """
 from __future__ import annotations
 
+from kernel.registry.skills import set_skill_enabled
 from kernel.registry.skill_signing import SkillSigner, verify_skill_signature
 
 
@@ -53,6 +54,40 @@ def test_tampering_with_skill_yaml_after_signing_is_detected(tmp_path):
     no quedara cubierto por la firma, alguien podría mantener el
     código intacto pero escalar permisos sin invalidar nada.
     """
+    skill_dir = _make_skill_dir(tmp_path)
+    SkillSigner(key_dir=tmp_path / "keys").write_signature(skill_dir)
+
+    (skill_dir / "skill.yaml").write_text(
+        "name: mi_skill\nversion: '0.1.0'\nenabled: true\npermissions: [network]\n", encoding="utf-8"
+    )
+
+    assert verify_skill_signature(skill_dir) == "tampered"
+
+
+def test_toggling_enabled_after_signing_does_not_invalidate_the_signature(tmp_path):
+    """
+    BUG REAL encontrado probando el Skill Creator (2026-07-20): antes
+    de este fix, esto daba "tampered" — habilitar/deshabilitar una
+    skill YA firmada (set_skill_enabled(), lo mismo que hace
+    scripts/enable_skill.py) rompía su propia firma en el acto, aunque
+    `enabled` sea explícitamente una decisión de instalación LOCAL, no
+    del autor (ver kernel/registry/skills.py).
+    """
+    skill_dir = _make_skill_dir(tmp_path)
+    SkillSigner(key_dir=tmp_path / "keys").write_signature(skill_dir)
+    assert verify_skill_signature(skill_dir) == "verified"
+
+    set_skill_enabled(skill_dir, False)
+    assert verify_skill_signature(skill_dir) == "verified"
+
+    set_skill_enabled(skill_dir, True)
+    assert verify_skill_signature(skill_dir) == "verified"
+
+
+def test_tampering_with_a_field_other_than_enabled_in_skill_yaml_still_detected_after_toggling_enabled(tmp_path):
+    """Que 'enabled' esté excluido del hash no debe abrir la puerta a
+    colar OTROS cambios en skill.yaml (p.ej. escalar permissions) al
+    mismo tiempo que se activa/desactiva la skill."""
     skill_dir = _make_skill_dir(tmp_path)
     SkillSigner(key_dir=tmp_path / "keys").write_signature(skill_dir)
 

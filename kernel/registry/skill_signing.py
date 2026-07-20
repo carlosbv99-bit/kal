@@ -30,6 +30,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
+import yaml
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -64,6 +65,34 @@ def _skill_files(skill_dir: Path) -> list[Path]:
     ]
 
 
+_MANIFEST_FILENAME = "skill.yaml"
+
+
+def _skill_yaml_hash_excluding_enabled(manifest_path: Path) -> str:
+    """
+    `enabled` es una decisión de instalación LOCAL (ver
+    kernel/registry/skills.py: "no es una propiedad del catálogo, cada
+    usuario la decide") — cambia con set_skill_enabled() (que edita
+    skill.yaml con un reemplazo de texto dirigido, ver
+    scripts/enable_skill.py) sin que el AUTOR original haya tocado nada.
+
+    BUG REAL encontrado probando el Skill Creator (2026-07-20): antes,
+    skill.yaml se hasheaba entero (bytes crudos) como cualquier otro
+    archivo — habilitar una skill YA FIRMADA invalidaba su propia firma
+    en el acto, aunque enable_skill.py acabara de mostrar "Firma:
+    verificada" un segundo antes. Nunca se había disparado en la
+    práctica porque las 6 skills existentes siempre se firmaron con
+    `enabled` ya en su valor final. El resto de skill.yaml
+    (permissions/requirements/kernel_services/entry_point/etc., que SÍ
+    son decisión del autor) sigue cubierto por la firma tal cual —
+    normalizamos SOLO `enabled` a un valor fijo antes de hashear.
+    """
+    raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    raw["enabled"] = False
+    canonical = yaml.safe_dump(raw, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _canonical_manifest(skill_dir: Path) -> bytes:
     """
     Lista determinística [(ruta_relativa, sha256), ...] de TODO el
@@ -71,10 +100,18 @@ def _canonical_manifest(skill_dir: Path) -> bytes:
     `permissions`/`kernel_services`, y tienen que quedar cubiertos por
     la firma tanto como el código (si no, alguien podría mantener el
     código firmado intacto pero escalar permisos en el manifiesto sin
-    invalidar nada).
+    invalidar nada). Excepción deliberada: el campo `enabled` DENTRO de
+    skill.yaml se normaliza antes de hashear (ver
+    _skill_yaml_hash_excluding_enabled) — es la única parte de todo el
+    paquete que cambia por una decisión LOCAL, no del autor.
     """
     entries = sorted(
-        (p.relative_to(skill_dir).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest())
+        (
+            p.relative_to(skill_dir).as_posix(),
+            _skill_yaml_hash_excluding_enabled(p)
+            if p.relative_to(skill_dir).as_posix() == _MANIFEST_FILENAME
+            else hashlib.sha256(p.read_bytes()).hexdigest(),
+        )
         for p in _skill_files(skill_dir)
     )
     return json.dumps(entries, separators=(",", ":")).encode("utf-8")
@@ -155,10 +192,13 @@ def verify_skill_signature(skill_dir: Path) -> SignatureStatus:
         data = json.loads(sig_path.read_text(encoding="utf-8"))
         public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(data["author_public_key"]))
         signature = bytes.fromhex(data["signature"])
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        # _canonical_manifest() ahora parsea skill.yaml (para normalizar
+        # 'enabled', ver más arriba) — un YAML corrupto debe caer acá
+        # también, fail closed, nunca una excepción sin manejar.
+        current_manifest = _canonical_manifest(skill_dir)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, yaml.YAMLError):
         return "tampered"
 
-    current_manifest = _canonical_manifest(skill_dir)
     try:
         public_key.verify(signature, current_manifest)
     except InvalidSignature:
