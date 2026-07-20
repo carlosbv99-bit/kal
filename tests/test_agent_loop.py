@@ -514,6 +514,40 @@ def test_analyze_image_on_an_unrelated_path_does_not_tighten_the_limit():
     assert all("ERROR" not in s.observation for s in result.steps)
 
 
+def test_propose_project_files_is_capped_at_one_call_per_turn():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): pedido "elaborá un
+    menú con fotos y descripción" llamó a propose_project_files 3 veces
+    en el mismo turno (revisando su propio intento anterior sin ninguna
+    señal real de que hiciera falta — el usuario recién ve/decide sobre
+    la propuesta DESPUÉS de este turno, nunca durante). Tope estructural
+    a 1 sola llamada — nunca más permisivo que max_tool_repeats, igual
+    criterio que el autochequeo de imágenes.
+    """
+    calls: list = []
+    tools = [
+        AgentTool(
+            name="propose_project_files", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: calls.append(kw) or "propuesta enviada",
+        ),
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="propose_project_files", arguments={"files": [{"path": "menu.html", "content": "v1"}]})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="propose_project_files", arguments={"files": [{"path": "menu.html", "content": "v2"}]})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("elaborá un menú con fotos y descripción", max_steps=10, max_tool_repeats=5)
+
+    # Una sola llamada real, aunque max_tool_repeats configurado (5) lo
+    # permitiría de no ser por el tope específico de esta herramienta.
+    assert len(calls) == 1
+    assert "ERROR" in result.steps[-1].observation
+    assert "propose_project_files" in result.steps[-1].observation
+    assert result.status == "success"
+
+
 def test_default_max_tool_repeats_comes_from_settings(monkeypatch):
     from utils.config import settings
 
@@ -678,6 +712,24 @@ def test_vscode_client_gets_the_import_resource_tool():
     assert "import_resource" in tool_names_sent
 
 
+def test_web_client_never_gets_the_read_workspace_file_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "read_workspace_file" not in tool_names_sent
+
+
+def test_vscode_client_gets_the_read_workspace_file_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola", client="vscode")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "read_workspace_file" in tool_names_sent
+
+
 def test_a_raw_json_array_of_files_is_detected_as_a_propose_project_files_call():
     """
     BUG REAL ENCONTRADO EN USO: el modelo a veces "imitaba" la llamada a
@@ -811,6 +863,28 @@ def test_project_files_artifact_requiring_approval_is_a_clear_error():
 
     assert "ERROR" in observation
     assert "aprobación" in observation
+
+
+def test_workspace_file_request_artifact_tells_the_model_to_wait_not_invent_content():
+    class FakeReadTool:
+        class manifest:
+            description = "lee un archivo del workspace"
+            parameters_schema = {"type": "object", "properties": {}}
+            permissions = frozenset()
+
+        def execute(self, **kwargs):
+            return Artifact(
+                modality="workspace_file_request",
+                uri="",
+                metadata={"status": "pending", "request_id": "req-1", "path": "restaurante-web/menu.html"},
+            )
+
+    agent_tool = _agent_tool_from_tool("read_workspace_file", FakeReadTool())
+
+    observation = agent_tool.handler()
+
+    assert "restaurante-web/menu.html" in observation
+    assert "no inventes" in observation.lower()
 
 
 # --- Fallback: modelos que no completan tool_calls nativo (bug real de producción) ---

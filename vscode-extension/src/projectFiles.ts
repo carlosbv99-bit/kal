@@ -12,26 +12,9 @@
  * validación de rutas en sí (sin depender de vscode) vive aparte, en
  * projectFilesFormat.ts, testeable con Node normal.
  */
-import * as path from "path";
 import * as vscode from "vscode";
-import { ChatResult, KalClient, ProjectFilesArtifact } from "./kalClient";
-import { findFirstInvalidPath } from "./projectFilesFormat";
-
-function findProjectFilesArtifact(result: ChatResult): ProjectFilesArtifact | undefined {
-  for (const step of result.steps) {
-    if (step.artifact && (step.artifact as ProjectFilesArtifact).modality === "project_files") {
-      return step.artifact as ProjectFilesArtifact;
-    }
-  }
-  return undefined;
-}
-
-/** true si `targetFsPath` queda dentro de `rootFsPath` (o es el propio root). */
-function isWithinRoot(rootFsPath: string, targetFsPath: string): boolean {
-  const normalizedRoot = path.resolve(rootFsPath);
-  const normalizedTarget = path.resolve(targetFsPath);
-  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + path.sep);
-}
+import { ChatResult, KalClient } from "./kalClient";
+import { findFirstInvalidPath, findProjectFilesArtifact, isWithinRoot } from "./projectFilesFormat";
 
 async function fileExists(uri: vscode.Uri): Promise<boolean> {
   try {

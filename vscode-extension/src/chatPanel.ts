@@ -3,6 +3,7 @@ import { buildChatHtml } from "./chatWebviewHtml";
 import { EditorSnapshot } from "./editorContextFormat";
 import { KalClient } from "./kalClient";
 import { maybeHandleProjectFiles } from "./projectFiles";
+import { resolvePendingWorkspaceFileReads } from "./readWorkspaceFile";
 
 /**
  * WebviewPanel singleton para el chat con kal. El webview (media/chat.js)
@@ -81,8 +82,13 @@ export class ChatPanel {
     try {
       const result = await this.client.chat(text, model, this.sessionId, editorContext);
       this.sessionId = result.session_id;
-      this.panel.webview.postMessage({ type: "answer", result });
-      await maybeHandleProjectFiles(result, this.client);
+      // Resuelve cualquier pedido pendiente de read_workspace_file
+      // encadenando /chat automáticamente (ver readWorkspaceFile.ts) —
+      // transparente para el usuario, solo se muestra la respuesta FINAL.
+      const finalResult = await resolvePendingWorkspaceFileReads(result, this.client, model, editorContext);
+      this.sessionId = finalResult.session_id;
+      this.panel.webview.postMessage({ type: "answer", result: finalResult });
+      await maybeHandleProjectFiles(finalResult, this.client);
     } catch (e) {
       this.panel.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
     } finally {

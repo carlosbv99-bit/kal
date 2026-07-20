@@ -321,9 +321,21 @@ class BrowserTool(Tool):
         domain = urlparse(url).netloc or url
         hostname = urlparse(url).hostname or url
         if not self._is_network_access_allowed(hostname):
+            # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): esta razón
+            # solo decía "no permitido, agregalo a config.yaml" — sin
+            # nombrar los dominios que SÍ están permitidos ahora mismo, el
+            # modelo (probó con google.com) terminó respondiéndole al
+            # usuario "no tengo acceso a Internet ni a servicios externos",
+            # una generalización falsa (si el pedido es una foto real,
+            # unsplash.com/pexels.com/etc. SÍ funcionan) en vez de
+            # reintentar con un dominio real ya habilitado.
+            allowed = ", ".join(sorted(self.cfg.allowed_domains)) or "(ninguno configurado todavía)"
             reason = (
-                f"Dominio no permitido: '{domain}'. Agregarlo a config.yaml: browser.allowed_domains "
-                "para habilitar la navegación, o pedile al usuario que lo apruebe (GET /network-access)."
+                f"Dominio no permitido: '{domain}'. Esto NO significa que no haya acceso a "
+                f"internet en absoluto — dominios reales habilitados ahora mismo: {allowed}. "
+                "Si el pedido es conseguir una foto/imagen real, reintentá con uno de esos "
+                "dominios en vez de este. Para agregar un dominio nuevo: config.yaml "
+                "(browser.allowed_domains), o pedile al usuario que lo apruebe (GET /network-access)."
             )
             self._audit("failure", url, action, reason)
             return self._create_network_pending_artifact(hostname, reason)

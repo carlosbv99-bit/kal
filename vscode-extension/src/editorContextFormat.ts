@@ -16,4 +16,11 @@ export interface EditorSnapshot {
   languageId: string;
   text: string;
   isSelection: boolean;
+  // Pieza mínima de "Editor Context Provider" (2026-07-20) — ver
+  // agent_core/context_service.py::EditorContextSignals. Opcionales:
+  // construcciones existentes de este tipo (tests, applyEdit.ts) no
+  // necesitan tocarse. `captureEditorSnapshot()` siempre los llena
+  // (con [] si no hay nada), nunca los deja `undefined` de verdad.
+  workspaceTree?: string[];
+  openEditors?: string[];
 }

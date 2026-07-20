@@ -67,6 +67,8 @@ test("chat() manda editor_context como señal cruda, nunca texto ya formateado",
       language_id: "python",
       text: "def foo():\n    pass\n",
       is_selection: true,
+      workspace_tree: [],
+      open_editors: [],
     });
     return jsonResponse({ session_id: "s", goal: "x", final_answer: "y", status: "success", plan: [], steps: [] });
   }) as typeof fetch;
@@ -77,6 +79,25 @@ test("chat() manda editor_context como señal cruda, nunca texto ya formateado",
     languageId: "python",
     text: "def foo():\n    pass\n",
     isSelection: true,
+  });
+});
+
+test("chat() manda workspace_tree y open_editors cuando el snapshot los trae (Visible Tree/Open Editors)", async () => {
+  const fakeFetch = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.editor_context.workspace_tree, ["restaurante-web/index.html", "restaurante-web/menu.html"]);
+    assert.deepEqual(body.editor_context.open_editors, ["restaurante-web/menu.html"]);
+    return jsonResponse({ session_id: "s", goal: "x", final_answer: "y", status: "success", plan: [], steps: [] });
+  }) as typeof fetch;
+
+  const client = new KalClient("http://localhost:8000", fakeFetch);
+  await client.chat("x", undefined, undefined, {
+    relativePath: "restaurante-web/menu.html",
+    languageId: "html",
+    text: "",
+    isSelection: false,
+    workspaceTree: ["restaurante-web/index.html", "restaurante-web/menu.html"],
+    openEditors: ["restaurante-web/menu.html"],
   });
 });
 

@@ -9,10 +9,46 @@
  * lado de la extensión, que es quien de verdad escribe al disco real y
  * no debería confiar ciegamente en que el backend lo hizo bien.
  */
+import * as path from "path";
+import { ChatResult, ProjectFilesArtifact } from "./kalClient";
 
 export interface ProjectFile {
   path: string;
   content: string;
+}
+
+/**
+ * true si `targetFsPath` queda dentro de `rootFsPath` (o es el propio
+ * root). Puro (solo usa el módulo `path` de Node) — vivía antes
+ * duplicado dentro de projectFiles.ts; se movió acá para que
+ * readWorkspaceFile.ts (mismo chequeo de defensa en profundidad, ahora
+ * para LECTURA en vez de escritura) lo reuse sin repetir la lógica.
+ */
+export function isWithinRoot(rootFsPath: string, targetFsPath: string): boolean {
+  const normalizedRoot = path.resolve(rootFsPath);
+  const normalizedTarget = path.resolve(targetFsPath);
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + path.sep);
+}
+
+/**
+ * BUG REAL ENCONTRADO EN USO (2026-07-20): el modelo puede llamar a
+ * propose_project_files más de una vez en el mismo turno (p.ej.
+ * revisando su propio primer intento) — max_tool_repeats lo acota,
+ * pero antes de este fix se mostraba la PRIMERA propuesta de
+ * `result.steps`, no la ÚLTIMA. Cualquier revisión posterior (más
+ * completa, con un bug corregido, etc.) quedaba descartada en
+ * silencio — el usuario nunca la veía. Se usa la ÚLTIMA porque
+ * representa el intento más reciente/refinado del modelo antes de
+ * responder.
+ */
+export function findProjectFilesArtifact(result: ChatResult): ProjectFilesArtifact | undefined {
+  let found: ProjectFilesArtifact | undefined;
+  for (const step of result.steps) {
+    if (step.artifact && (step.artifact as ProjectFilesArtifact).modality === "project_files") {
+      found = step.artifact as ProjectFilesArtifact;
+    }
+  }
+  return found;
 }
 
 /** null si el path es válido; un mensaje de error legible si no. */

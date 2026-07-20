@@ -42,7 +42,13 @@ llm:
   # herramientas notablemente mejor que qwen2.5-coder:14b, sin sacrificar
   # el uso correcto de herramientas cuando sí hacen falta.
   default_model: "qwen2.5-coder:14b"
-  timeout_seconds: 120
+  # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): un pedido de varios
+  # pasos (propose_project_files + browser, con resultados de navegación
+  # ya en el contexto) hizo que qwen2.5-coder:14b en CPU tardara más de
+  # 120s en una sola respuesta — Ollama nunca colgó, el modelo grande
+  # simplemente necesitaba más tiempo. Subido a 300s para dar margen
+  # real sin esperar indefinidamente si algo se cuelga de verdad.
+  timeout_seconds: 300
   max_agent_steps: 8                    # tope de iteraciones del loop antes de forzar una respuesta final
   # Descomponer el objetivo en subtareas antes de ejecutar (ver
   # agent_core/llm/planner.py). BUG REAL ENCONTRADO EN USO: con el modelo
@@ -275,13 +281,21 @@ permissions:
 # aprobación explícita, nunca al revés.
 filesystem_access:
   auto_allow:
-    # Crear/modificar dentro del workspace abierto (VS Code) — el único
-    # caso que ejercita hoy el agente IDE. Borrar/renombrar ahí, y
-    # cualquier acción fuera del workspace (home/external), siempre
-    # requieren aprobación humana.
+    # Crear/modificar dentro del workspace abierto (VS Code). Borrar/
+    # renombrar ahí, y cualquier acción fuera del workspace (home/
+    # external), siempre requieren aprobación humana.
+    # "read" agregado 2026-07-20 (read_workspace_file, ver
+    # tool_integration/adapters/vscode_files.py): leer un archivo que el
+    # usuario YA tiene visible en su propio árbol de VS Code es de
+    # riesgo bajo, muy distinto de crear/modificar — y exigir
+    # aprobación humana rompería el mecanismo encadenado (kal pide el
+    # archivo, la extensión se lo devuelve automáticamente en el mismo
+    # turno) que requiere una respuesta síncrona, no un "esperá a que
+    # un humano apruebe".
     workspace:
       - create
       - modify
+      - read
 
 self_modification:
   # Opt-in explícito. Hasta 2026-07-11 este flag existía pero

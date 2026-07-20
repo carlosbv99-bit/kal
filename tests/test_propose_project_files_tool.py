@@ -87,3 +87,51 @@ def test_accepts_a_relative_path_with_subfolders(monkeypatch):
     artifact = tool.execute(files=[{"path": "css/estilos.css", "content": "body {}"}])
 
     assert artifact.metadata["files"][0]["path"] == "css/estilos.css"
+
+
+# --- Extensiones binarias reales (imagen/audio/video/fuente) — nunca texto ---
+#
+# BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): pedido de agregar
+# fotos a una página de menú — el modelo, sin llamar a browser ni a
+# import_resource, propuso "plato1.jpg"/"plato2.jpg" cuyo "contenido"
+# era el texto literal "https://example.com/path/to/plato1.jpg" — ni
+# una imagen real ni una descarga real, un archivo de texto con
+# extensión de imagen (ícono roto en la vista previa del usuario).
+
+
+@pytest.mark.parametrize(
+    "path", ["fotos/plato1.jpg", "audio.mp3", "video.mp4", "fuente.woff2", "documento.pdf", "PLATO1.JPG"]
+)
+def test_rejects_a_binary_media_extension(path):
+    tool = ProposeProjectFilesTool()
+    with pytest.raises(ProjectFilesRejectedError, match="binario"):
+        tool.execute(files=[{"path": path, "content": "https://example.com/path/to/plato1.jpg"}])
+
+
+def test_rejects_the_whole_proposal_if_any_single_file_is_a_binary_extension(monkeypatch):
+    """Todo o nada: un HTML legítimo junto a una imagen fabricada
+    rechaza la propuesta ENTERA, no solo el archivo problemático — el
+    usuario nunca debería ver una vista previa a medio armar."""
+    import tool_integration.adapters.vscode_files as module
+
+    monkeypatch.setattr(module.filesystem_access_manager, "evaluate", lambda **kwargs: "auto_allowed")
+    tool = ProposeProjectFilesTool()
+
+    with pytest.raises(ProjectFilesRejectedError, match="binario"):
+        tool.execute(files=[
+            {"path": "menu.html", "content": "<html></html>"},
+            {"path": "assets/plato1.jpg", "content": "https://example.com/path/to/plato1.jpg"},
+        ])
+
+
+def test_accepts_svg_since_it_is_plain_text_xml(monkeypatch):
+    """.svg queda afuera del bloqueo a propósito: es XML de texto
+    plano, un ícono vectorial escrito a mano es un uso legítimo."""
+    import tool_integration.adapters.vscode_files as module
+
+    monkeypatch.setattr(module.filesystem_access_manager, "evaluate", lambda **kwargs: "auto_allowed")
+    tool = ProposeProjectFilesTool()
+
+    artifact = tool.execute(files=[{"path": "icono.svg", "content": "<svg></svg>"}])
+
+    assert artifact.metadata["files"][0]["path"] == "icono.svg"

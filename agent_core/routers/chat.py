@@ -27,13 +27,19 @@ class EditorContextRequest(BaseModel):
     """
     Señal cruda del editor (ver agent_core/context_service.py) — el
     frontend (extensión de VS Code) NUNCA manda texto ya formateado
-    acá, solo estos 4 campos. El Context Service decide cómo se ve en
+    acá, solo estos campos. El Context Service decide cómo se ve en
     el mensaje final al LLM.
     """
     relative_path: str
     language_id: str
     text: str
     is_selection: bool
+    # Pieza mínima de "Editor Context Provider" (2026-07-20) — ver
+    # agent_core/context_service.py::EditorContextSignals. Ambos vacíos
+    # por defecto: compatibilidad con clientes viejos que todavía no
+    # los mandan.
+    workspace_tree: list[str] = []
+    open_editors: list[str] = []
 
 
 class ChatRequest(BaseModel):
@@ -85,6 +91,8 @@ def chat(req: ChatRequest):
             language_id=req.editor_context.language_id,
             text=req.editor_context.text,
             is_selection=req.editor_context.is_selection,
+            workspace_tree=req.editor_context.workspace_tree,
+            open_editors=req.editor_context.open_editors,
         )
     context_bundle = orchestrator.context_service.build(session, editor_context, client=req.client)
 
@@ -116,6 +124,17 @@ def chat(req: ChatRequest):
                 "modality": "project_files",
                 "request_id": step.artifact.metadata.get("request_id"),
                 "files": step.artifact.metadata.get("files", []),
+            }
+        if step.artifact.modality == "workspace_file_request":
+            # ReadWorkspaceFileTool (tool_integration/adapters/vscode_files.py)
+            # nunca lee el archivo real acá — el backend no tiene acceso al
+            # disco de VS Code. Esto solo le avisa a la extensión qué ruta
+            # pedir; ella responde encadenando un /chat nuevo con el
+            # contenido real (ver vscode-extension/src/readWorkspaceFile.ts).
+            return {
+                "modality": "workspace_file_request",
+                "request_id": step.artifact.metadata.get("request_id"),
+                "path": step.artifact.metadata.get("path"),
             }
         if step.artifact.modality != "image":
             return None

@@ -58,6 +58,44 @@ def _validate_relative_path(path: str) -> None:
         raise ProjectFilesRejectedError(f"'{path}' intenta salir de la carpeta del proyecto ('..') — no permitido.")
 
 
+# Extensiones de contenido binario real — nunca texto legítimo. .svg queda
+# afuera a propósito: es XML de texto plano, un ícono vectorial escrito a
+# mano es un uso legítimo de propose_project_files.
+_BINARY_MEDIA_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".tiff",
+    ".mp3", ".wav", ".ogg", ".flac", ".m4a",
+    ".mp4", ".webm", ".mov", ".avi", ".mkv",
+    ".woff", ".woff2", ".ttf", ".otf",
+    ".pdf", ".zip",
+})
+
+
+def _reject_if_binary_media_extension(path: str) -> None:
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): pedido de agregar
+    fotos a una página — el modelo, sin haber llamado a browser ni a
+    import_resource, propuso archivos "plato1.jpg"/"plato2.jpg" cuyo
+    "contenido" era literalmente el texto "https://example.com/path/to/
+    plato1.jpg" — ni una imagen real ni una descarga real, un archivo
+    de TEXTO con extensión de imagen que el navegador no puede
+    renderizar (ícono roto en la vista previa). propose_project_files
+    solo maneja contenido de TEXTO (ver 'content': string en el
+    schema) — la única vía real para bytes binarios reales es
+    import_resource (Artifact Service, descarga real desde una URL
+    confirmada). Rechazado acá, estructural, en vez de confiar en que
+    el prompt solo alcance para evitarlo (mismo criterio que el resto
+    de las validaciones de este archivo).
+    """
+    suffix = PurePosixPath(path.replace("\\", "/")).suffix.lower()
+    if suffix in _BINARY_MEDIA_EXTENSIONS:
+        raise ProjectFilesRejectedError(
+            f"'{path}' tiene una extensión de archivo binario (imagen/audio/video/fuente/etc.) — "
+            "propose_project_files solo puede escribir contenido de TEXTO, nunca bytes reales. "
+            "Para un archivo de este tipo, usá import_resource con una URL real confirmada "
+            "(nunca inventada) en su lugar."
+        )
+
+
 class ProposeProjectFilesTool(Tool):
     manifest = ToolManifest(
         name="propose_project_files",
@@ -69,7 +107,10 @@ class ProposeProjectFilesTool(Tool):
             "aplicarla, nunca se escribe nada sin su aprobación explícita. "
             "'path' de cada archivo tiene que ser SIEMPRE una ruta RELATIVA a la raíz del "
             "proyecto (p.ej. 'index.html', 'css/estilos.css') — nunca una ruta absoluta "
-            "(como '/home/...' o 'C:\\...') ni un path con '..'; esos se rechazan."
+            "(como '/home/...' o 'C:\\...') ni un path con '..'; esos se rechazan. "
+            "'content' es SIEMPRE texto plano — nunca uses esta herramienta para una imagen/"
+            "audio/video/fuente real (.jpg/.png/.mp3/.mp4/etc.), esos se rechazan; para un "
+            "archivo binario real, usá import_resource con una URL real confirmada."
         ),
         created_by="system",
         requires_filesystem_write=True,
@@ -98,6 +139,7 @@ class ProposeProjectFilesTool(Tool):
             raise ProjectFilesRejectedError("'files' es requerido, con al menos un archivo.")
         for f in files:
             _validate_relative_path(f.get("path", ""))
+            _reject_if_binary_media_extension(f.get("path", ""))
 
         decision = filesystem_access_manager.evaluate(
             skill_name=VSCODE_INTEGRATION_SKILL_NAME,
@@ -250,4 +292,83 @@ class ImportResourceTool(Tool):
                     }
                 ],
             },
+        )
+
+
+class ReadWorkspaceFileTool(Tool):
+    """
+    Pieza mínima de "Editor Context Provider" (2026-07-20, pedido
+    explícito del usuario): kal no puede leer un archivo arbitrario del
+    workspace por sí mismo (mismo límite arquitectónico que el resto de
+    este archivo — no sabe qué carpeta tiene abierta VS Code), así que
+    esta Tool NUNCA lee nada ella misma. Devuelve un Artifact "pending"
+    con la ruta pedida; la extensión (vscode-extension/src/
+    readWorkspaceFile.ts) lee el archivo real del disco y vuelve a
+    llamar a /chat automáticamente con su contenido — kal sigue
+    razonando en un paso siguiente, invisible para el usuario (nunca
+    tiene que pedirlo dos veces a mano). Sin este mecanismo encadenado,
+    kal solo podría "leer" el ÚNICO archivo activo en el editor en el
+    momento del pedido (ver EditorContextSignals) — nunca uno arbitrario
+    del árbol, ni siquiera si el usuario lo tiene abierto en OTRA
+    pestaña.
+    """
+
+    manifest = ToolManifest(
+        name="read_workspace_file",
+        description=(
+            "Pide el contenido REAL de un archivo del proyecto abierto en VS Code, por su ruta "
+            "relativa (p.ej. 'restaurante-web/estilos.css') — usá el árbol de archivos del "
+            "contexto de esta conversación para saber qué rutas existen de verdad, nunca "
+            "inventes una. El contenido NO llega en esta misma respuesta: la extensión lo lee del "
+            "disco real y te lo entrega automáticamente en un paso siguiente de este mismo turno "
+            "— no hace falta pedirlo de nuevo ni avisarle al usuario que esperés. Usala antes de "
+            "asumir o inventar el contenido de un archivo que todavía no forma parte de esta "
+            "conversación (no está abierto ni fue pegado en el chat)."
+        ),
+        created_by="system",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Ruta RELATIVA al proyecto, p.ej. 'restaurante-web/index.html'",
+                },
+            },
+            "required": ["path"],
+        },
+    )
+
+    def execute(self, path: str, **kwargs) -> Artifact:
+        _validate_relative_path(path)
+
+        decision = filesystem_access_manager.evaluate(
+            skill_name=VSCODE_INTEGRATION_SKILL_NAME,
+            scope=FilesystemScope.WORKSPACE,
+            action=FilesystemAction.READ,
+            resource_key="workspace",
+        )
+        if decision != "auto_allowed":
+            # Mismo criterio fail-closed que el resto del archivo — en la
+            # config por defecto (filesystem_access.auto_allow.workspace
+            # incluye "read") esta rama es puramente defensiva, nunca se
+            # ejercita en la práctica.
+            pending = filesystem_access_manager.create_pending_request(
+                skill_name=VSCODE_INTEGRATION_SKILL_NAME,
+                scope=FilesystemScope.WORKSPACE,
+                action=FilesystemAction.READ,
+                resource_key="workspace",
+            )
+            return Artifact(
+                modality="text", uri="",
+                metadata={
+                    "status": "requires_approval", "resource_kind": "filesystem", "request_id": pending.id,
+                    "stderr": f"Leer '{path}' requiere aprobación humana — pedile al usuario que la "
+                              "apruebe (GET /filesystem-access) antes de reintentar.",
+                },
+            )
+
+        return Artifact(
+            modality="workspace_file_request",
+            uri="",
+            metadata={"status": "pending", "request_id": str(uuid4()), "path": path},
         )

@@ -5018,3 +5018,177 @@ de `enabled` + que otros cambios en skill.yaml sigan detectándose), 2
 entradas nuevas en la lista de endpoints gateados de
 `tests/test_orchestrator_admin_auth.py`. Suite completa verificada sin
 regresiones.
+
+## Tres bugs reales en un solo pedido real de VS Code (2026-07-20)
+
+El usuario probó el fix del timeout (ver sección anterior) pidiendo
+"elaborá un menú con fotografías y descripción de los platos" con un
+proyecto real (`restaurante-web/`, varias páginas ya existentes)
+abierto en VS Code. Usando el correlation ID para reconstruir el
+pedido (`logs/agent.log`+`logs/audit.log`) y leyendo los archivos
+reales que quedaron en el proyecto del usuario, aparecieron tres
+causas independientes, cada una con evidencia directa antes de tocar
+código:
+
+**1. `propose_project_files` llamado 3 veces en el mismo turno, solo
+la PRIMERA propuesta llegaba a mostrarse.** El modelo revisó su propio
+intento sin ninguna señal real de que hiciera falta — el usuario recién
+ve/decide sobre una propuesta DESPUÉS de la respuesta final, nunca
+durante el mismo turno, así que revisar "a ciegas" no tiene ningún
+fundamento. `vscode-extension/src/projectFiles.ts::findProjectFilesArtifact`
+devolvía la PRIMERA coincidencia de `result.steps`, descartando en
+silencio las revisiones posteriores (probablemente más completas).
+Fix doble: (a) movida a `projectFilesFormat.ts` (testeable con Node
+normal, sin `vscode`) y corregida para devolver la ÚLTIMA coincidencia;
+(b) `agent_core/llm/agent_loop.py` acota `propose_project_files`/
+`import_resource` a **una sola llamada por turno** (reusa
+`_VSCODE_ONLY_TOOL_NAMES`, ya existente) — mismo criterio que el
+autochequeo de imágenes, nunca más permisivo que `max_tool_repeats`.
+3 tests nuevos en Node (`projectFilesFormat.test.ts`) + 1 en
+`test_agent_loop.py`.
+
+**2. El modelo "descargó" fotos fabricando archivos de texto con una
+URL de ejemplo.** Sin haber llamado a `browser` ni a `import_resource`
+en este intento, propuso `assets/plato1.jpg`/`plato2.jpg` cuyo
+contenido real (confirmado leyendo los archivos en disco) era
+literalmente el texto `https://example.com/path/to/plato1.jpg` — ni
+una imagen real ni una descarga real, un archivo de TEXTO con
+extensión de imagen (ícono roto en la vista previa). `propose_project_files`
+solo puede escribir contenido de texto por diseño (nunca bytes
+binarios reales) — no había ningún chequeo que impidiera proponer un
+".jpg" de todos modos. Fix: `tool_integration/adapters/vscode_files.py`
+rechaza de raíz cualquier archivo con extensión binaria real
+(imagen/audio/video/fuente/pdf/zip — `.svg` queda afuera a propósito,
+es XML de texto plano), todo-o-nada para la propuesta entera. 9 tests
+nuevos en `tests/test_propose_project_files_tool.py`.
+
+**3. La vista de chat de la barra lateral nunca mandaba contexto del
+editor, ni siquiera con el archivo real abierto.** El usuario tenía
+`restaurante-web/menu.html` abierto de verdad al pedir esto — pero
+`ChatViewProvider` (el ícono de la Activity Bar) fue diseñado desde el
+principio para "chat libre", sin participar del flujo de contexto
+adjunto que sí tiene `ChatPanel`. Sin saber qué archivo/proyecto
+real existía, el modelo adivinó un `menu.html` suelto en la raíz del
+workspace — un archivo nuevo y completamente desconectado del sitio
+real (sin su `estilos.css`, sin los links de navegación a las demás
+páginas). El usuario propuso una arquitectura de "Editor Context
+Provider" más completa (workspace root, árbol visible, editores
+abiertos, cursor, con el Context Service decidiendo cuánto incluir por
+presupuesto/tarea) — separando explícitamente contexto (dónde trabaja
+el usuario) de autorización (qué puede hacer una Skill, responsabilidad
+exclusiva del Permission Manager, verificado que ya es así hoy). Se
+acordó implementar ahora solo la pieza mínima que cierra el bug real,
+dejando el resto anotado (ver memoria del proyecto).
+
+Fix implementado, sin nueva dependencia ni endpoint nuevo — reusa el
+contrato YA EXISTENTE de `editor_context` (`agent_core/context_service.py`):
+`vscode-extension/src/editorContext.ts::captureEditorSnapshot()` gana
+un parámetro `includeContent` (default `true`, sin cambiar el
+comportamiento de `ChatPanel`/"Preguntar sobre la selección"); con
+`false`, devuelve `text: ""` — solo `relativePath`/`languageId`.
+`ChatViewProvider` lo captura y manda AUTOMÁTICAMENTE en cada pedido
+(nunca requiere un click de "adjuntar"). Del lado del backend,
+`context_service.py` distingue el caso de `text` vacío: en vez del
+bloque de código completo, le dice al modelo explícitamente "el usuario
+tiene abierto '<ruta>' — usá esa ruta real en vez de adivinar una
+nueva", sin gastar tokens mandando el archivo entero en cada mensaje de
+un chat pensado para ser libre. 1 test nuevo en
+`tests/test_context_service.py`.
+
+Verificado: `npm test` de la extensión (32, incluidos los 3 de la
+última propuesta) + suite completa de Python sin regresiones.
+
+## kal se subestimaba a sí mismo: "no tengo acceso a internet" y "no puedo generar imágenes" (2026-07-20)
+
+El usuario pegó dos intercambios reales de VS Code: pidió fotos para
+el menú, kal probó `browser` sobre `www.google.com` (no permitido) y
+respondió "no tengo acceso a Internet ni a servicios externos" — una
+generalización FALSA (`unsplash.com`/`pexels.com`/`pixabay.com` sí
+están permitidos). Después, pedido "generá vos mismo las imágenes",
+respondió "no tengo la capacidad de generar imágenes... podés usar
+herramientas externas" — también engañoso: kal SÍ genera imágenes
+(SDXL-Turbo local), simplemente `image_generation` está excluida del
+toolset en modo VS Code a propósito (ver
+[[technical_vscode_client_tool_restriction]], para no mezclar
+generación de imágenes con pedidos de código).
+
+Dos fixes, uno técnico (el mensaje de rechazo del dominio no ayudaba a
+recuperarse) y uno de prompt (el modelo no distinguía "esta acción
+puntual falló" de "no tengo esta capacidad en absoluto"):
+
+- `tool_integration/adapters/browser.py`: el mensaje de "dominio no
+  permitido" ahora nombra explícitamente los dominios REALES ya
+  permitidos (antes solo decía "agregalo a config.yaml"), dándole al
+  modelo un paso siguiente concreto en vez de un callejón sin salida.
+- `agent_core/context_service.py::_VSCODE_CLIENT_INSTRUCTION`: dos
+  párrafos nuevos, mismo patrón que el resto del archivo (bug real +
+  regla), pidiendo explícitamente no generalizar un rechazo puntual
+  ("este dominio no está permitido") como una incapacidad total ("no
+  hay internet"), y aclarar que la ausencia de `image_generation` es
+  una decisión de ESTE modo, no una limitación general de kal —
+  ofreciendo `browser`+`import_resource` como alternativa real en vez
+  de mandar al usuario a buscar herramientas externas por su cuenta.
+
+3 tests nuevos (`test_browser_tool.py`, 2 en `test_context_service.py`).
+
+## "Visible Tree"/"Open Editors" + read_workspace_file (2026-07-20)
+
+Siguiente pieza, explícitamente pedida por el usuario, de la propuesta
+de Editor Context Provider (ver la sección anterior): el contexto
+liviano automático de `ChatViewProvider` solo mandaba la ruta del
+archivo ACTIVO — si el archivo relevante para el pedido estaba abierto
+en otra pestaña (no la que tiene foco) o en otra carpeta del proyecto,
+kal seguía sin poder saberlo. Dos piezas nuevas:
+
+**Árbol de archivos + pestañas abiertas.** `vscode-extension/src/
+editorContext.ts::captureWorkspaceTree()` (async, `vscode.workspace.
+findFiles()`, tope 500 archivos, excluye `node_modules`/`.git`/`dist`/
+etc.) y `captureOpenEditors()` (síncrono, `vscode.window.tabGroups.
+all`). Se adjuntan solo cuando HAY un editor activo real (decisión de
+diseño: un `editorContext` con `relativePath` vacío es un caso raro que
+el backend no necesita manejar). Del lado del contrato de tres capas
+(`EditorContextSignals`/`EditorContextRequest`/`EditorSnapshot`, deben
+mantenerse sincronizadas) se suman `workspace_tree`/`open_editors`;
+`agent_core/context_service.py::_build_session_context()` los
+incorpora al prompt con un tope de 200 rutas, instruyendo explícitamente
+al modelo a agregar/modificar DENTRO de un proyecto ya existente en vez
+de crear un archivo suelto con el mismo nombre en la raíz — el bug real
+de la sección anterior, atacado en la raíz en vez de con un parche
+puntual.
+
+**`read_workspace_file`: pedir el contenido real de un archivo por
+ruta.** El backend de Python no tiene acceso al disco real de VS Code
+— así que `ReadWorkspaceFileTool` (`tool_integration/adapters/
+vscode_files.py`) nunca lee nada ella misma: valida la ruta, chequea el
+Permission Manager (`filesystem_access.auto_allow.workspace` ahora
+incluye `"read"`, necesario porque el flujo requiere una respuesta
+síncrona) y devuelve un Artifact `modality="workspace_file_request"`
+con estado "pending". Mecanismo elegido explícitamente por el usuario
+("pedido encadenado", sobre la alternativa de precargar todas las
+pestañas abiertas): la extensión detecta este pedido pendiente en
+`result.steps`, lee el archivo real
+(`vscode-extension/src/readWorkspaceFile.ts`, con el mismo chequeo
+`isWithinRoot` de defensa en profundidad que ya usaba la escritura —
+movido a `projectFilesFormat.ts` para reusarlo) y encadena
+automáticamente un `/chat` nuevo (mismo `session_id`) con el contenido,
+marcado explícitamente como "esto no es un mensaje nuevo del usuario"
+para que el modelo no se confunda — transparente para el usuario, tope
+de 5 vueltas encadenadas por pedido para no loopear sin converger.
+
+Bug real encontrado escribiendo esto, no reportado por el usuario:
+`chat.py::_step_artifact()` y `agent_loop.py::_artifact_to_observation()`
+no tenían ninguna rama para `modality="workspace_file_request"` — el
+pedido pendiente nunca hubiera llegado a serializarse en la respuesta
+de `/chat` (la extensión jamás lo hubiera detectado) y el modelo habría
+recibido una observación sin sentido ("workspace_file_request: archivo
+generado en"). Corregido antes de conectar el lado de la extensión,
+con tests en ambas puntas.
+
+Verificado: 868 tests de Python sin regresiones (suite completa,
+incluida `test_image_inpaint_via_kernel_skill_edits_a_real_generated_image`,
+que había fallado una vez antes por contención real de recursos del
+sistema — swap al límite, no un bug de código) + 43 tests de Node
+(`npm test`) + reinstalación real de la extensión con timestamp
+verificado. Pendiente: probarlo en vivo con un escenario real
+multi-proyecto (farmacia/restaurante) una vez que el usuario recargue
+la ventana de VS Code.

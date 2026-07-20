@@ -139,6 +139,23 @@ def test_domain_not_in_allowlist_creates_a_real_pending_network_request(tool, al
     assert any(p.id == artifact.metadata["request_id"] and p.resource_key == "otrositio.com" for p in pending)
 
 
+def test_rejection_message_names_the_currently_allowed_domains(tool, monkeypatch):
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): pedido de "www.google.com" no
+    permitido devolvía un mensaje que solo decía "agregalo a config.yaml" — sin
+    nombrar los dominios YA permitidos, el modelo le dijo al usuario "no tengo
+    acceso a Internet en absoluto" en vez de reintentar con uno real (p.ej.
+    unsplash.com). El mensaje ahora los nombra explícitamente.
+    """
+    monkeypatch.setattr(settings.browser, "allowed_domains", ["unsplash.com", "pexels.com"])
+
+    artifact = tool.execute(url="https://www.google.com/")
+
+    assert "unsplash.com" in artifact.metadata["stderr"]
+    assert "pexels.com" in artifact.metadata["stderr"]
+    assert "NO significa que no haya acceso a" in artifact.metadata["stderr"]
+
+
 def test_domain_approved_via_access_manager_is_allowed_on_retry(tool, allow_example_domain, tmp_path, monkeypatch):
     """
     Tras aprobar (level="project"), un reintento del MISMO dominio ya

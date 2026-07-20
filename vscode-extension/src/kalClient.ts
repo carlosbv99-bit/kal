@@ -30,14 +30,28 @@ export interface ProjectFilesArtifact {
   files: ProjectFile[];
 }
 
+/**
+ * Ver ReadWorkspaceFileTool (tool_integration/adapters/vscode_files.py)
+ * y readWorkspaceFile.ts — el backend nunca lee el archivo real (no
+ * tiene acceso al disco de VS Code), solo avisa QUÉ ruta pedir. La
+ * extensión lee `path` del disco real y encadena un /chat nuevo con el
+ * contenido (ver readWorkspaceFile.ts::resolvePendingWorkspaceFileReads).
+ */
+export interface WorkspaceFileRequestArtifact {
+  modality: "workspace_file_request";
+  request_id: string;
+  path: string;
+}
+
 export interface ChatStep {
   tool: string;
   arguments: Record<string, unknown>;
   observation: string;
-  // Solo se tipa completo "project_files" (lo único que esta extensión
-  // necesita leer estructurado, ver projectFiles.ts) — cualquier otro
-  // modality (p.ej. "image") llega tal cual, sin usarse acá.
-  artifact?: ProjectFilesArtifact | Record<string, unknown> | null;
+  // Solo se tipan completos "project_files"/"workspace_file_request"
+  // (lo único que esta extensión necesita leer estructurado, ver
+  // projectFiles.ts/readWorkspaceFile.ts) — cualquier otro modality
+  // (p.ej. "image") llega tal cual, sin usarse acá.
+  artifact?: ProjectFilesArtifact | WorkspaceFileRequestArtifact | Record<string, unknown> | null;
 }
 
 export interface ChatResult {
@@ -73,6 +87,8 @@ export class KalClient {
                 language_id: editorContext.languageId,
                 text: editorContext.text,
                 is_selection: editorContext.isSelection,
+                workspace_tree: editorContext.workspaceTree ?? [],
+                open_editors: editorContext.openEditors ?? [],
               }
             : null,
           client: "vscode",

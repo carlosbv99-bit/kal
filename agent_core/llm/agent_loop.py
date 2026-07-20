@@ -219,6 +219,19 @@ def _artifact_to_observation(artifact: Artifact) -> str:
         files = artifact.metadata.get("files", [])
         names = ", ".join(f["path"] for f in files)
         return f"Se prepararon {len(files)} archivo(s) para el proyecto ({names}) — el usuario decidirá si los aplica."
+    if artifact.modality == "workspace_file_request":
+        # ReadWorkspaceFileTool (tool_integration/adapters/vscode_files.py):
+        # acá tampoco hay contenido real todavía — lo pide la extensión de
+        # VS Code recién en el próximo /chat encadenado (ver
+        # vscode-extension/src/readWorkspaceFile.ts). El mensaje deja
+        # explícito que hay que esperar, para que el modelo no invente el
+        # contenido ni vuelva a pedir el mismo archivo en este mismo turno.
+        path = artifact.metadata.get("path", "")
+        return (
+            f"Pedido de lectura de '{path}' enviado — su contenido real todavía no está disponible en "
+            "este turno, va a llegar automáticamente como un mensaje nuevo en un paso siguiente de esta "
+            "misma conversación. No inventes ni asumas su contenido."
+        )
     return f"{artifact.modality}: archivo generado en {artifact.uri}"
 
 
@@ -263,12 +276,17 @@ _MULTIMEDIA_TOOL_NAMES = frozenset({
 })
 
 # Inverso del conjunto de arriba: herramientas que SOLO tienen sentido
-# para client="vscode" — el backend nunca escribe el archivo real él
-# mismo (ver tool_integration/adapters/vscode_files.py), la escritura
-# ocurre del lado de la extensión tras la aprobación del usuario. El
-# cliente web no tiene ningún canal para aplicar esa propuesta, así que
-# ofrecérsela solo generaría una respuesta que nadie puede usar.
-_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files", "import_resource"})
+# para client="vscode" — el backend nunca toca el filesystem real del
+# usuario él mismo (ver tool_integration/adapters/vscode_files.py):
+# propose_project_files/import_resource escriben recién del lado de la
+# extensión, tras la aprobación del usuario; read_workspace_file (2026-
+# 07-20) lee recién del lado de la extensión, que encadena la
+# respuesta automáticamente (ver vscode-extension/src/
+# readWorkspaceFile.ts). El cliente web no tiene ningún workspace real
+# que leer ni ningún canal para aplicar una propuesta de escritura, así
+# que ofrecerle cualquiera de las tres solo generaría una respuesta que
+# nadie puede usar.
+_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files", "import_resource", "read_workspace_file"})
 
 
 class AgentLoop:
@@ -494,10 +512,20 @@ class AgentLoop:
             for tool_call in effective_tool_calls:
                 tool_call_counts[tool_call.name] = tool_call_counts.get(tool_call.name, 0) + 1
                 artifact = None
-                # Tope más estricto (2: la original + un solo reintento)
-                # si esta herramienta ya se autochequeó con analyze_image
-                # en este turno — nunca más permisivo que max_tool_repeats.
-                effective_limit = min(2, max_tool_repeats) if tool_call.name in self_checked_tools else max_tool_repeats
+                # Tope más estricto si esta herramienta ya se autochequeó
+                # con analyze_image en este turno (2: la original + un
+                # solo reintento), o si es una propuesta asincrónica tipo
+                # propose_project_files/import_resource (1: la revisión
+                # del usuario pasa FUERA de este turno, así que una
+                # segunda llamada nunca tiene información nueva que
+                # justifique una revisión — ver BUG REAL más abajo).
+                # Nunca más permisivo que max_tool_repeats.
+                if tool_call.name in self_checked_tools:
+                    effective_limit = min(2, max_tool_repeats)
+                elif tool_call.name in _VSCODE_ONLY_TOOL_NAMES:
+                    effective_limit = min(1, max_tool_repeats)
+                else:
+                    effective_limit = max_tool_repeats
                 if tool_call_counts[tool_call.name] > effective_limit:
                     # Rechazado ANTES de ejecutar — cada llamada real a una
                     # herramienta de generación cuesta minutos de cómputo acá,
@@ -511,6 +539,21 @@ class AgentLoop:
                             "no coincide exactamente con lo pedido (p.ej. una cantidad exacta de algo), decilo "
                             "honestamente en tu respuesta — los modelos de generación de imágenes no siempre "
                             "respetan cantidades exactas, reintentar más no lo garantiza."
+                        )
+                    elif tool_call.name in _VSCODE_ONLY_TOOL_NAMES:
+                        # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): el
+                        # modelo llamó a propose_project_files 3 veces en el
+                        # mismo turno (revisando su propio intento anterior,
+                        # sin ninguna señal real de que hiciera falta) — la
+                        # extensión mostraba solo UNA propuesta al usuario
+                        # (antes de otro fix, ni siquiera la última), así que
+                        # las llamadas de más eran cómputo puro perdido.
+                        observation = (
+                            f"ERROR: ya llamaste a '{tool_call.name}' en este turno — no la llames de nuevo. "
+                            "El usuario todavía no vio ni decidió sobre esa propuesta (su revisión ocurre "
+                            "DESPUÉS de tu respuesta, nunca en este mismo turno), así que no tenés ninguna "
+                            "información nueva que justifique proponer de nuevo. Da tu respuesta final ahora, "
+                            "describiendo lo que ya propusiste."
                         )
                     else:
                         observation = (
