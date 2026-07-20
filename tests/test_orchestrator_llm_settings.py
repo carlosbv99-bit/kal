@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from agent_core import orchestrator
 from agent_core.llm_settings import LLMSettingsError
 from agent_core.orchestrator import _ADMIN_TOKEN, app
+from agent_core.routers import llm_settings
 
 client = TestClient(app)
 _HEADERS = {"X-Kal-Admin-Token": _ADMIN_TOKEN}
@@ -23,7 +24,7 @@ _HEADERS = {"X-Kal-Admin-Token": _ADMIN_TOKEN}
 
 def test_get_settings_reflects_module_state(monkeypatch):
     monkeypatch.setattr(
-        orchestrator, "get_llm_settings",
+        llm_settings, "get_llm_settings",
         lambda: {"provider": "ollama", "base_url": "http://localhost:11434", "default_model": "qwen3-coder:30b", "has_api_key": False},
     )
     response = client.get("/settings/llm")
@@ -36,7 +37,7 @@ def test_post_maps_settings_error_to_400(monkeypatch):
     def _raise(**kwargs):
         raise LLMSettingsError("falta base_url")
 
-    monkeypatch.setattr(orchestrator, "update_llm_settings", _raise)
+    monkeypatch.setattr(llm_settings, "update_llm_settings", _raise)
     response = client.post("/settings/llm", json={"provider": "openai_compatible"}, headers=_HEADERS)
     assert response.status_code == 400
     assert response.json()["detail"] == "falta base_url"
@@ -54,10 +55,10 @@ def test_post_success_rebuilds_and_reinjects_the_client_everywhere(monkeypatch):
     monkeypatch.setattr(real.self_diagnosis, "llm", real.self_diagnosis.llm)
 
     sentinel = object()
-    monkeypatch.setattr(orchestrator, "update_llm_settings", lambda **kwargs: None)
+    monkeypatch.setattr(llm_settings, "update_llm_settings", lambda **kwargs: None)
     monkeypatch.setattr(orchestrator, "build_llm_client", lambda: sentinel)
     monkeypatch.setattr(
-        orchestrator, "get_llm_settings",
+        llm_settings, "get_llm_settings",
         lambda: {"provider": "openai_compatible", "base_url": "https://api.x.ai/v1", "default_model": "grok-3", "has_api_key": True},
     )
 
@@ -79,9 +80,9 @@ def test_post_success_rebuilds_and_reinjects_the_client_everywhere(monkeypatch):
 
 
 def test_list_local_ollama_models_endpoint_reflects_module_state(monkeypatch):
-    monkeypatch.setattr(orchestrator, "list_local_ollama_models", lambda: ["qwen3-coder:30b", "llava:7b"])
+    monkeypatch.setattr(llm_settings, "list_local_ollama_models", lambda: ["qwen3-coder:30b", "llava:7b"])
     monkeypatch.setattr(
-        orchestrator, "get_ollama_model_capabilities",
+        llm_settings, "get_ollama_model_capabilities",
         lambda name: {"qwen3-coder:30b": ["completion", "tools"], "llava:7b": ["completion", "vision"]}[name],
     )
     response = client.get("/settings/llm/ollama/models")
@@ -96,7 +97,7 @@ def test_list_local_ollama_models_endpoint_reflects_module_state(monkeypatch):
 def test_list_local_ollama_models_endpoint_degrades_gracefully_when_ollama_is_down(monkeypatch):
     def _raise():
         raise LLMSettingsError("no se pudo conectar")
-    monkeypatch.setattr(orchestrator, "list_local_ollama_models", _raise)
+    monkeypatch.setattr(llm_settings, "list_local_ollama_models", _raise)
 
     response = client.get("/settings/llm/ollama/models")
 
@@ -107,7 +108,7 @@ def test_list_local_ollama_models_endpoint_degrades_gracefully_when_ollama_is_do
 
 def test_pull_ollama_model_endpoint_success(monkeypatch):
     calls = []
-    monkeypatch.setattr(orchestrator, "pull_ollama_model", lambda model: calls.append(model))
+    monkeypatch.setattr(llm_settings, "pull_ollama_model", lambda model: calls.append(model))
 
     response = client.post("/settings/llm/ollama/pull", json={"model": "qwen2.5-coder:14b"}, headers=_HEADERS)
 
@@ -119,7 +120,7 @@ def test_pull_ollama_model_endpoint_success(monkeypatch):
 def test_pull_ollama_model_endpoint_maps_error_to_502(monkeypatch):
     def _raise(model):
         raise LLMSettingsError("no se pudo descargar")
-    monkeypatch.setattr(orchestrator, "pull_ollama_model", _raise)
+    monkeypatch.setattr(llm_settings, "pull_ollama_model", _raise)
 
     response = client.post("/settings/llm/ollama/pull", json={"model": "no-existe"}, headers=_HEADERS)
 
@@ -129,7 +130,7 @@ def test_pull_ollama_model_endpoint_maps_error_to_502(monkeypatch):
 
 def test_list_model_sources_endpoint_reflects_module_state(monkeypatch):
     monkeypatch.setattr(
-        orchestrator, "list_model_sources",
+        llm_settings, "list_model_sources",
         lambda: [{"name": "ollama", "label": "Local (Ollama)", "models": ["qwen3-coder:30b"]}],
     )
     response = client.get("/settings/llm/sources")
@@ -146,10 +147,10 @@ def test_activate_profile_endpoint_success(monkeypatch):
 
     calls = []
     sentinel = object()
-    monkeypatch.setattr(orchestrator, "activate_cloud_profile", lambda name: calls.append(name))
+    monkeypatch.setattr(llm_settings, "activate_cloud_profile", lambda name: calls.append(name))
     monkeypatch.setattr(orchestrator, "build_llm_client", lambda: sentinel)
     monkeypatch.setattr(
-        orchestrator, "get_llm_settings",
+        llm_settings, "get_llm_settings",
         lambda: {"provider": "openai_compatible", "base_url": "https://api.groq.com/openai/v1", "default_model": "qwen3-coder:30b", "has_api_key": True},
     )
 
@@ -164,7 +165,7 @@ def test_activate_profile_endpoint_maps_error_to_400(monkeypatch):
     def _raise(name):
         raise LLMSettingsError(f"No existe un perfil guardado llamado '{name}'.")
 
-    monkeypatch.setattr(orchestrator, "activate_cloud_profile", _raise)
+    monkeypatch.setattr(llm_settings, "activate_cloud_profile", _raise)
     response = client.post("/settings/llm/activate-profile", json={"name": "no-existe"}, headers=_HEADERS)
 
     assert response.status_code == 400
