@@ -44,8 +44,9 @@ from typing import Any, Callable
 
 import requests
 
-from kernel_bus.services import AudioService
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from kernel.services.services import AudioService
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -71,7 +72,7 @@ class AudioGenerationTool(Tool):
         self.cfg = settings.multimodal.audio
         self.http_post = http_post or requests.post
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
-        # La carga/síntesis real vive en AudioService (kernel_bus/services.py)
+        # La carga/síntesis real vive en AudioService (kernel/services/services.py)
         # — mismo patrón que ImageGenerationTool/ImageService: por
         # defecto, sin inyectar, arma su PROPIO AudioService con su
         # MISMO self.cfg (un test que monkeypatchea artifact_dir antes

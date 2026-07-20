@@ -12,8 +12,9 @@ Hub (requiere red esa vez), luego queda cacheado en disco.
 """
 from __future__ import annotations
 
-from kernel_bus.services import KernelServiceError, STTService
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from kernel.services.services import KernelServiceError, STTService
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -40,7 +41,7 @@ class SpeechToTextTool(Tool):
     def __init__(self, stt_service: STTService | None = None):
         self.cfg = settings.multimodal.stt
         # La carga/transcripción real vive en STTService
-        # (kernel_bus/services.py) — mismo patrón que
+        # (kernel/services/services.py) — mismo patrón que
         # ImageGenerationTool/ImageService.
         self.stt_service = stt_service or STTService(cfg=self.cfg)
 

@@ -29,7 +29,8 @@ from typing import TypedDict
 
 from tool_integration.adapters.audio_gen import AudioGenerationTool
 from tool_integration.adapters.image_gen import ImageGenerationTool
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
 from utils.config import settings
 from utils.logger import get_logger
 

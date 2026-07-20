@@ -39,8 +39,9 @@ from typing import Any, Callable
 
 import requests
 
-from kernel_bus.services import ImageService
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from kernel.services.services import ImageService
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -81,11 +82,11 @@ class ImageGenerationTool(Tool):
         # Inyectable para tests (evita red real) — por defecto, requests.post real.
         self.http_post = http_post or requests.post
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
-        # La carga/generación real vive en ImageService (kernel_bus/services.py)
+        # La carga/generación real vive en ImageService (kernel/services/services.py)
         # — antes este pipeline era privado de esta instancia; ahora, en
         # producción, es la MISMA instancia que usa el Kernel Service Bus
         # para las skills que declaran kernel_services: ["image.generate"]
-        # (ver tool_integration/registry.py) — se comparte el modelo
+        # (ver kernel/registry/registry.py) — se comparte el modelo
         # cargado, no se recarga por cada consumidor. Por defecto (sin
         # inyectar), cada ImageGenerationTool() arma su PROPIO ImageService
         # con su MISMO self.cfg (mismo objeto que settings.multimodal.image

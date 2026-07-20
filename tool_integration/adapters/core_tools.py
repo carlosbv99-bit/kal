@@ -4,7 +4,7 @@ de verdad, no como closures escritas a mano dentro de agent_loop.py.
 
 A diferencia de los adaptadores multimodales (image_gen.py, etc., que
 solo dependen de config.yaml y por eso pueden vivir como singletons
-globales en tool_integration/registry.py), estas tres dependen de
+globales en kernel/registry/registry.py), estas tres dependen de
 instancias concretas de TaskExecutor/MemoryManager que pertenecen a UN
 AgentLoop en particular — por eso agent_core/llm/agent_loop.py las
 instancia por sí mismo (ver _build_tools_from_registry), en vez de
@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
 
 
 class CodeExecutionTool(Tool):
