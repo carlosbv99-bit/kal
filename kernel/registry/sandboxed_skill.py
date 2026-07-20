@@ -48,6 +48,7 @@ from sdk.skill import Tool, ToolManifest
 from sdk.artifacts import Artifact
 from tool_integration.malware_scan import MalwareScanError, scan_bytes
 from sdk.permissions import Permission
+from utils.correlation import get_correlation_id
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -125,6 +126,7 @@ class SandboxedSkillTool(Tool):
         self.kernel_bus = kernel_bus_instance or default_kernel_service_bus
 
     def execute(self, **kwargs) -> Artifact:
+        logger.info(f"Ejecutando skill de terceros: '{self.manifest.name}'")
         workspace_files = _kal_runtime_files()
         workspace_files.update(self._collect_skill_files())
         workspace_files["_input.json"] = json.dumps({"entry_point": self.entry_point, "kwargs": kwargs})
@@ -141,6 +143,11 @@ class SandboxedSkillTool(Tool):
                 allowed_methods=self.kernel_services,
                 socket_path=Path(socket_tempdir) / "kernel.sock",
                 skill_name=self.manifest.name,
+                # Capturado ACÁ (mismo thread que originó el pedido HTTP) y
+                # pasado explícito — el socket sirve en un thread de
+                # background propio (ver KernelBusSocketServer.start()) al
+                # que un contextvar nunca cruza automáticamente.
+                correlation_id=get_correlation_id(),
             )
             socket_server.start()
             extra_mounts = {socket_tempdir: _KERNEL_SOCKET_CONTAINER_DIR}

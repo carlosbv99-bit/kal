@@ -18,6 +18,7 @@ import pytest
 
 from kernel.api.bus import KernelServiceBus
 from kernel.api.socket_server import _MAX_LINE_BYTES, KernelBusSocketServer, LineTooLongError
+from utils.correlation import set_correlation_id
 
 
 class FakeService:
@@ -206,3 +207,34 @@ def test_max_requests_stops_accepting_after_the_limit(bus, socket_path):
             _send(socket_path, {"jsonrpc": "2.0", "id": 2, "method": "test.echo", "params": {"text": "2"}})
     finally:
         server.stop()
+
+
+def test_correlation_id_crosses_into_the_background_serving_thread(bus, socket_path, monkeypatch, tmp_path):
+    """
+    Hallazgo real (ver utils/correlation.py): _serve() corre en un
+    thread de background propio (KernelBusSocketServer.start()) —
+    contextvars NO cruza automáticamente a un thread nuevo. Sin
+    set_correlation_id() explícito al principio de _serve(), la
+    auditoría de esta llamada quedaría sin correlation_id pese a que el
+    thread que llamó a start() sí tenía uno bien seteado.
+    """
+    from audit.audit_log import audit_log
+
+    monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
+    set_correlation_id("desde-el-thread-original")
+    try:
+        server = KernelBusSocketServer(
+            bus, allowed_methods=["test.echo"], socket_path=socket_path, skill_name="prueba",
+            correlation_id="desde-el-thread-original",
+        )
+        server.start()
+        try:
+            _send(socket_path, {"jsonrpc": "2.0", "id": 1, "method": "test.echo", "params": {"text": "x"}})
+        finally:
+            server.stop()
+    finally:
+        set_correlation_id(None)
+
+    entries = audit_log.tail(5)
+    call_entry = next(e for e in entries if e["event_type"] == "kernel_service_call")
+    assert call_entry["context"]["correlation_id"] == "desde-el-thread-original"

@@ -15,6 +15,10 @@ from agent_core.orchestrator import _artifact_url, orchestrator
 from sdk.artifacts import Artifact
 from sdk.permissions import Permission
 from utils.config import settings
+from utils.correlation import new_id, set_correlation_id
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -53,6 +57,17 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat")
 def chat(req: ChatRequest):
+    # Correlation ID (ver utils/correlation.py): un identificador corto
+    # que va a aparecer en cada línea de logs/agent.log y en el context
+    # de cada entrada de logs/audit.log generada mientras se procesa
+    # este pedido — incluida cualquier skill sandboxeada que se llame en
+    # el camino. Se devuelve en la respuesta para que, ante un fallo
+    # real, alcance con este valor (no hay que reconstruir la cadena a
+    # mano cruzando ambos logs).
+    correlation_id = new_id()
+    set_correlation_id(correlation_id)
+    logger.info(f"POST /chat: {req.goal!r}")
+
     session = orchestrator.sessions.get_or_create(req.session_id)
     use_planner = req.use_planner if req.use_planner is not None else settings.llm.planning_enabled
 
@@ -111,6 +126,7 @@ def chat(req: ChatRequest):
 
     return {
         "session_id": session.id,
+        "correlation_id": correlation_id,
         "goal": result.goal,
         "final_answer": result.final_answer,
         "status": result.status,

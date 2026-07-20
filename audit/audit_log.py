@@ -24,6 +24,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from utils.correlation import get_correlation_id
+
 AUDIT_LOG_PATH = Path("logs/audit.log")
 AUDIT_LOG_PATH.parent.mkdir(exist_ok=True)
 
@@ -159,6 +161,14 @@ class AuditLog:
         return last_entry["event_hash"]
 
     def record(self, event: AuditEvent) -> AuditEvent:
+        # Correlation ID (ver utils/correlation.py) inyectado automáticamente
+        # en el context — así ningún llamador (son ~15 call sites distintos
+        # en todo el proyecto) tiene que acordarse de agregarlo a mano. Nunca
+        # pisa uno que el propio llamador ya haya puesto explícitamente.
+        correlation_id = get_correlation_id()
+        if correlation_id and "correlation_id" not in event.context:
+            event.context["correlation_id"] = correlation_id
+
         # "a+": crea el archivo si no existe; en POSIX, cada write() de un
         # descriptor abierto en modo append va SIEMPRE al final real del
         # archivo (O_APPEND), sin importar dónde haya quedado el cursor

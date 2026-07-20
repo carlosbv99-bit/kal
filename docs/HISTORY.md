@@ -4854,3 +4854,87 @@ retargeteando esos `monkeypatch.setattr(...)` a
 Verificado: 34 tests de los 6 archivos `test_orchestrator_*.py` +
 `test_llm_client_factory.py` en verde, más la suite completa (790
 passed, 0 regresiones, 19:24).
+
+## Correlation ID: de /chat hasta el log de la skill y el audit log (2026-07-20)
+
+Punto 6 de la revisión de arquitectura del usuario (después del punto 1,
+ver más arriba): sin esto, reconstruir qué pasó en un pedido real
+significaba cruzar `logs/agent.log` y `logs/audit.log` a mano — patrón
+ya repetido varias veces en esta sesión (p.ej. investigando los
+archivos de audio generados por tests, o el bug de la naranja).
+
+**Corrección de premisa antes de diseñar**: el usuario mencionó "con el
+structlog que utilizamos" — pero `structlog` está en `requirements.txt`
+(línea "logging estructurado") SIN usarse en ningún lado del código;
+`utils/logger.py` es stdlib `logging` puro, con un formatter de texto
+plano. No se migró a structlog para este cambio (alcance mucho mayor,
+reescribir cada call site) — se resolvió con lo que ya hay:
+`contextvars` + un `logging.Filter`.
+
+**Diseño**: `utils/correlation.py` nuevo — un `contextvars.ContextVar`
+con `new_id()` (12 hex), `set_correlation_id()`/`get_correlation_id()`.
+Deliberadamente NO se pasa el id como parámetro explícito por cada
+función de la cadena `AgentLoop -> tool_registry -> SandboxedSkillTool
+-> SandboxExecutor -> DockerSandboxRunner` (~30+ call sites, incluida
+la interfaz `Tool.execute()` que implementan 36+ herramientas) — toda
+esa cadena corre en el MISMO thread que originó el pedido HTTP
+(Starlette corre cada `def` sync en un thread de su pool, pero un único
+pedido nunca salta de thread a mitad de camino), así que un solo
+`set_correlation_id()` al principio de `/chat`
+(`agent_core/routers/chat.py`) ya es visible en toda la cadena sin
+tocar ninguna firma intermedia.
+
+**Propagación automática, sin tocar call sites existentes**:
+- `utils/logger.py`: un `logging.Filter` nuevo inyecta
+  `record.correlation_id` (o `"-"` si nada lo seteó) en cada
+  `LogRecord` — TODOS los `logger.info(...)`/`warning(...)` ya
+  existentes en el proyecto lo muestran automáticamente, sin editar
+  ninguno.
+- `audit/audit_log.py::AuditLog.record()`: inyecta
+  `event.context["correlation_id"]` automáticamente si hay uno seteado
+  y el llamador no puso ya uno explícito — cubre los ~15 call sites de
+  `audit_log.record(...)` repartidos por el proyecto sin tocarlos.
+
+**Excepción real que si necesitó código explícito**:
+`kernel/api/socket_server.py::KernelBusSocketServer` sirve el socket
+Unix en un `threading.Thread` de background propio — un `ContextVar`
+NUNCA cruza automáticamente a un thread nuevo. Se captura el valor en
+el thread ORIGINAL (dentro de
+`kernel/registry/sandboxed_skill.py::SandboxedSkillTool.execute()`,
+antes de lanzar el socket) y se pasa explícito
+(`correlation_id=get_correlation_id()`); `_serve()` hace
+`set_correlation_id(self.correlation_id)` como primera línea, así que
+todo lo que loguea/audita desde ese thread (incluida cada llamada real
+de la skill al Kernel Service Bus) queda etiquetado igual.
+
+**Hasta dentro del contenedor**: `kernel/lifecycle/docker_runner.py::run()`
+ahora pasa `KAL_CORRELATION_ID` como variable de entorno al contenedor
+(leído de `get_correlation_id()` — corre en el mismo thread que originó
+el pedido, mismo razonamiento que arriba) — una skill de terceros
+PUEDE leerlo e incluirlo en lo que imprime, sin que sea obligatorio.
+Verificado con Docker real: `os.environ.get("KAL_CORRELATION_ID")`
+dentro del contenedor devuelve el valor exacto seteado del lado del
+host.
+
+`POST /chat` genera un id nuevo por pedido, lo loguea al recibir el
+`goal`, y lo devuelve en la respuesta JSON (`correlation_id`) — ante un
+fallo real alcanza con ese valor para grep-ear ambos logs, sin
+reconstruir nada a mano.
+
+**Verificado en vivo, de punta a punta**: llamando directamente a la
+skill real `qr_code` (Docker real) con un correlation_id de prueba
+seteado, la línea de log "Ejecutando skill de terceros: 'qr_code'" Y la
+entrada de auditoría `sandbox_execution` que genera
+`SandboxExecutor.execute_trusted()` muestran el mismo id — mientras que
+entradas de auditoría de ANTES de setear ninguno (`skill_loaded`, del
+arranque del proceso) siguen sin él, confirmando que no hay
+contaminación retroactiva. Un `POST /chat` real con "hola" confirma el
+mismo id en la respuesta JSON y en `logs/agent.log`.
+
+12 tests nuevos: `tests/test_correlation.py` (el módulo en sí),
+3 en `tests/test_audit_log.py` (inyección automática, sin pisar uno
+explícito, sin agregar la key si no hay ninguno seteado), 1 en
+`tests/test_kernel_bus_socket_server.py` (cruce real al thread de
+background), 2 en `tests/test_sandbox_integration.py` (Docker real: la
+env var llega, y está ausente si no hay id seteado). Suite completa
+verificada sin regresiones.
