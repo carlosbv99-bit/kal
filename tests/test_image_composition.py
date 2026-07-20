@@ -181,7 +181,7 @@ def test_side_by_side_vertical_concatenates_matching_width(tool, tmp_path):
 
 
 def test_manifest_declares_no_special_permissions():
-    from tool_integration.permissions import Permission
+    from sdk.permissions import Permission
 
     manifest = ImageCompositionTool.manifest
     assert manifest.permissions == frozenset({Permission.FILESYSTEM_READ})

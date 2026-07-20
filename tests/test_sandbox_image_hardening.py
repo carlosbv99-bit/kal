@@ -1,5 +1,5 @@
 """
-Tests de la imagen minimizada de sandbox/images/minimal/Dockerfile.
+Tests de la imagen minimizada de kernel/lifecycle/images/minimal/Dockerfile.
 
 Se saltan si Docker no está disponible O si la imagen no ha sido
 construida aún (docker build -t kal-sandbox-minimal:latest ... o

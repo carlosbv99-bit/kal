@@ -6,10 +6,10 @@ un repositorio Git con la misma estructura que ya usa `skills/`
 localmente (`skills/<nombre>/skill.yaml` + `tool.py` + `skill.sig`) —
 no hay ningún índice separado que mantener sincronizado: listar las
 skills disponibles es clonar el repo y parsear cada `skill.yaml` con
-`parse_manifest()` (tool_integration/skills.py), ya existente.
+`parse_manifest()` (kernel/registry/skills.py), ya existente.
 
 La verificación de integridad (`skill.sig`, ver
-tool_integration/skill_signing.py) es responsabilidad de quien
+kernel/registry/skill_signing.py) es responsabilidad de quien
 instala (scripts/install_from_market.py) — este módulo solo sabe
 descargar, no decide política de seguridad.
 
@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tool_integration.skills import MANIFEST_FILENAME, SkillManifest, parse_manifest
+from kernel.registry.skills import MANIFEST_FILENAME, SkillManifest, parse_manifest
 
 DEFAULT_REF = "main"
 

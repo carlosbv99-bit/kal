@@ -1,9 +1,9 @@
 """
 Construye (o reusa, cacheada) una imagen Docker derivada por skill,
 para las skills que declaran `requirements` (paquetes de pip) en su
-skill.yaml — ver tool_integration/skills.py.
+skill.yaml — ver kernel/registry/skills.py.
 
-Misma técnica de endurecimiento que sandbox/images/minimal/Dockerfile
+Misma técnica de endurecimiento que kernel/lifecycle/images/minimal/Dockerfile
 (usuario 1000:1000 sin privilegios, sin pip/apt utilizables en
 runtime): la diferencia es que acá se instala primero lo que la skill
 declaró, y RECIÉN DESPUÉS se desinstala pip/apt — la imagen FINAL
@@ -33,7 +33,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Sin requirements declarados: se usa esta imagen ya endurecida tal
-# cual (ver sandbox/images/minimal/Dockerfile, scripts/build_sandbox_image.sh),
+# cual (ver kernel/lifecycle/images/minimal/Dockerfile, scripts/build_sandbox_image.sh),
 # sin build nuevo. Si no existe todavía en este host, se cae al default
 # de DockerSandboxRunner (SANDBOX_IMAGE) — build_or_get_image() nunca
 # la exige como precondición dura para el caso sin dependencias.

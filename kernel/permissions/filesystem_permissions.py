@@ -10,7 +10,7 @@ ningún import de utils.config ni de nada que no exista dentro de un
 contenedor de skill, para poder copiarse tal cual si una skill en
 Docker necesita conocer esta taxonomía. La lógica de DECISIÓN (política
 configurable, concesiones persistidas, auditoría) vive aparte, en
-tool_integration/filesystem_access_manager.py, que NUNCA se envía a un
+kernel/permissions/filesystem_access_manager.py, que NUNCA se envía a un
 contenedor — mismo motivo que separa permission_cascade.py de
 permissions.py.
 """

@@ -11,15 +11,16 @@ WORKDIR /app
 RUN pip install --no-cache-dir docker fastapi "uvicorn[standard]"
 
 # El contexto de build de este Dockerfile es la raíz del proyecto
-# (ver docker-compose.yml: build.context), no ./sandbox, para poder
-# copiar también code_analysis/, audit/ y utils/ que este servicio
-# reutiliza (validación estática + auditoría + config).
-COPY sandbox/ ./sandbox/
+# (ver docker-compose.yml: build.context), no ./kernel/lifecycle, para
+# poder copiar también sdk/, code_analysis/, audit/ y utils/ que este
+# servicio reutiliza (Permission, validación estática, auditoría, config).
+COPY kernel/ ./kernel/
+COPY sdk/ ./sdk/
 COPY code_analysis/ ./code_analysis/
 COPY audit/ ./audit/
 COPY utils/ ./utils/
 COPY config/ ./config/
-WORKDIR /app/sandbox
+WORKDIR /app/kernel/lifecycle
 
 # Nota: este contenedor necesita el grupo del socket de Docker montado,
 # por lo que en la práctica puede requerir ejecutarse con el GID del
@@ -28,4 +29,4 @@ WORKDIR /app/sandbox
 EXPOSE 9000
 WORKDIR /app
 
-CMD ["uvicorn", "sandbox.sandbox_api:app", "--host", "0.0.0.0", "--port", "9000"]
+CMD ["uvicorn", "kernel.api.sandbox_api:app", "--host", "0.0.0.0", "--port", "9000"]

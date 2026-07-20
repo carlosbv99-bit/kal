@@ -1,6 +1,6 @@
 """
 Firma una carpeta de skill con la identidad del AUTOR (ver
-tool_integration/skill_signing.py — F3 del plan de marketplace). Uso
+kernel/registry/skill_signing.py — F3 del plan de marketplace). Uso
 pensado para quien ESCRIBE una skill y la va a distribuir/publicar,
 no para quien solo la instala.
 
@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tool_integration.skill_signing import SkillSigner  # noqa: E402
+from kernel.registry.skill_signing import SkillSigner  # noqa: E402
 
 
 def main() -> None:

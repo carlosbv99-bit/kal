@@ -1,5 +1,5 @@
 """
-Tests de kernel_bus/protocol.py — formato de mensaje (JSON-RPC 2.0
+Tests de kernel/api/protocol.py — formato de mensaje (JSON-RPC 2.0
 sobre líneas newline-delimited). Funciones puras, sin socket.
 """
 from __future__ import annotations
@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from kernel_bus.protocol import (
+from kernel.api.protocol import (
     ProtocolError,
     Request,
     error_response,

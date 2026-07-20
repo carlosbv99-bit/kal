@@ -1,6 +1,6 @@
 """
 Registro de recursos "pesados" cargados perezosamente en RAM
-(pipelines de imagen/audio/STT, ver kernel_bus/services.py) — libera
+(pipelines de imagen/audio/STT, ver kernel/services/services.py) — libera
 los que llevan un rato sin usarse, o TODOS de inmediato si la RAM
 disponible del sistema ya está baja.
 
@@ -85,8 +85,8 @@ class ResourceBroker:
         return psutil.virtual_memory().available / (1024 * 1024)
 
 
-# Singleton, mismo patrón que tool_registry (tool_integration/registry.py)
-# / audit_log (audit/audit_log.py) / kernel_bus (kernel_bus/bus.py).
+# Singleton, mismo patrón que tool_registry (kernel/registry/registry.py)
+# / audit_log (audit/audit_log.py) / kernel (kernel/api/bus.py).
 resource_broker = ResourceBroker(
     idle_timeout_seconds=settings.resource_broker.idle_timeout_seconds,
     min_available_ram_mb=settings.resource_broker.min_available_ram_mb,

@@ -1,15 +1,15 @@
 """
-Tests de tool_integration/skill_signing.py (F3 del plan de
+Tests de kernel/registry/skill_signing.py (F3 del plan de
 marketplace): firma/verificación de integridad de un paquete de
 skill, con la clave de un AUTOR externo (nunca la clave propia de kal
-de tool_integration/signing.py).
+de kernel/registry/signing.py).
 
 Alcance deliberado (ver docstring del módulo bajo test): esto prueba
 integridad del paquete, no autoridad del autor.
 """
 from __future__ import annotations
 
-from tool_integration.skill_signing import SkillSigner, verify_skill_signature
+from kernel.registry.skill_signing import SkillSigner, verify_skill_signature
 
 
 def _make_skill_dir(tmp_path, name="mi_skill", extra_files: dict[str, str] | None = None):

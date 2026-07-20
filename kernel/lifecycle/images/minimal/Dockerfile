@@ -1,4 +1,4 @@
-# Imagen de ejecución para código no confiable en sandbox/docker_runner.py.
+# Imagen de ejecución para código no confiable en kernel/lifecycle/docker_runner.py.
 #
 # Diferencia con python:3.11-slim genérico (usado hasta ahora): esta
 # imagen elimina herramientas que, aunque no dan una vía de escape del
@@ -11,12 +11,12 @@
 # como superficie adicional.
 #
 # Build:
-#   docker build -t kal-sandbox-minimal:latest -f sandbox/images/minimal/Dockerfile .
+#   docker build -t kal-sandbox-minimal:latest -f kernel/lifecycle/images/minimal/Dockerfile .
 # (o usar scripts/build_sandbox_image.sh)
 
 FROM python:3.11-slim
 
-# Mismo UID/GID que SANDBOX_UID/SANDBOX_GID en sandbox/docker_runner.py.
+# Mismo UID/GID que SANDBOX_UID/SANDBOX_GID en kernel/lifecycle/docker_runner.py.
 # Deben coincidir para que el bind mount de /workspace sea legible.
 RUN groupadd -g 1000 sandboxuser && \
     useradd -u 1000 -g 1000 -M -s /usr/sbin/nologin sandboxuser

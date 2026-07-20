@@ -1,12 +1,12 @@
 """
 Skill de referencia para el pipeline de aislamiento real de skills (ver
-tool_integration/skills.py). Dos cosas a propósito, para validar el
+kernel/registry/skills.py). Dos cosas a propósito, para validar el
 pipeline completo con algo real:
   - Depende de un paquete externo (qrcode + pillow, ver skill.yaml
     "requirements") -> valida la imagen Docker derivada
-    (sandbox/skill_image_builder.py).
+    (kernel/lifecycle/skill_image_builder.py).
   - Devuelve un archivo real (PNG), no solo texto -> valida la
-    convención KAL_SKILL_OUTPUT_DIR (ver sandbox/skill_runner.py).
+    convención KAL_SKILL_OUTPUT_DIR (ver kernel/lifecycle/skill_runner.py).
 
 Cualquier autor de una skill nueva que necesite devolver un archivo
 puede copiar este patrón: leer KAL_SKILL_OUTPUT_DIR (con un fallback a
@@ -19,14 +19,15 @@ Nota para autores de skills: esta clase NO declara `manifest =
 ToolManifest(...)` — nombre/descripción/permisos/parameters_schema
 viven en skill.yaml, la única fuente de verdad (load_skills() nunca
 importa este archivo en el proceso principal, ver
-tool_integration/skills.py).
+kernel/registry/skills.py).
 """
 from __future__ import annotations
 
 import os
 import uuid
 
-from tool_integration.base_tool import Artifact, Tool
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
 
 
 class QRCodeTool(Tool):

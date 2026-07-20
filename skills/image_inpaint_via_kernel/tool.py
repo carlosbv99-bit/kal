@@ -7,12 +7,13 @@ Kernel Service Bus en una sola ejecución: genera una imagen base
 El "artifact://image/<uuid>" que devuelve la primera llamada se pasa
 TAL CUAL como image_path de la segunda — la skill nunca ve una ruta
 real de host (ver
-kernel_bus/bus.py::KernelServiceBus._resolve_input_artifacts()).
+kernel/api/bus.py::KernelServiceBus._resolve_input_artifacts()).
 """
 from __future__ import annotations
 
-from tool_integration.base_tool import Artifact, Tool
-from tool_integration.kernel_client import call as kernel_call
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
+from sdk.context import call as kernel_call
 
 # Rectángulo centrado razonable para la imagen base de 1024x1024 que
 # genera image.generate por defecto (ver settings.multimodal.image).

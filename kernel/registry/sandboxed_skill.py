@@ -1,9 +1,9 @@
 """
 Tool que ejecuta una skill de terceros (skills/<nombre>/) de verdad
 aislada — cada llamada a execute() corre DENTRO de un contenedor Docker
-efímero (sandbox/skill_runner.py), nunca en el proceso principal.
+efímero (kernel/lifecycle/skill_runner.py), nunca en el proceso principal.
 
-Antes de esto, tool_integration/skills.py::load_skills() instanciaba la
+Antes de esto, kernel/registry/skills.py::load_skills() instanciaba la
 clase real de la skill y la registraba tal cual — cualquier .execute()
 posterior corría en el mismo proceso que el resto de kal, sin ningún
 confinamiento (la única barrera era el enabled:false por defecto del
@@ -12,25 +12,24 @@ reemplaza esa instancia real: el registry nunca vuelve a tocar el
 código de la skill directamente.
 
 Reutiliza el mismo mapeo permiso->network_mode que
-tool_integration/registry.py::DynamicSandboxedTool, y el mismo
-SandboxExecutor (sandbox/executor.py) — pero vía execute_trusted(), no
-execute(), porque el runner (sandbox/skill_runner.py) es código de
+kernel/registry/registry.py::DynamicSandboxedTool, y el mismo
+SandboxExecutor (kernel/lifecycle/executor.py) — pero vía execute_trusted(), no
+execute(), porque el runner (kernel/lifecycle/skill_runner.py) es código de
 primera parte que necesita os/importlib, y el denylist de
 code_analysis/ está pensado para código de un tercero no confiable, no
 para nuestra propia infraestructura de ejecución.
 
-BUG REAL ENCONTRADO PROBANDO ESTO CON DOCKER DE VERDAD: toda skill
-(como skills/system_info/tool.py) hace
-`from tool_integration.base_tool import Artifact, Tool, ToolManifest`
+BUG REAL ENCONTRADO PROBANDO ESTO CON DOCKER DE VERDAD (2026-07-15,
+antes de que existiera sdk/): toda skill (como skills/system_info/tool.py)
+hace `from sdk.skill import Tool` / `from sdk.artifacts import Artifact`
 — pero el contenedor solo tenía montado el código de la skill, nunca
-el paquete `tool_integration` del propio kal. El import fallaba con
+el paquete que define esos tipos. El import fallaba con
 `ModuleNotFoundError` en CUALQUIER skill real, no solo en casos raros.
-Fix: se copian `base_tool.py`/`permissions.py` (ambos sin dependencias
-riesgosas — solo `dataclasses`/`abc`/`enum` de stdlib) como parte fija
-de `workspace_files` en cada ejecución, bajo `/workspace/tool_integration/`.
-`kernel_client.py` viaja de la misma forma, para las skills que
-declaran `kernel_services` (ver Kernel Service Bus,
-kernel_bus/__init__.py).
+Fix: se copia el paquete `sdk/` COMPLETO (100% stdlib, ver sdk/__init__.py)
+como parte fija de `workspace_files` en cada ejecución, bajo
+`/workspace/sdk/`. Es el único lugar de la skill que necesita esto: el
+resto del código de la skill puede importar libremente `sdk.*`, nunca
+`kernel.*` ni `agent_core.*`.
 """
 from __future__ import annotations
 
@@ -41,28 +40,29 @@ import uuid
 from pathlib import Path
 
 from audit.audit_log import AuditEvent, audit_log
-from kernel_bus.bus import KernelServiceBus, kernel_bus as default_kernel_bus
-from kernel_bus.socket_server import KernelBusSocketServer
-from sandbox.docker_runner import SandboxResult
-from sandbox.executor import SandboxExecutor
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
+from kernel.api.bus import KernelServiceBus, kernel_service_bus as default_kernel_service_bus
+from kernel.api.socket_server import KernelBusSocketServer
+from kernel.lifecycle.docker_runner import SandboxResult
+from kernel.lifecycle.executor import SandboxExecutor
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
 from tool_integration.malware_scan import MalwareScanError, scan_bytes
-from tool_integration.permissions import Permission
+from sdk.permissions import Permission
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_RUNNER_PATH = Path(__file__).resolve().parent.parent / "sandbox" / "skill_runner.py"
-_TOOL_INTEGRATION_DIR = Path(__file__).resolve().parent
+_RUNNER_PATH = Path(__file__).resolve().parent.parent / "lifecycle" / "skill_runner.py"
+_SDK_DIR = Path(__file__).resolve().parent.parent.parent / "sdk"
 
 _DEFAULT_ARTIFACTS_ROOT = Path("data") / "artifacts" / "skills"
 
-# Nombre reservado: ver sandbox/skill_runner.py — va DENTRO de output/
+# Nombre reservado: ver kernel/lifecycle/skill_runner.py — va DENTRO de output/
 # para viajar de vuelta por el mismo mecanismo que un archivo real de
 # la skill (SandboxResult.output_files), sin necesitar un canal aparte.
 _RESULT_FILENAME = "_output.json"
 
-# Debe coincidir con tool_integration/kernel_client.py::SOCKET_PATH
+# Debe coincidir con sdk/context.py::SOCKET_PATH
 # (la mitad "container_path" del extra_mount de abajo).
 _KERNEL_SOCKET_CONTAINER_DIR = "/workspace/.kal"
 
@@ -83,21 +83,18 @@ _KERNEL_SERVICE_TIMEOUT_SECONDS = 600
 
 def _kal_runtime_files() -> dict[str, str]:
     """
-    `tool_integration.base_tool`/`permissions`/`kernel_client` tal como
-    existen en ESTE repo (no una copia editable por la skill) — toda
-    skill subclasea `Tool`/usa `Artifact`/`ToolManifest` de acá, así que
-    el contenedor necesita este paquete disponible para poder ni
-    siquiera importar el módulo de la skill. Los tres archivos son de
-    confianza (sin red, sin filesystem — `kernel_client.py` solo sabe
-    hablar por el socket ya montado, nunca importa nada de
-    `kernel_bus`) — no es código de la skill, es infraestructura fija
-    de kal.
+    El paquete `sdk/` tal como existe en ESTE repo (no una copia
+    editable por la skill) — toda skill subclasea `Tool`/usa
+    `Artifact`/`ToolManifest`/`Permission` de acá, así que el
+    contenedor necesita este paquete disponible para poder ni siquiera
+    importar el módulo de la skill. 100% stdlib (sin red, sin
+    filesystem — `sdk/context.py` solo sabe hablar por el socket ya
+    montado, nunca importa nada de `kernel`) — no es código de la
+    skill, es infraestructura fija de kal.
     """
     return {
-        "tool_integration/__init__.py": "",
-        "tool_integration/base_tool.py": (_TOOL_INTEGRATION_DIR / "base_tool.py").read_text(encoding="utf-8"),
-        "tool_integration/permissions.py": (_TOOL_INTEGRATION_DIR / "permissions.py").read_text(encoding="utf-8"),
-        "tool_integration/kernel_client.py": (_TOOL_INTEGRATION_DIR / "kernel_client.py").read_text(encoding="utf-8"),
+        f"sdk/{filename}": (_SDK_DIR / filename).read_text(encoding="utf-8")
+        for filename in ("__init__.py", "skill.py", "artifacts.py", "permissions.py", "context.py")
     }
 
 
@@ -121,11 +118,11 @@ class SandboxedSkillTool(Tool):
         self.artifact_dir = (artifacts_root or _DEFAULT_ARTIFACTS_ROOT) / manifest.name
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         # Métodos del Kernel Service Bus que esta skill puede llamar
-        # (p.ej. ["image.generate"]) — ver kernel_bus/__init__.py.
+        # (p.ej. ["image.generate"]) — ver kernel/__init__.py.
         # kernel_bus_instance inyectable para tests (evita depender del
         # bus real/ImageService real, que carga un modelo pesado).
         self.kernel_services = kernel_services or []
-        self.kernel_bus = kernel_bus_instance or default_kernel_bus
+        self.kernel_bus = kernel_bus_instance or default_kernel_service_bus
 
     def execute(self, **kwargs) -> Artifact:
         workspace_files = _kal_runtime_files()
@@ -244,7 +241,7 @@ class SandboxedSkillTool(Tool):
             # La skill devolvió tal cual la referencia opaca que recibió
             # de un servicio del Kernel Service Bus (p.ej.
             # "artifact://image/<uuid>" de ImageService.generate(), ver
-            # kernel_bus/bus.py) — el archivo real ya existe en el host
+            # kernel/api/bus.py) — el archivo real ya existe en el host
             # (lo generó el servicio, no la skill), solo hace falta
             # resolver la referencia a la ruta real.
             resolved = self.kernel_bus.resolve_artifact(uri)

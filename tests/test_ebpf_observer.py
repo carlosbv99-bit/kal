@@ -1,10 +1,10 @@
 """
-Tests de sandbox/ebpf/observer.py (Fase E4 del plan eBPF).
+Tests de kernel/lifecycle/ebpf/observer.py (Fase E4 del plan eBPF).
 
 100% sin bpftrace ni sudo reales — `run()`/`main()` reciben un stream
 de líneas ya armado (una lista, o un generador que simula una
 interrupción a mitad de camino), nunca un pipe real. El filtro de
-cgroup real (sandbox/ebpf/event_consumer.py::is_sandboxed_container_process)
+cgroup real (kernel/lifecycle/ebpf/event_consumer.py::is_sandboxed_container_process)
 se fuerza a True vía monkeypatch — ya tiene sus propios tests
 dedicados en tests/test_ebpf_event_consumer.py; acá solo importa la
 lógica de conteo/consumo de observer.py.
@@ -14,8 +14,8 @@ from __future__ import annotations
 import pytest
 
 from audit.audit_log import audit_log
-from sandbox.ebpf import event_consumer
-from sandbox.ebpf.observer import main, run
+from kernel.lifecycle.ebpf import event_consumer
+from kernel.lifecycle.ebpf.observer import main, run
 
 
 @pytest.fixture(autouse=True)

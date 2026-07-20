@@ -6,17 +6,17 @@
 # fuga que ya pasan sin eBPF.
 #
 # Corre tests/test_sandbox_escape_resistance.py dos veces: una sola
-# (línea base) y una con sandbox/ebpf/prototype_syscalls.bt activo en
+# (línea base) y una con kernel/lifecycle/ebpf/prototype_syscalls.bt activo en
 # paralelo. Pide la contraseña de sudo UNA vez (bpftrace necesita
 # privilegio para cargar los programas).
 #
-# Uso: bash sandbox/ebpf/measure_overhead.sh
+# Uso: bash kernel/lifecycle/ebpf/measure_overhead.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 TEST_FILE="tests/test_sandbox_escape_resistance.py"
 LOG_DIR="$(mktemp -d)"
-BT_SCRIPT="sandbox/ebpf/prototype_syscalls.bt"
+BT_SCRIPT="kernel/lifecycle/ebpf/prototype_syscalls.bt"
 
 echo "== Corrida 1/2: SIN eBPF (línea base) =="
 /usr/bin/time -v pytest "$TEST_FILE" -q > "$LOG_DIR/baseline.log" 2>&1 || true

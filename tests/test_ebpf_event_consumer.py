@@ -1,11 +1,11 @@
 """
-Tests de sandbox/ebpf/event_consumer.py (Fase E2 del plan eBPF, + el
+Tests de kernel/lifecycle/ebpf/event_consumer.py (Fase E2 del plan eBPF, + el
 filtro de cgroup adelantado de la Fase E7 tras el hallazgo real de la
 evaluación de E4 — ver el docstring del módulo).
 
 100% sin bpftrace ni Docker reales — alimenta al parser/consumidor con
 líneas de texto fijas, exactamente lo que emitiría
-sandbox/ebpf/syscall_events.bt (ver ese archivo) o el ruido normal de
+kernel/lifecycle/ebpf/syscall_events.bt (ver ese archivo) o el ruido normal de
 bpftrace (banners, warnings) que hay que poder ignorar sin romper el
 consumo del resto del stream. `is_sandboxed_container_process` se
 prueba con archivos de cgroup fixture (tmp_path), nunca /proc real.
@@ -15,8 +15,8 @@ from __future__ import annotations
 import pytest
 
 from audit.audit_log import audit_log
-from sandbox.ebpf import event_consumer
-from sandbox.ebpf.event_consumer import (
+from kernel.lifecycle.ebpf import event_consumer
+from kernel.lifecycle.ebpf.event_consumer import (
     SyscallEvent,
     VIOLATION_SYSCALLS,
     consume_stream,

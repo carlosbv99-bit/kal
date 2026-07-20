@@ -1,7 +1,7 @@
 """
 Fase E2 (diseño del esquema de eventos + integración con la
 auditoría): parsea las líneas JSON que emite
-sandbox/ebpf/syscall_events.bt y las convierte en AuditEvent —
+kernel/lifecycle/ebpf/syscall_events.bt y las convierte en AuditEvent —
 escritas SIEMPRE a través del mismo audit_log.record() que usa el
 resto del proyecto, nunca un segundo escritor paralelo con su propio
 lock. Justificación de por qué esta fase existe: ya se corrigió una
@@ -12,7 +12,7 @@ sin pensar este punto la hubiera reintroducido.
 DECISIÓN DE DISEÑO — no todo syscall observado es una "violación de
 política": connect/setuid/setresuid/ptrace dentro de un contenedor del
 sandbox SIEMPRE son inesperados (network_mode=none, cap_drop=ALL,
-usuario no-root — ver sandbox/docker_runner.py — no hay ningún
+usuario no-root — ver kernel/lifecycle/docker_runner.py — no hay ningún
 escenario legítimo), así que verlos ya es una violación real, sin
 necesitar reglas adicionales. execve NO lo es: la corrida real de la
 Fase E1 (ver README.md) mostró que la mayoría de los execve observados
@@ -111,7 +111,7 @@ class SyscallEvent:
 
 def parse_event_line(line: str) -> SyscallEvent | None:
     """
-    Parsea una línea JSON emitida por sandbox/ebpf/syscall_events.bt.
+    Parsea una línea JSON emitida por kernel/lifecycle/ebpf/syscall_events.bt.
     None (nunca una excepción) para líneas vacías o que no son JSON
     válido — bpftrace también emite líneas propias que no son eventos
     ("Attached N probes", warnings, etc.), hay que poder ignorarlas sin

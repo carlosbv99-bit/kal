@@ -8,7 +8,7 @@
 # Arranque manual por sesión (elegido explícitamente, ver README.md
 # Fase E4) — sin cambios permanentes al sistema.
 #
-# Uso: bash sandbox/ebpf/run_observer.sh
+# Uso: bash kernel/lifecycle/ebpf/run_observer.sh
 # (pide tu contraseña de sudo una vez, para bpftrace — el resto del
 # pipeline corre SIN privilegios). Ctrl+C para terminar y ver el
 # resumen de violaciones detectadas en esta sesión.
@@ -20,4 +20,4 @@ if [ ! -x "$PYTHON_BIN" ]; then
     PYTHON_BIN="python3"
 fi
 
-sudo bpftrace sandbox/ebpf/syscall_events.bt | "$PYTHON_BIN" -m sandbox.ebpf.observer
+sudo bpftrace kernel/lifecycle/ebpf/syscall_events.bt | "$PYTHON_BIN" -m kernel.lifecycle.ebpf.observer

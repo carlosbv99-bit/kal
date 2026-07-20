@@ -9,12 +9,13 @@ A diferencia de skills/image_via_kernel/ y skills/audio_via_kernel/
 devuelve la primera llamada se pasa TAL CUAL como argumento de la
 segunda — la skill nunca ve una ruta real de host, el kernel resuelve
 la referencia por su cuenta (ver
-kernel_bus/bus.py::KernelServiceBus._resolve_input_artifacts()).
+kernel/api/bus.py::KernelServiceBus._resolve_input_artifacts()).
 """
 from __future__ import annotations
 
-from tool_integration.base_tool import Artifact, Tool
-from tool_integration.kernel_client import call as kernel_call
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
+from sdk.context import call as kernel_call
 
 
 class VoiceRoundtripViaKernelTool(Tool):

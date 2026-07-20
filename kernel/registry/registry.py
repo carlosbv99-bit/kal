@@ -23,16 +23,17 @@ from typing import TYPE_CHECKING
 
 from audit.audit_log import AuditEvent, audit_log
 from code_analysis.ast_validator import validate_code
-from sandbox.executor import SandboxExecutor
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
-from tool_integration.permissions import Permission
-from tool_integration.signing import ToolSigner, tool_signer
-from tool_integration.versioning import ToolVersionStore, tool_version_store
+from kernel.lifecycle.executor import SandboxExecutor
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
+from sdk.permissions import Permission
+from kernel.registry.signing import ToolSigner, tool_signer
+from kernel.registry.versioning import ToolVersionStore, tool_version_store
 from utils.config import settings
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from tool_integration.skills import SkillStatus
+    from kernel.registry.skills import SkillStatus
 
 logger = get_logger(__name__)
 
@@ -139,15 +140,15 @@ class ToolRegistry:
         """
         Descubre y carga las skills instaladas bajo skills/ (o
         `skills_dir` si se pasa explícito, usado en tests). Import
-        diferido para evitar el ciclo tool_integration.skills <->
-        tool_integration.registry (skills.py necesita el tipo
+        diferido para evitar el ciclo kernel.registry.skills <->
+        kernel.registry.registry (skills.py necesita el tipo
         ToolRegistry, este método necesita load_skills real).
 
         `image_builder` inyectable (mismo motivo que `sandbox=` de este
         registry): solo hace falta para skills con `requirements`
-        declarados, ver tool_integration/skills.py::load_skills().
+        declarados, ver kernel/registry/skills.py::load_skills().
         """
-        from tool_integration.skills import DEFAULT_SKILLS_DIR, load_skills as _load_skills
+        from kernel.registry.skills import DEFAULT_SKILLS_DIR, load_skills as _load_skills
 
         self._skill_statuses = _load_skills(
             self, skills_dir=skills_dir or DEFAULT_SKILLS_DIR, image_builder=image_builder
@@ -238,8 +239,8 @@ class ToolRegistry:
     def _activate(self, manifest: ToolManifest, source_code: str) -> int:
         """
         Registra la herramienta dinámica como ejecutable de verdad:
-        persiste esta versión en disco (tool_integration/versioning.py),
-        la firma (tool_integration/signing.py) y solo entonces la deja
+        persiste esta versión en disco (kernel/registry/versioning.py),
+        la firma (kernel/registry/signing.py) y solo entonces la deja
         invocable. Punto único usado tanto por la auto-aprobación como
         por approve_pending_tool(), para no duplicar la lógica.
         """
@@ -379,21 +380,22 @@ def _register_default_static_tools() -> None:
     seguro incluso si esas librerías pesadas no están instaladas todavía:
     el error solo aparecería al intentar usarlas, no al arrancar el agente.
     """
-    from kernel_bus.bus import kernel_bus
-    from kernel_bus.services import AudioService, ImageService, STTService
+    from kernel.api.bus import kernel_service_bus
+    from kernel.services.services import AudioService, ImageService, STTService
     from tool_integration.adapters.audio_gen import AudioGenerationTool
     from tool_integration.adapters.browser import BrowserTool
+    from tool_integration.adapters.image_analysis import ImageAnalysisTool
     from tool_integration.adapters.image_composition import ImageCompositionTool
     from tool_integration.adapters.image_editing import ImageEditingTool
     from tool_integration.adapters.image_gen import ImageGenerationTool
     from tool_integration.adapters.speech_to_text import SpeechToTextTool
     from tool_integration.adapters.video_gen import VideoCompositionTool
-    from tool_integration.adapters.vscode_files import ProposeProjectFilesTool
+    from tool_integration.adapters.vscode_files import ImportResourceTool, ProposeProjectFilesTool
 
     # UNA sola instancia de cada servicio, compartida de verdad entre el
     # adaptador de primera parte (llamada Python directa) y cualquier
     # skill que declare el kernel_services correspondiente (llamada vía
-    # el socket Unix del Kernel Service Bus, ver kernel_bus/__init__.py)
+    # el socket Unix del Kernel Service Bus, ver kernel/__init__.py)
     # — el modelo se carga una sola vez para ambos caminos, no una copia
     # por cada uno. ImageEditingTool recibe la MISMA shared_image_service
     # que ImageGenerationTool (mismo dominio "image", dos acciones:
@@ -401,9 +403,9 @@ def _register_default_static_tools() -> None:
     shared_image_service = ImageService()
     shared_audio_service = AudioService()
     shared_stt_service = STTService()
-    kernel_bus.register("image", shared_image_service)
-    kernel_bus.register("audio", shared_audio_service)
-    kernel_bus.register("stt", shared_stt_service)
+    kernel_service_bus.register("image", shared_image_service)
+    kernel_service_bus.register("audio", shared_audio_service)
+    kernel_service_bus.register("stt", shared_stt_service)
 
     tool_registry.register_static_tool(ImageGenerationTool(image_service=shared_image_service))
     tool_registry.register_static_tool(AudioGenerationTool(audio_service=shared_audio_service))
@@ -412,7 +414,9 @@ def _register_default_static_tools() -> None:
     tool_registry.register_static_tool(SpeechToTextTool(stt_service=shared_stt_service))
     tool_registry.register_static_tool(ImageEditingTool(image_service=shared_image_service))
     tool_registry.register_static_tool(ImageCompositionTool())
+    tool_registry.register_static_tool(ImageAnalysisTool())
     tool_registry.register_static_tool(ProposeProjectFilesTool())
+    tool_registry.register_static_tool(ImportResourceTool())
     tool_registry.load_skills()
 
 

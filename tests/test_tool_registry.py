@@ -1,5 +1,5 @@
 """
-Tests de tool_integration/registry.py.
+Tests de kernel/registry/registry.py.
 
 Usan un SandboxExecutor falso (inyectado) para no requerir Docker real
 — lo que se está probando aquí es la LÓGICA del pipeline de
@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from sandbox.docker_runner import SandboxResult
-from tool_integration.base_tool import ToolManifest
-from tool_integration.registry import ToolRegistry
+from kernel.lifecycle.docker_runner import SandboxResult
+from sdk.skill import ToolManifest
+from kernel.registry.registry import ToolRegistry
 from utils.config import settings
 
 
@@ -171,7 +171,8 @@ def test_filesystem_write_permission_also_gates_approval(registry, monkeypatch):
 
 
 def test_static_tool_registration_bypasses_pipeline_entirely(registry):
-    from tool_integration.base_tool import Artifact, Tool
+    from sdk.skill import Tool
+    from sdk.artifacts import Artifact
 
     class DummyStaticTool(Tool):
         manifest = _manifest(name="estatica", created_by="system")

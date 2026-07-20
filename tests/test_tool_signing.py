@@ -1,10 +1,10 @@
 """
-Tests de tool_integration/signing.py: firma/verificación Ed25519 de
+Tests de kernel/registry/signing.py: firma/verificación Ed25519 de
 versiones de herramientas dinámicas.
 """
 from __future__ import annotations
 
-from tool_integration.signing import ToolSigner
+from kernel.registry.signing import ToolSigner
 
 
 def test_sign_and_verify_roundtrip(tmp_path):

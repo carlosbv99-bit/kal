@@ -12,7 +12,7 @@ import docker
 import pytest
 from docker.errors import DockerException
 
-from sandbox.docker_runner import DockerSandboxRunner
+from kernel.lifecycle.docker_runner import DockerSandboxRunner
 
 
 def docker_available() -> bool:

@@ -5,7 +5,7 @@ entry_point: "tool:VoiceRoundtripViaKernelTool"
 # Skill de REFERENCIA: a diferencia de image_via_kernel/audio_via_kernel
 # (que solo PRODUCEN un artefacto), esta CONSUME uno como entrada de una
 # segunda llamada — ejercita la resolución de artefactos de entrada de
-# kernel_bus/bus.py::KernelServiceBus._resolve_input_artifacts(). El
+# kernel/api/bus.py::KernelServiceBus._resolve_input_artifacts(). El
 # "artifact://audio/<uuid>" que devuelve audio.synthesize se pasa tal
 # cual como audio_path de stt.transcribe; el kernel lo resuelve a la
 # ruta real de host, la skill nunca la ve.

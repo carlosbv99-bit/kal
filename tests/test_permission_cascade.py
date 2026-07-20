@@ -1,23 +1,24 @@
 """
-Tests de tool_integration/permission_cascade.py — la cascada de
+Tests de kernel/permissions/permission_cascade.py — la cascada de
 permisos de varios niveles (global -> nivel de confianza -> sesión ->
 manifiesto de la herramienta), y de trust_tier_for(), que decide el
 nivel de confianza por el TIPO del wrapper registrado, nunca por
 manifest.created_by (autodeclarado por la propia herramienta/skill).
 
 Separado deliberadamente de tests/test_tool_permissions.py: ese archivo
-prueba tool_integration/permissions.py, que se copia tal cual dentro de
+prueba sdk/permissions.py, que se copia tal cual dentro de
 cada contenedor de skill y por eso debe seguir siendo 100% stdlib —
 este módulo (permission_cascade.py) SÍ depende de utils.config y nunca
 se envía a un contenedor.
 """
 from __future__ import annotations
 
-from tool_integration.base_tool import Artifact, Tool, ToolManifest
-from tool_integration.permission_cascade import PermissionCascade, trust_tier_for
-from tool_integration.permissions import Permission
-from tool_integration.registry import DynamicSandboxedTool
-from tool_integration.sandboxed_skill import SandboxedSkillTool
+from sdk.skill import Tool, ToolManifest
+from sdk.artifacts import Artifact
+from kernel.permissions.permission_cascade import PermissionCascade, trust_tier_for
+from sdk.permissions import Permission
+from kernel.registry.registry import DynamicSandboxedTool
+from kernel.registry.sandboxed_skill import SandboxedSkillTool
 
 
 # --- trust_tier_for() — la señal de confianza viene del TIPO del wrapper,
