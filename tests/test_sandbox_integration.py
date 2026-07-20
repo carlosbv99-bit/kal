@@ -14,6 +14,7 @@ no solo un bug funcional.
 from __future__ import annotations
 
 from tests.conftest import requires_docker
+from utils.correlation import set_correlation_id
 
 pytestmark = requires_docker
 
@@ -205,3 +206,23 @@ def test_timeout_seconds_override_allows_longer_execution(runner):
 def test_timeout_seconds_override_still_enforces_a_shorter_limit(runner):
     result = runner.run("import time; time.sleep(10)", timeout_seconds=2)
     assert result.status == "timeout"
+
+
+# --- Correlation ID (ver utils/correlation.py) dentro del contenedor ---
+
+
+def test_correlation_id_reaches_the_container_as_an_env_var(runner):
+    set_correlation_id("desde-el-host")
+    try:
+        result = runner.run("import os; print(os.environ.get('KAL_CORRELATION_ID'))")
+    finally:
+        set_correlation_id(None)
+
+    assert result.status == "success"
+    assert "desde-el-host" in result.stdout
+
+
+def test_without_a_bound_correlation_id_the_env_var_is_absent(runner):
+    set_correlation_id(None)
+    result = runner.run("import os; print('KAL_CORRELATION_ID' in os.environ)")
+    assert "False" in result.stdout

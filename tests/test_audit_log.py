@@ -10,6 +10,7 @@ import json
 import pytest
 
 from audit.audit_log import AuditEvent, AuditLog
+from utils.correlation import set_correlation_id
 
 
 @pytest.fixture
@@ -239,3 +240,36 @@ def test_diagnose_chain_break_records_index_and_event_type(log):
 
     assert diagnosis.breaks[0].index == 0
     assert diagnosis.breaks[0].event_type == "sandbox_execution"
+
+
+# --- Correlation ID (ver utils/correlation.py) — propagación automática 2026-07-20 ---
+
+
+@pytest.fixture(autouse=True)
+def _reset_correlation_id():
+    """Ningún test de este archivo debe filtrar su propio correlation_id
+    a los que corren después en el mismo proceso de pytest."""
+    set_correlation_id(None)
+    yield
+    set_correlation_id(None)
+
+
+def test_record_injects_the_bound_correlation_id(log):
+    set_correlation_id("abc123")
+    event = log.record(_event())
+    assert event.context["correlation_id"] == "abc123"
+
+
+def test_record_without_a_bound_correlation_id_does_not_add_the_key(log):
+    event = log.record(_event())
+    assert "correlation_id" not in event.context
+
+
+def test_record_never_overwrites_a_correlation_id_the_caller_already_set(log):
+    set_correlation_id("del-contextvar")
+    explicit_event = AuditEvent(
+        event_type="sandbox_execution", summary="explícito",
+        context={"correlation_id": "puesto-a-mano"}, outcome="success",
+    )
+    event = log.record(explicit_event)
+    assert event.context["correlation_id"] == "puesto-a-mano"

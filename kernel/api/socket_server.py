@@ -37,6 +37,7 @@ from kernel.api.protocol import (
     parse_request,
     success_response,
 )
+from utils.correlation import set_correlation_id
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -65,6 +66,7 @@ class KernelBusSocketServer:
         skill_name: str,
         max_requests: int = 20,
         idle_timeout: float = 30.0,
+        correlation_id: str | None = None,
     ):
         self.bus = bus
         self.allowed_methods = frozenset(allowed_methods)
@@ -72,6 +74,11 @@ class KernelBusSocketServer:
         self.skill_name = skill_name
         self.max_requests = max_requests
         self.idle_timeout = idle_timeout
+        # Ver utils/correlation.py — capturado por el llamador en SU thread
+        # (el que originó el pedido HTTP), porque _serve() corre en un
+        # thread de background propio al que un contextvar nunca cruza
+        # automáticamente.
+        self.correlation_id = correlation_id
         self._server_socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -95,6 +102,12 @@ class KernelBusSocketServer:
             self._thread.join(timeout=5)
 
     def _serve(self) -> None:
+        # Este método corre en el thread de background lanzado por start()
+        # — sin esto, todo lo que loguea/audita desde acá (_audit_call,
+        # _audit_denied, logger.warning en _handle_line) quedaría sin
+        # correlation_id pese a que start() se llamó dentro de un pedido
+        # HTTP con uno bien seteado (ver utils/correlation.py).
+        set_correlation_id(self.correlation_id)
         requests_handled = 0
         try:
             while requests_handled < self.max_requests and not self._stop_event.is_set():

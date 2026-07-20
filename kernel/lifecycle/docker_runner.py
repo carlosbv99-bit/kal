@@ -24,6 +24,7 @@ from docker.errors import APIError, DockerException, ImageNotFound
 from requests.exceptions import RequestException
 
 from utils.config import settings
+from utils.correlation import get_correlation_id
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -170,6 +171,14 @@ class DockerSandboxRunner:
             for host_path, container_path in (extra_mounts or {}).items():
                 volumes[str(host_path)] = {"bind": container_path, "mode": "rw"}
 
+            # Correlation ID (ver utils/correlation.py) del pedido HTTP que
+            # originó esta ejecución, si lo hay — disponible DENTRO del
+            # contenedor por si una skill quiere incluirlo en lo que
+            # imprime, sin que eso sea obligatorio (una skill de terceros
+            # puede ignorarlo tranquilamente).
+            correlation_id = get_correlation_id()
+            environment = {"KAL_CORRELATION_ID": correlation_id} if correlation_id else {}
+
             start = time.time()
             container = None
             try:
@@ -177,6 +186,7 @@ class DockerSandboxRunner:
                     image=target_image,
                     command=["python", "/workspace/main.py"],
                     volumes=volumes,
+                    environment=environment,
                     tmpfs={"/tmp": "rw,noexec,nosuid,size=64m"},
                     working_dir="/workspace",
                     network_mode=target_network_mode,          # "none" por defecto
