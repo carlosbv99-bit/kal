@@ -21,10 +21,11 @@ _DEFAULT_FAKE_PUBLIC_IP = "93.184.216.34"  # IP pública real (example.com) — 
 
 class FakeBrowserDriver:
     def __init__(
-        self, links=None, text="contenido de la página", raise_on=None, final_url=None,
+        self, links=None, images=None, text="contenido de la página", raise_on=None, final_url=None,
         remote_ip=_DEFAULT_FAKE_PUBLIC_IP,
     ):
         self.links = links if links is not None else ["https://example.com/a", "https://example.com/b"]
+        self.images = images if images is not None else ["https://example.com/foto1.jpg", "https://example.com/foto2.jpg"]
         self.text = text
         self.raise_on = raise_on  # nombre de método que debe lanzar excepción
         # None = sin redirect (la URL final es la misma que se pidió). Fijar
@@ -51,6 +52,12 @@ class FakeBrowserDriver:
         if self.raise_on == "extract_links":
             raise RuntimeError("fallo simulado de red")
         return self.links, self._final(url), self.remote_ip
+
+    def extract_images(self, url):
+        self.calls.append(("extract_images", url))
+        if self.raise_on == "extract_images":
+            raise RuntimeError("fallo simulado de red")
+        return self.images, self._final(url), self.remote_ip
 
     def screenshot(self, url, path):
         self.calls.append(("screenshot", url, path))
@@ -100,19 +107,58 @@ def test_data_scheme_is_rejected(tool, monkeypatch):
 
 
 def test_empty_allowlist_denies_everything_by_default(tool, monkeypatch):
+    """
+    BUG REAL CORREGIDO: antes rechazaba con "status": "error" y ningún
+    camino de recuperación. Ahora escala a aprobación humana real (ver
+    kernel/permissions/network_access_manager.py) — mismo mecanismo que
+    ya adoptó ImportResourceTool para descargas.
+    """
     monkeypatch.setattr(settings.browser, "allowed_domains", [])
 
     artifact = tool.execute(url="https://example.com/")
 
-    assert artifact.metadata["status"] == "error"
+    assert artifact.metadata["status"] == "requires_approval"
+    assert artifact.metadata["resource_kind"] == "network"
+    assert artifact.metadata["request_id"]
     assert "no permitido" in artifact.metadata["stderr"]
 
 
 def test_domain_not_in_allowlist_is_denied(tool, allow_example_domain):
     artifact = tool.execute(url="https://otrositio.com/")
 
-    assert artifact.metadata["status"] == "error"
+    assert artifact.metadata["status"] == "requires_approval"
     assert "otrositio.com" in artifact.metadata["stderr"]
+
+
+def test_domain_not_in_allowlist_creates_a_real_pending_network_request(tool, allow_example_domain):
+    from kernel.permissions.network_access_manager import network_access_manager
+
+    artifact = tool.execute(url="https://otrositio.com/")
+
+    pending = network_access_manager.list_pending()
+    assert any(p.id == artifact.metadata["request_id"] and p.resource_key == "otrositio.com" for p in pending)
+
+
+def test_domain_approved_via_access_manager_is_allowed_on_retry(tool, allow_example_domain, tmp_path, monkeypatch):
+    """
+    Tras aprobar (level="project"), un reintento del MISMO dominio ya
+    no escala. Instancia propia con grants_path aislado — el singleton
+    real (kernel.permissions.network_access_manager.network_access_manager)
+    persiste a un archivo real compartido entre corridas, no apto para
+    un test que necesita partir de cero cada vez.
+    """
+    import tool_integration.adapters.browser as browser_module
+    from kernel.permissions.network_access_manager import NetworkAccessManager
+
+    isolated_manager = NetworkAccessManager(grants_path=tmp_path / "network_grants.json")
+    monkeypatch.setattr(browser_module, "network_access_manager", isolated_manager)
+
+    first = tool.execute(url="https://recien-aprobado.com/")
+    isolated_manager.approve(first.metadata["request_id"], level="project")
+
+    second = tool.execute(url="https://recien-aprobado.com/")
+
+    assert second.metadata.get("status") != "requires_approval"
 
 
 def test_exact_domain_match_is_allowed(tool, allow_example_domain):
@@ -167,6 +213,26 @@ def test_action_links_with_no_links_reports_it(allow_example_domain, tmp_path, m
     assert artifact.metadata["summary"] == "(sin enlaces encontrados)"
 
 
+def test_action_images_joins_image_urls_in_summary(tool, allow_example_domain):
+    """
+    BUG REAL: el modelo necesita URLs de imagen REALES (no inventadas)
+    antes de llamar import_resource — esta acción existe para eso.
+    """
+    artifact = tool.execute(url="https://example.com/", action="images")
+
+    assert "https://example.com/foto1.jpg" in artifact.metadata["summary"]
+    assert "https://example.com/foto2.jpg" in artifact.metadata["summary"]
+
+
+def test_action_images_with_no_images_reports_it(allow_example_domain, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings.browser, "artifact_dir", str(tmp_path))
+    tool = BrowserTool(driver=FakeBrowserDriver(images=[]))
+
+    artifact = tool.execute(url="https://example.com/", action="images")
+
+    assert artifact.metadata["summary"] == "(sin imágenes encontradas)"
+
+
 def test_action_screenshot_writes_file_and_returns_image_artifact(tool, allow_example_domain):
     artifact = tool.execute(url="https://example.com/", action="screenshot")
 
@@ -214,7 +280,7 @@ def test_blocked_domain_is_audited_as_failure(tool, tmp_path, monkeypatch):
 
 
 def test_manifest_declares_browser_permission_and_network():
-    from tool_integration.permissions import Permission
+    from sdk.permissions import Permission
 
     assert Permission.BROWSER in BrowserTool.manifest.permissions
     assert Permission.NETWORK in BrowserTool.manifest.permissions
@@ -229,7 +295,7 @@ def test_redirect_to_disallowed_domain_is_rejected_for_text(allow_example_domain
 
     artifact = tool.execute(url="https://example.com/redirect", action="text")
 
-    assert artifact.metadata["status"] == "error"
+    assert artifact.metadata["status"] == "requires_approval"
     assert "redirect" in artifact.metadata["stderr"]
     assert "evil.com" in artifact.metadata["stderr"]
     # El contenido nunca debe filtrarse al agente, aunque el driver lo haya extraído.
@@ -242,7 +308,7 @@ def test_redirect_to_disallowed_domain_is_rejected_for_links(allow_example_domai
 
     artifact = tool.execute(url="https://example.com/redirect", action="links")
 
-    assert artifact.metadata["status"] == "error"
+    assert artifact.metadata["status"] == "requires_approval"
     assert "example.com/a" not in artifact.metadata.get("summary", "")
 
 
@@ -252,7 +318,7 @@ def test_redirect_to_disallowed_domain_is_rejected_for_screenshot(allow_example_
 
     artifact = tool.execute(url="https://example.com/redirect", action="screenshot")
 
-    assert artifact.metadata["status"] == "error"
+    assert artifact.metadata["status"] == "requires_approval"
     assert artifact.modality != "image"
 
 
@@ -370,19 +436,6 @@ def test_private_ip_rejection_is_audited_as_failure(allow_example_domain, tmp_pa
     assert entries[0]["outcome"] == "failure"
 
 
-def test_is_unsafe_ip_accepts_normal_public_addresses():
-    from tool_integration.adapters.browser import _is_unsafe_ip
-
-    assert _is_unsafe_ip("93.184.216.34") is False
-    assert _is_unsafe_ip("8.8.8.8") is False
-
-
-def test_is_unsafe_ip_rejects_private_loopback_linklocal_and_garbage():
-    from tool_integration.adapters.browser import _is_unsafe_ip
-
-    assert _is_unsafe_ip("127.0.0.1") is True
-    assert _is_unsafe_ip("10.1.2.3") is True
-    assert _is_unsafe_ip("169.254.169.254") is True
-    assert _is_unsafe_ip("::1") is True
-    assert _is_unsafe_ip(None) is True
-    assert _is_unsafe_ip("no-es-una-ip") is True
+# is_unsafe_ip()/is_domain_allowed() se extrajeron a
+# kernel/permissions/network_safety.py (download_manager.py las necesita
+# igual) — su cobertura vive en tests/test_network_safety.py, no acá.

@@ -1,5 +1,5 @@
 """
-Tests de kernel_bus/resource_broker.py — libera recursos "pesados"
+Tests de kernel/broker/resource_broker.py — libera recursos "pesados"
 (pipelines de imagen/audio/STT) que llevan un rato sin uso, o TODOS de
 inmediato si la RAM disponible del sistema está baja. Bug real que
 motivó esto: sin esto, un pipeline de varios GB queda en RAM para
@@ -13,7 +13,7 @@ los tests.
 """
 from __future__ import annotations
 
-from kernel_bus.resource_broker import ResourceBroker
+from kernel.broker.resource_broker import ResourceBroker
 
 
 def _broker(idle_timeout_seconds=300, min_available_ram_mb=2048, available_ram_mb=8192, monkeypatch=None):
@@ -29,7 +29,7 @@ def test_mark_used_on_unknown_resource_is_a_no_op(monkeypatch):
 
 def test_does_not_evict_a_resource_used_recently(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("kernel_bus.resource_broker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
     broker = _broker(idle_timeout_seconds=300, monkeypatch=monkeypatch)
 
     unloaded = []
@@ -44,7 +44,7 @@ def test_does_not_evict_a_resource_used_recently(monkeypatch):
 
 def test_evicts_a_resource_idle_past_the_timeout(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("kernel_bus.resource_broker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
     broker = _broker(idle_timeout_seconds=300, monkeypatch=monkeypatch)
 
     unloaded = []
@@ -59,7 +59,7 @@ def test_evicts_a_resource_idle_past_the_timeout(monkeypatch):
 
 def test_never_evicts_a_resource_that_is_not_loaded(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("kernel_bus.resource_broker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
     broker = _broker(idle_timeout_seconds=300, monkeypatch=monkeypatch)
 
     unloaded = []
@@ -73,7 +73,7 @@ def test_never_evicts_a_resource_that_is_not_loaded(monkeypatch):
 
 def test_evicts_every_loaded_resource_immediately_under_memory_pressure(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("kernel_bus.resource_broker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
     broker = _broker(idle_timeout_seconds=300, min_available_ram_mb=2048, available_ram_mb=100, monkeypatch=monkeypatch)
 
     unloaded = []
@@ -90,7 +90,7 @@ def test_evicts_every_loaded_resource_immediately_under_memory_pressure(monkeypa
 
 def test_does_not_evict_when_ram_is_plentiful_and_nothing_is_idle(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("kernel_bus.resource_broker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
     broker = _broker(idle_timeout_seconds=300, min_available_ram_mb=2048, available_ram_mb=8192, monkeypatch=monkeypatch)
 
     unloaded = []
