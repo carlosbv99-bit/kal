@@ -1,0 +1,105 @@
+#!/usr/bin/env bpftrace
+/*
+ * Prototipo E1 (validación de concepto eBPF, NO un daemon permanente):
+ * observa 4 syscalls puntuales — connect, setuid/setresuid, ptrace,
+ * execve — que ya identificamos como valiosos para las garantías del
+ * sandbox (ver tests/test_sandbox_escape_resistance.py y
+ * tests/test_sandbox_integration.py).
+ *
+ * Objetivo de esta fase: confirmar que se pueden VER estos eventos con
+ * el kernel de este NUC (BTF + CONFIG_BPF_LSM=y confirmados, aunque
+ * BPF_LSM no está activo en /sys/kernel/security/lsm todavía — eso es
+ * decisión de la Fase E3, esto es solo observación vía tracepoints,
+ * nunca bloqueo) y medir el overhead real, no confiar en benchmarks
+ * públicos de clusters (ver justificación de fase). NO reemplaza nada
+ * de lo que el sandbox de Docker ya hace — es un segundo mecanismo de
+ * detección independiente, corriendo en paralelo a los tests
+ * existentes para cruzar validación.
+ *
+ * Uso recomendado (dos terminales, o ver measure_overhead.sh para uno solo):
+ *   Terminal A: sudo bpftrace sandbox/ebpf/prototype_syscalls.bt
+ *   Terminal B: pytest tests/test_sandbox_escape_resistance.py -v
+ *
+ * Uso con un contenedor puntual ya conocido (más preciso, sin ruido de
+ * otros procesos "python" del host — ver limitación abajo):
+ *   sudo bpftrace sandbox/ebpf/prototype_syscalls.bt <PID_del_contenedor>
+ *   (obtener el PID con: docker inspect -f '{{.State.Pid}}' <container_id>)
+ *
+ * LIMITE CONOCIDO Y ACEPTADO de este prototipo (documentado a
+ * propósito, mismo criterio que code_analysis/denylist.py): sin un PID
+ * explícito, filtra por `comm == "python"` — en ESTA máquina el UID
+ * fijo del sandbox (1000, ver sandbox/docker_runner.py::SANDBOX_UID)
+ * coincide con el UID real del usuario del host, así que un filtro por
+ * UID no serviría para distinguir contenedor de host. Cualquier otro
+ * proceso "python" corriendo en el host en simultáneo (otro script,
+ * este mismo Claude Code, etc.) también aparecerá acá — para esta
+ * fase de validación de concepto, correlacionar a mano por PID/timestamp
+ * alcanza. La Fase E7 (producción) reemplaza esto por un filtro de
+ * cgroup preciso (Docker cgroup driver=systemd, cgroup v2 en esta
+ * máquina -> /sys/fs/cgroup/system.slice/docker-<id>.scope).
+ *
+ * Para EXECVE no se filtra por comm (ver nota en el probe): el propio
+ * exec cambia el nombre del proceso, así que filtrar por "python" ahí
+ * ocultaría justo el caso más interesante (python ejecutando /bin/sh,
+ * por ejemplo).
+ *
+ * BUG REAL ENCONTRADO EN LA EVALUACIÓN DE E4 (2026-07-10): filtrar
+ * solo `comm == "python"` dejaba invisible al proceso PRINCIPAL de kal
+ * (corre como `.venv/bin/python3 .venv/bin/uvicorn ...`, comm real
+ * "python3", confirmado con `ps -eo pid,comm,cmd`). Las skills
+ * sandboxeadas sí aparecían porque docker_runner.py invoca
+ * literalmente "python" (sin el 3) dentro del contenedor. Fix:
+ * aceptar ambos nombres.
+ */
+
+BEGIN
+{
+    printf("[E1] prototipo activo (connect/setuid/setresuid/ptrace/execve) — Ctrl+C para terminar\n");
+    if ($1 != 0) {
+        printf("[E1] filtrando por pid=%d\n", $1);
+    } else {
+        printf("[E1] sin pid explícito — filtrando por comm==\"python\" (ver limite conocido en el docstring)\n");
+    }
+}
+
+tracepoint:syscalls:sys_enter_connect
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    $sa = (struct sockaddr *)args->uservaddr;
+    if ($sa->sa_family == 2) {  // AF_INET — bpftrace no expone esta constante como identificador (confirmado: v0.25.0 falla con "Unknown identifier"), 2 es el valor fijo de AF_INET en Linux (todas las arquitecturas)
+        $sin = (struct sockaddr_in *)args->uservaddr;
+        $port = (($sin->sin_port & 0xff) << 8) | ($sin->sin_port >> 8);
+        printf("[E1] CONNECT pid=%d comm=%s ip=%s port=%d\n", pid, comm, ntop($sin->sin_addr.s_addr), $port);
+    } else {
+        printf("[E1] CONNECT pid=%d comm=%s family=%d (no-IPv4)\n", pid, comm, $sa->sa_family);
+    }
+}
+
+tracepoint:syscalls:sys_enter_setuid
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    printf("[E1] SETUID pid=%d comm=%s uid_pedido=%d\n", pid, comm, args->uid);
+}
+
+tracepoint:syscalls:sys_enter_setresuid
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    printf("[E1] SETRESUID pid=%d comm=%s ruid=%d euid=%d suid=%d\n", pid, comm, args->ruid, args->euid, args->suid);
+}
+
+tracepoint:syscalls:sys_enter_ptrace
+/(comm == "python" || comm == "python3") && ($1 == 0 || pid == $1)/
+{
+    printf("[E1] PTRACE pid=%d comm=%s request=%d target_pid=%d\n", pid, comm, args->request, args->pid);
+}
+
+tracepoint:sched:sched_process_exec
+/$1 == 0 || pid == $1/
+{
+    printf("[E1] EXECVE pid=%d filename=%s\n", pid, str(args->filename));
+}
+
+END
+{
+    printf("[E1] prototipo detenido\n");
+}
