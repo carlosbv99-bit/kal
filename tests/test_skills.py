@@ -1,12 +1,12 @@
 """
-Tests de tool_integration/skills.py: descubrimiento y carga de skills
+Tests de kernel/registry/skills.py: descubrimiento y carga de skills
 (plugins) instaladas como carpetas con su propio skill.yaml.
 
 Construye carpetas de skills sintéticas bajo tmp_path (no toca skills/
 real del proyecto). El manifiesto (nombre/descripción/permisos/
 parameters_schema) es el único que load_skills() lee — el `.py` de la
 skill NUNCA se importa en este proceso, ni para leer nada de él (ver
-docstring de tool_integration/skills.py): por eso muchos de los tests
+docstring de kernel/registry/skills.py): por eso muchos de los tests
 de "skill rota" de abajo confirman que la skill se REGISTRA igual
 (porque el error solo puede detectarse ejecutando de verdad, dentro de
 un contenedor) en vez de fallar en la carga, a diferencia de antes.
@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import pytest
 
-from sandbox.docker_runner import DockerSandboxRunner
-from sandbox.executor import SandboxExecutor
+from kernel.lifecycle.docker_runner import DockerSandboxRunner
+from kernel.lifecycle.executor import SandboxExecutor
 from tests.conftest import requires_docker
-from tool_integration.registry import ToolRegistry
-from tool_integration.sandboxed_skill import SandboxedSkillTool
+from kernel.registry.registry import ToolRegistry
+from kernel.registry.sandboxed_skill import SandboxedSkillTool
 
 
 @pytest.fixture
@@ -34,7 +34,8 @@ def registry():
 
 
 VALID_TOOL_SOURCE = """
-from tool_integration.base_tool import Artifact, Tool
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
 
 
 class GreetTool(Tool):
@@ -408,7 +409,7 @@ def test_no_parameters_schema_defaults_to_empty_object(tmp_path, registry):
 
 
 # --- firma de integridad del paquete (F3 del plan de marketplace, ver
-# tool_integration/skill_signing.py) ---
+# kernel/registry/skill_signing.py) ---
 
 
 def test_unsigned_skill_loads_exactly_as_before(tmp_path, registry):
@@ -424,7 +425,7 @@ def test_unsigned_skill_loads_exactly_as_before(tmp_path, registry):
 
 
 def test_correctly_signed_skill_loads_and_reports_verified(tmp_path, registry):
-    from tool_integration.skill_signing import SkillSigner
+    from kernel.registry.skill_signing import SkillSigner
 
     skill_dir = _make_skill(tmp_path, "greeter", VALID_TOOL_SOURCE, enabled=True)
     SkillSigner(key_dir=tmp_path / "keys").write_signature(skill_dir)
@@ -437,7 +438,7 @@ def test_correctly_signed_skill_loads_and_reports_verified(tmp_path, registry):
 
 
 def test_tampered_signature_prevents_loading_entirely(tmp_path, registry):
-    from tool_integration.skill_signing import SkillSigner
+    from kernel.registry.skill_signing import SkillSigner
 
     skill_dir = _make_skill(tmp_path, "greeter", VALID_TOOL_SOURCE, enabled=True)
     SkillSigner(key_dir=tmp_path / "keys").write_signature(skill_dir)
@@ -454,7 +455,7 @@ def test_tampered_signature_prevents_loading_entirely(tmp_path, registry):
 
 def test_tampered_signature_is_audited_as_failure(tmp_path, registry, monkeypatch):
     from audit.audit_log import audit_log
-    from tool_integration.skill_signing import SkillSigner
+    from kernel.registry.skill_signing import SkillSigner
 
     monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
     skill_dir = _make_skill(tmp_path, "greeter", VALID_TOOL_SOURCE, enabled=True)
@@ -473,7 +474,7 @@ def test_tampered_signature_is_audited_as_failure(tmp_path, registry, monkeypatc
 
 
 def test_set_skill_enabled_flips_false_to_true(tmp_path):
-    from tool_integration.skills import parse_manifest, set_skill_enabled
+    from kernel.registry.skills import parse_manifest, set_skill_enabled
 
     skill_dir = _make_skill(tmp_path, "greeter", VALID_TOOL_SOURCE, enabled=False)
 
@@ -483,7 +484,7 @@ def test_set_skill_enabled_flips_false_to_true(tmp_path):
 
 
 def test_set_skill_enabled_flips_true_to_false(tmp_path):
-    from tool_integration.skills import parse_manifest, set_skill_enabled
+    from kernel.registry.skills import parse_manifest, set_skill_enabled
 
     skill_dir = _make_skill(tmp_path, "greeter", VALID_TOOL_SOURCE, enabled=True)
 
@@ -493,7 +494,7 @@ def test_set_skill_enabled_flips_true_to_false(tmp_path):
 
 
 def test_set_skill_enabled_preserves_comments_and_other_fields(tmp_path):
-    from tool_integration.skills import parse_manifest, set_skill_enabled
+    from kernel.registry.skills import parse_manifest, set_skill_enabled
 
     skill_dir = tmp_path / "greeter"
     skill_dir.mkdir()
@@ -522,7 +523,7 @@ permissions: []
 
 
 def test_set_skill_enabled_inserts_missing_enabled_line(tmp_path):
-    from tool_integration.skills import parse_manifest, set_skill_enabled
+    from kernel.registry.skills import parse_manifest, set_skill_enabled
 
     skill_dir = tmp_path / "greeter"
     skill_dir.mkdir()
@@ -540,7 +541,7 @@ def test_set_skill_enabled_inserts_missing_enabled_line(tmp_path):
 
 def test_audit_skill_enable_change_records_enabled_event(tmp_path, monkeypatch):
     from audit.audit_log import audit_log
-    from tool_integration.skills import audit_skill_enable_change
+    from kernel.registry.skills import audit_skill_enable_change
 
     monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
 
@@ -554,7 +555,7 @@ def test_audit_skill_enable_change_records_enabled_event(tmp_path, monkeypatch):
 
 def test_audit_skill_enable_change_records_disabled_event(tmp_path, monkeypatch):
     from audit.audit_log import audit_log
-    from tool_integration.skills import audit_skill_enable_change
+    from kernel.registry.skills import audit_skill_enable_change
 
     monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
 
@@ -567,7 +568,7 @@ def test_audit_skill_enable_change_records_disabled_event(tmp_path, monkeypatch)
 
 def test_audit_skill_enable_change_records_market_source(tmp_path, monkeypatch):
     from audit.audit_log import audit_log
-    from tool_integration.skills import audit_skill_enable_change
+    from kernel.registry.skills import audit_skill_enable_change
 
     monkeypatch.setattr(audit_log, "path", tmp_path / "audit.log")
 
