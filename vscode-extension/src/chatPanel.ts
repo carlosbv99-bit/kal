@@ -85,6 +85,14 @@ export class ChatPanel {
       await maybeHandleProjectFiles(result, this.client);
     } catch (e) {
       this.panel.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
+    } finally {
+      // BUG REAL ENCONTRADO EN USO: mandar esto ANTES de que
+      // maybeHandleProjectFiles() termine (p.ej. junto con "answer")
+      // dejaba mandar un pedido nuevo mientras la vista previa de
+      // archivos del pedido actual todavía esperaba una decisión — ver
+      // media/chat.js. Con `finally`, se habilita el envío recién
+      // cuando TODO terminó (incluso si algo falló).
+      this.panel.webview.postMessage({ type: "ready" });
     }
   }
 

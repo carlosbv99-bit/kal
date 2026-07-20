@@ -53,6 +53,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await maybeHandleProjectFiles(result, this.client);
     } catch (e) {
       this.view?.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
+    } finally {
+      // Ver el comentario equivalente en chatPanel.ts — sin esto,
+      // el usuario podía mandar un pedido nuevo mientras la vista
+      // previa de archivos del pedido actual todavía esperaba una
+      // decisión (VS Code encola los diálogos nativos, mostrando el
+      // más viejo primero, no el último).
+      this.view?.webview.postMessage({ type: "ready" });
     }
   }
 }

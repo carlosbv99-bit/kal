@@ -32,6 +32,17 @@
     contextIndicatorEl.style.display = "none"; // adjunto de un solo uso, ver chatPanel.ts
     const pending = appendMessage("kal está pensando...", "msg-pending");
     pending.dataset.pending = "true";
+    // BUG REAL ENCONTRADO EN USO: sin deshabilitar el envío acá, el
+    // usuario podía mandar un pedido nuevo mientras la vista previa de
+    // archivos (propose_project_files, ver projectFiles.ts) de un
+    // pedido ANTERIOR todavía estaba esperando su decisión — VS Code
+    // encola los diálogos nativos, así que el usuario seguía viendo la
+    // propuesta VIEJA (a veces de varios mensajes atrás) sin importar
+    // cuántos pedidos nuevos hiciera después. Se vuelve a habilitar
+    // recién con "ready", que el extension host manda cuando TODO el
+    // flujo del pedido (incluida esa vista previa, si la hubo) terminó.
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
     vscode.setState({ lastQuestion: text });
     vscode.postMessage({ type: "ask", text: text });
   }
@@ -66,6 +77,10 @@
     } else if (message.type === "error") {
       removePending();
       appendMessage(message.message, "msg-error");
+    } else if (message.type === "ready") {
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
     }
   });
 })();

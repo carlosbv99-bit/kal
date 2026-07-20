@@ -14,10 +14,20 @@
  */
 import { EditorSnapshot } from "./editorContextFormat";
 
+export interface ProjectFile {
+  path: string;
+  content: string;
+  // Ausente/"utf-8" = texto plano (propose_project_files). "base64" =
+  // binario (import_resource, Artifact Service — ver
+  // tool_integration/adapters/vscode_files.py::ImportResourceTool),
+  // `content` es el binario codificado en base64.
+  encoding?: "utf-8" | "base64";
+}
+
 export interface ProjectFilesArtifact {
   modality: "project_files";
   request_id: string;
-  files: { path: string; content: string }[];
+  files: ProjectFile[];
 }
 
 export interface ChatStep {

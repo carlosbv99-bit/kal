@@ -86,7 +86,18 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
   );
 
   if (choice === "Ver detalle") {
-    const combined = artifact.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n");
+    // Archivos binarios (encoding "base64", ver Artifact Service /
+    // import_resource): mostrar un placeholder, nunca el blob base64
+    // crudo — ilegible e inútil para revisar en una vista previa.
+    const combined = artifact.files
+      .map((f) => {
+        if (f.encoding === "base64") {
+          const approxBytes = Math.floor((f.content.length * 3) / 4);
+          return `// ${f.path}\n[archivo binario, ~${Math.ceil(approxBytes / 1024)} KB — no se muestra el contenido]`;
+        }
+        return `// ${f.path}\n${f.content}`;
+      })
+      .join("\n\n");
     const doc = await vscode.workspace.openTextDocument({ content: combined });
     await vscode.window.showTextDocument(doc, { preview: true });
     choice = await vscode.window.showInformationMessage(
@@ -142,7 +153,8 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
     const targetUri = vscode.Uri.joinPath(root, file.path);
     const parentDir = vscode.Uri.joinPath(targetUri, "..");
     await vscode.workspace.fs.createDirectory(parentDir);
-    await vscode.workspace.fs.writeFile(targetUri, Buffer.from(file.content, "utf-8"));
+    const bytes = Buffer.from(file.content, file.encoding === "base64" ? "base64" : "utf-8");
+    await vscode.workspace.fs.writeFile(targetUri, bytes);
     written.push(file.path);
   }
 
