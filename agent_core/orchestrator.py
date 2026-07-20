@@ -204,6 +204,7 @@ from agent_core.routers import (  # noqa: E402
     memory,
     permissions,
     self_modification,
+    skill_creator,
     tasks,
     tools,
     vscode_integration,
@@ -212,6 +213,7 @@ from agent_core.routers import (  # noqa: E402
 for _router_module in (
     health, llm_settings, chat, tasks, tools, memory,
     self_modification, permissions, diagnostics, vscode_integration, audit,
+    skill_creator,
 ):
     app.include_router(_router_module.router)
 

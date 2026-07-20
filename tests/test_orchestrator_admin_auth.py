@@ -63,6 +63,8 @@ _GATED_REQUESTS = [
     ("POST", "/filesystem-access/no-existe/deny", {}),
     ("POST", "/network-access/no-existe/approve", {"level": "once"}),
     ("POST", "/network-access/no-existe/deny", {}),
+    ("POST", "/skill-proposals/no-existe/approve", {"approved_by": "alguien"}),
+    ("POST", "/skill-proposals/no-existe/reject", {}),
 ]
 
 

@@ -388,6 +388,7 @@ def _register_default_static_tools() -> None:
     from tool_integration.adapters.image_composition import ImageCompositionTool
     from tool_integration.adapters.image_editing import ImageEditingTool
     from tool_integration.adapters.image_gen import ImageGenerationTool
+    from tool_integration.adapters.skill_creator_tool import ProposeSkillTool
     from tool_integration.adapters.speech_to_text import SpeechToTextTool
     from tool_integration.adapters.video_gen import VideoCompositionTool
     from tool_integration.adapters.vscode_files import ImportResourceTool, ProposeProjectFilesTool
@@ -417,6 +418,7 @@ def _register_default_static_tools() -> None:
     tool_registry.register_static_tool(ImageAnalysisTool())
     tool_registry.register_static_tool(ProposeProjectFilesTool())
     tool_registry.register_static_tool(ImportResourceTool())
+    tool_registry.register_static_tool(ProposeSkillTool())
     tool_registry.load_skills()
 
 

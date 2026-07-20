@@ -4938,3 +4938,83 @@ explícito, sin agregar la key si no hay ninguno seteado), 1 en
 background), 2 en `tests/test_sandbox_integration.py` (Docker real: la
 env var llega, y está ausente si no hay id seteado). Suite completa
 verificada sin regresiones.
+
+## Skill Creator: el agente propone Skills nuevas, un humano las aprueba (2026-07-20)
+
+Primer punto de una segunda ronda de sugerencias del usuario (análisis
+competitivo contra otros agentes locales tipo local-skills-agent) —
+priorizado explícitamente por el usuario por encima del resto.
+
+**Diseño**: `agent_core/skill_creator.py` (`SkillCreatorManager`),
+mismo espíritu que `self_modification.py` (proponer -> validar barato
+-> humano decide) pero para el caso que ese pipeline excluye a
+propósito: crear archivos que no existían, no modificar uno existente.
+
+- `propose()` NUNCA escribe bajo `skills/` — solo bajo
+  `data/proposed_skills/<id>/`, invisible para
+  `kernel/registry/skills.py::load_skills()` (que solo mira `skills/`).
+  Validación deliberadamente barata: nombre válido (snake_case, sin
+  colisión con una skill real ni con otra propuesta pendiente), nombre
+  de clase válido, permisos declarados existen de verdad
+  (`sdk.permissions.Permission`), y el código es sintácticamente válido
+  Python (`ast.parse`). A diferencia de `self_modification.py`, el
+  código NUNCA pasa por el denylist AST — una Skill legítima necesita
+  `os`/`subprocess`/etc. para hacer algo útil (mismo criterio ya
+  documentado en `kernel/registry/skills.py`: la barrera real es el
+  aislamiento Docker, no un filtro estático).
+- `approve()` copia la propuesta a `skills/<name>/` y la firma (Ed25519
+  propio, identidad separada en `data/keys/agent_generated_skills/` —
+  distinguible de `data/keys/kal_project`, usada para las skills
+  escritas por el propio proyecto) — pero `enabled` queda en `false`
+  siempre. Habilitarla de verdad es un SEGUNDO gate independiente
+  (`scripts/enable_skill.py`, sin tocar), no algo que aprobar la
+  propuesta haga solo.
+- `reject()` borra el staging sin dejar rastro en `skills/`.
+- Nueva Tool `propose_skill` (`tool_integration/adapters/skill_creator_tool.py`),
+  registrada como herramienta estática de primera parte (no
+  sandboxeada — no ejecuta el código propuesto, solo lo escribe a
+  disco para revisión, mismo criterio que `propose_project_files`).
+- Nuevo router `/skill-proposals/*`
+  (`agent_core/routers/skill_creator.py`): listar (resumen), ver detalle
+  completo (CÓDIGO incluido — un humano tiene que poder leerlo entero
+  antes de decidir), aprobar/rechazar (gateados con el token
+  administrativo, igual que self-modification).
+
+**Bug real, pre-existente, encontrado probando el flujo completo**:
+habilitar una skill YA FIRMADA (`set_skill_enabled()`, lo mismo que usa
+`scripts/enable_skill.py`) invalidaba su propia firma en el acto —
+`enabled` vive dentro de `skill.yaml`, y la firma cubre el archivo
+entero. Nunca se había disparado en la práctica porque las 6 skills
+existentes siempre se firmaron con `enabled` ya en su valor final; el
+diseño de dos gates independientes del Skill Creator (aprobar ≠
+habilitar) fue el primero en de verdad ejercer esa secuencia. Fix en
+`kernel/registry/skill_signing.py::_canonical_manifest()`: `enabled`
+se normaliza a un valor fijo antes de hashear skill.yaml — el resto del
+manifiesto (permissions/requirements/kernel_services/entry_point/etc.,
+que SÍ son decisión del autor) sigue cubierto por la firma tal cual.
+`verify_skill_signature()` ampliado para tratar un YAML corrupto como
+"tampered" (fail closed), ya que ahora sí parsea el archivo en vez de
+solo hashear bytes crudos.
+
+Como este cambio altera qué bytes se firman de verdad, invalidó las
+firmas de las 6 skills reales existentes — se re-firmaron con
+`scripts/sign_skill.py` (mismo `data/keys/kal_project`, mismo
+fingerprint de autor, confirmando que es la misma identidad, solo
+re-firmada bajo el algoritmo corregido).
+
+**Verificado en vivo, de punta a punta**: llamando a la Tool real
+`propose_skill` (sin pasar por el LLM) se generó una propuesta real en
+`data/proposed_skills/`, con su `skill.yaml` (`enabled: false`) y
+`tool.py` legibles; `reject()` la limpió sin dejar rastro. Por
+separado, un test de integración confirma que aprobar sin habilitar
+deja la skill en estado "disabled" para `load_skills()` real (ni
+una línea de su código se ejecuta), y que habilitarla aparte
+(`set_skill_enabled`) recién ahí la deja "loaded" con firma "verified".
+
+31 tests nuevos: `tests/test_skill_creator.py` (23, el manager +
+end-to-end con el loader real), `tests/test_orchestrator_skill_creator.py`
+(9, el router), 2 en `tests/test_skill_signing.py` (regresión del bug
+de `enabled` + que otros cambios en skill.yaml sigan detectándose), 2
+entradas nuevas en la lista de endpoints gateados de
+`tests/test_orchestrator_admin_auth.py`. Suite completa verificada sin
+regresiones.
