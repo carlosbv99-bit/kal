@@ -138,6 +138,101 @@ def test_editor_context_code_block_is_closed():
     assert bundle.session_context["content"].rstrip().endswith("```")
 
 
+def test_editor_context_without_text_mentions_only_the_path_no_empty_code_block():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): la vista de chat
+    de la barra lateral manda un contexto LIVIANO (solo ruta, sin
+    contenido — ver vscode-extension/src/editorContext.ts::
+    captureEditorSnapshot(includeContent=false)) automáticamente en
+    cada pedido, para que kal sepa en qué archivo/proyecto está
+    trabajando el usuario sin pagar el costo en tokens de mandar el
+    archivo completo en cada mensaje de un chat libre.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+    editor_context = EditorContextSignals(
+        relative_path="restaurante-web/menu.html", language_id="html", text="", is_selection=False,
+    )
+
+    bundle = service.build(session, editor_context)
+
+    content = bundle.session_context["content"]
+    assert "restaurante-web/menu.html" in content
+    assert "```" not in content
+
+
+def test_editor_context_includes_the_workspace_tree_when_present():
+    """
+    "Visible Tree" (2026-07-20, pedido explícito del usuario): kal debe
+    saber qué proyectos/carpetas ya existen ANTES de decidir dónde
+    crear un archivo nuevo — evita exactamente el bug real de crear
+    'menu.html' suelto en la raíz cuando 'restaurante-web/menu.html' ya
+    existía.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+    editor_context = EditorContextSignals(
+        relative_path="restaurante-web/menu.html", language_id="html", text="", is_selection=False,
+        workspace_tree=["restaurante-web/index.html", "restaurante-web/menu.html", "farmacia-web/index.html"],
+    )
+
+    bundle = service.build(session, editor_context)
+    content = bundle.session_context["content"]
+
+    assert "restaurante-web/index.html" in content
+    assert "farmacia-web/index.html" in content
+
+
+def test_editor_context_workspace_tree_is_capped_in_the_prompt():
+    """Un proyecto real puede tener miles de rutas — el prompt nunca
+    debe inflarse sin límite, sea cual sea el tamaño de lo que mande
+    la extensión."""
+    from agent_core.context_service import _MAX_WORKSPACE_TREE_PATHS_IN_PROMPT
+
+    service = ContextService()
+    session = _session_with_turns(0)
+    many_paths = [f"archivo{i}.txt" for i in range(_MAX_WORKSPACE_TREE_PATHS_IN_PROMPT + 50)]
+    editor_context = EditorContextSignals(
+        relative_path="a.txt", language_id="plaintext", text="", is_selection=False,
+        workspace_tree=many_paths,
+    )
+
+    bundle = service.build(session, editor_context)
+    content = bundle.session_context["content"]
+
+    assert f"archivo{_MAX_WORKSPACE_TREE_PATHS_IN_PROMPT - 1}.txt" in content
+    assert f"archivo{_MAX_WORKSPACE_TREE_PATHS_IN_PROMPT}.txt" not in content
+    assert "50 archivo(s) más" in content
+
+
+def test_editor_context_includes_open_editors_when_present():
+    service = ContextService()
+    session = _session_with_turns(0)
+    editor_context = EditorContextSignals(
+        relative_path="restaurante-web/menu.html", language_id="html", text="", is_selection=False,
+        open_editors=["restaurante-web/menu.html", "restaurante-web/estilos.css"],
+    )
+
+    bundle = service.build(session, editor_context)
+    content = bundle.session_context["content"]
+
+    assert "restaurante-web/estilos.css" in content
+
+
+def test_editor_context_without_tree_or_open_editors_does_not_mention_them():
+    service = ContextService()
+    session = _session_with_turns(0)
+    editor_context = EditorContextSignals(
+        relative_path="a.txt", language_id="plaintext", text="", is_selection=False,
+    )
+
+    bundle = service.build(session, editor_context)
+    content = bundle.session_context["content"]
+
+    assert "Árbol de archivos" not in content
+    assert "Pestañas actualmente abiertas" not in content
+
+
 def test_vscode_client_adds_the_code_only_instruction():
     """
     Distinción real entre facetas (2026-07-11): la interfaz web sigue
@@ -199,6 +294,61 @@ def test_vscode_client_instruction_tells_the_model_to_browse_before_importing_a_
 
     assert "import_resource" in bundle.session_context["content"]
     assert "action='images'" in bundle.session_context["content"]
+
+
+def test_vscode_client_instruction_never_claims_no_internet_access():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): un dominio
+    puntual rechazado (www.google.com) hizo que el modelo le dijera al
+    usuario "no tengo acceso a Internet ni a servicios externos" — una
+    generalización falsa (unsplash.com/pexels.com/pixabay.com sí
+    funcionan). La instrucción ahora nombra esos dominios explícitamente
+    y aclara que un rechazo puntual no es una incapacidad general.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+    content = bundle.session_context["content"]
+
+    assert "unsplash.com" in content
+    assert "no significa que no haya acceso" in content.lower()
+
+
+def test_vscode_client_instruction_clarifies_image_generation_is_mode_specific_not_a_general_incapacity():
+    """
+    BUG REAL ENCONTRADO EN USO: pedido de "generá vos mismo las
+    imágenes" respondió "no tengo la capacidad de generar imágenes" y
+    mandó al usuario a buscar herramientas externas — engañoso, kal SÍ
+    genera imágenes (SDXL-Turbo local), solo que esa herramienta no
+    está disponible en este modo de código. La instrucción ahora pide
+    aclarar que es una limitación de ESTE modo, no una incapacidad
+    general, y ofrecer browser+import_resource como alternativa real.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+    content = bundle.session_context["content"]
+
+    assert "SÍ genera imágenes" in content
+    assert "import_resource" in content
+
+
+def test_vscode_client_instruction_tells_the_model_to_use_read_workspace_file():
+    """
+    Pieza mínima de "Editor Context Provider" (2026-07-20): kal no debe
+    inventar o asumir el contenido de un archivo que no vio — tiene que
+    pedirlo con read_workspace_file y esperar la respuesta encadenada.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+    content = bundle.session_context["content"]
+
+    assert "read_workspace_file" in content
+    assert "nunca inventes o asumas qué contiene" in content
 
 
 def test_web_client_never_gets_the_vscode_instruction():
