@@ -1,11 +1,11 @@
 #!/usr/bin/env bpftrace
 /*
  * Fase E2 (diseño del esquema de eventos + integración con la
- * auditoría): misma observación que sandbox/ebpf/prototype_syscalls.bt
+ * auditoría): misma observación que kernel/lifecycle/ebpf/prototype_syscalls.bt
  * (validado en la Fase E1 — ver README.md, overhead indetectable,
  * cross-validación exitosa contra tests/test_sandbox_escape_resistance.py),
  * pero emitiendo una línea JSON por evento en vez de texto libre, para
- * que sandbox/ebpf/event_consumer.py la pueda parsear de forma
+ * que kernel/lifecycle/ebpf/event_consumer.py la pueda parsear de forma
  * confiable (no regex sobre texto humano).
  *
  * Se deja prototype_syscalls.bt intacto a propósito — es el artefacto
@@ -18,7 +18,7 @@
  * filename son nombres de proceso/binario, en la práctica nunca
  * contienen comillas; si esto cambiara, revisarlo en la Fase E7.
  *
- * Uso: sudo bpftrace sandbox/ebpf/syscall_events.bt [pid_opcional]
+ * Uso: sudo bpftrace kernel/lifecycle/ebpf/syscall_events.bt [pid_opcional]
  * (mismas reglas de filtrado y misma limitación de UID compartido con
  * el host que prototype_syscalls.bt — ver el docstring de ese archivo).
  *
@@ -28,7 +28,7 @@
  * `.venv/bin/python3 .venv/bin/uvicorn ...`, así que su `comm` real es
  * "python3", no "python" (confirmado con
  * `ps -eo pid,comm,cmd | grep uvicorn`). Las skills SANDBOXEADAS sí
- * aparecían porque sandbox/docker_runner.py invoca literalmente el
+ * aparecían porque kernel/lifecycle/docker_runner.py invoca literalmente el
  * binario "python" dentro del contenedor (sin el 3) — por eso el
  * hueco no se notó hasta evaluar con el proceso principal de verdad,
  * no solo con ejecuciones de skills. Fix: aceptar ambos nombres.

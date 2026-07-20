@@ -26,8 +26,8 @@ llm:
   #   OpenAI:
   #     base_url: "https://api.openai.com/v1"
   #     default_model: "gpt-4o-mini"
-  provider: "openai_compatible"
-  base_url: "https://api.groq.com/openai/v1"
+  provider: "ollama"
+  base_url: "http://localhost:11434"
   # qwen3-coder:30b (MoE: 30B totales pero activa pocos por token, por eso
   # no es más lento que un modelo denso más chico en CPU). Reemplazó a
   # qwen2.5-coder:14b tras comparación empírica en vivo (misma pregunta,
@@ -41,7 +41,7 @@ llm:
   # Sigue las instrucciones del SYSTEM_PROMPT sobre cuándo NO usar
   # herramientas notablemente mejor que qwen2.5-coder:14b, sin sacrificar
   # el uso correcto de herramientas cuando sí hacen falta.
-  default_model: "meta-llama/llama-4-scout-17b-16e-instruct"
+  default_model: "qwen2.5-coder:14b"
   timeout_seconds: 120
   max_agent_steps: 8                    # tope de iteraciones del loop antes de forzar una respuesta final
   # Descomponer el objetivo en subtareas antes de ejecutar (ver
@@ -142,6 +142,18 @@ multimodal:
     model_size: "tiny"                    # ~75MB; base/small/medium/large: más precisos, más pesados
     language: null                        # null = auto-detección de idioma
 
+  vision:
+    backend: local                       # solo local por ahora, vía Ollama
+    # NO reusa llm.base_url a propósito: ese campo cambia si activás un
+    # perfil de nube (Groq/OpenAI/etc.) para el "cerebro" del agente,
+    # pero el modelo de visión corre en el Ollama LOCAL siempre.
+    base_url: "http://localhost:11434"
+    # BUG REAL ENCONTRADO EN USO: llama3.2-vision (arquitectura "mllama")
+    # dejó de cargar en Ollama >=0.30.0 — regresión conocida y sin
+    # arreglo todavía (ver github.com/ollama/ollama/issues/16547).
+    # llava usa una arquitectura de visión distinta (CLIP), sí soportada.
+    model: "llava:13b"                    # necesita `ollama pull llava:13b` (no se auto-descarga)
+
   image_editing:
     artifact_dir: "data/artifacts/images_edited"
     # Inpainting real con IA ("inpaint"): modelo de difusión COMPLETO
@@ -168,7 +180,7 @@ multimodal:
 # imagen/audio/STT de arriba se quedan cargados en RAM para siempre
 # tras el primer uso, compitiendo con Ollama por la misma RAM del
 # sistema (Ollama quedaba con "Connection refused" justo después de
-# generar una imagen). Ver kernel_bus/resource_broker.py.
+# generar una imagen). Ver kernel/broker/resource_broker.py.
 resource_broker:
   # Libera un pipeline si nadie lo usó en este tiempo.
   idle_timeout_seconds: 300
@@ -186,10 +198,10 @@ sandbox:
 
 tool_integration:
   allow_dynamic_tool_creation: true
-  # Nombres de permiso (ver tool_integration/permissions.py::Permission) que
+  # Nombres de permiso (ver sdk/permissions.py::Permission) que
   # disparan aprobación humana obligatoria antes de activar una herramienta.
   # De estos, solo "network" y "filesystem_write" tienen enforcement real
-  # hoy (ver sandbox/executor.py); el resto siempre se rechaza en tiempo de
+  # hoy (ver kernel/lifecycle/executor.py); el resto siempre se rechaza en tiempo de
   # ejecución por no tener motor todavía (deny-by-default honesto), pero
   # igual quedan listados aquí para que la aprobación humana sea consistente
   # el día que un motor real los soporte.
@@ -204,7 +216,7 @@ tool_integration:
     - gpu
     - core_module_modification   # agent_core/ y error_handling/ SIEMPRE
 
-# Cascada de permisos de varios niveles (ver tool_integration/permissions.py::
+# Cascada de permisos de varios niveles (ver kernel/permissions/permission_cascade.py::
 # PermissionCascade), inspirada en la cascada de 5 niveles de OpenClaw
 # (global -> proveedor -> agente -> sesión -> sandbox) pero adaptada a lo
 # que ya existe en kal: global (acá) -> nivel de confianza (acá) -> sesión
@@ -221,10 +233,10 @@ permissions:
   globally_denied: []
   # Techo por CÓMO se registró la herramienta (nunca por lo que la propia
   # herramienta/skill se autodeclare) — ver
-  # tool_integration/permissions.py::trust_tier_for().
+  # kernel/permissions/permission_cascade.py::trust_tier_for().
   trust_tier_caps:
     # Adaptadores de primera parte (image_gen.py, browser.py, etc.),
-    # instanciados directo en tool_integration/registry.py — el mismo
+    # instanciados directo en kernel/registry/registry.py — el mismo
     # nivel de confianza que ya tenían antes de que existiera esta cascada.
     system:
       - filesystem_read
@@ -237,14 +249,14 @@ permissions:
       - clipboard
       - docker
     # Herramientas dinámicas que el propio agente propone
-    # (tool_integration/registry.py::propose_dynamic_tool). Ya alineado con
+    # (kernel/registry/registry.py::propose_dynamic_tool). Ya alineado con
     # require_human_approval_for de arriba: no bloquea nada que hoy no pase
     # igual por aprobación humana antes de activarse.
     agent:
       - filesystem_read
       - filesystem_write
       - network
-    # Skills de terceros (tool_integration/skills.py, aisladas en Docker
+    # Skills de terceros (kernel/registry/skills.py, aisladas en Docker
     # vía SandboxedSkillTool) — deliberadamente el techo más bajo. Una
     # skill que declara requires_network=True en su propio manifest NO
     # alcanza red de verdad hasta que esta lista lo permita explícitamente
@@ -254,7 +266,7 @@ permissions:
       - filesystem_read
 
 # Permission Manager de filesystem (ver
-# tool_integration/filesystem_access_manager.py) — ORTOGONAL a
+# kernel/permissions/filesystem_access_manager.py) — ORTOGONAL a
 # `permissions:` de arriba: aquella decide si una herramienta puede
 # pedir tocar el filesystem en absoluto; esto decide si UNA ACCIÓN
 # CONCRETA (create/read/modify/delete/rename) en UN ALCANCE CONCRETO
@@ -282,7 +294,7 @@ self_modification:
   requires_human_review:
     - "agent_core/*"
     - "error_handling/*"
-    - "sandbox/*"
+    - "kernel/*"
   auto_rollback_on_regression: true
 
 audit:
@@ -300,6 +312,32 @@ browser:
   # agregues acá los dominios en los que confiás (p.ej. "wikipedia.org").
   # Coincide con el mismo principio que sandbox.network_mode: "none" — nada
   # de red abierta por default en ningún rincón del proyecto.
-  allowed_domains: []
+  # Habilitados a pedido del usuario (2026-07-15): fuentes de assets con
+  # licencias permisivas (CC0/MIT) para descargar imágenes, sonidos y
+  # plantillas web sin necesitar login.
+  allowed_domains:
+    - "unsplash.com"      # imágenes, CC0
+    - "pexels.com"        # imágenes, licencia Pexels (uso libre)
+    - "pixabay.com"       # imágenes y sonidos, licencia Pixabay (uso libre)
+    - "freesound.org"     # sonidos, Creative Commons (algunos requieren atribución)
+    - "html5up.net"       # plantillas web HTML5, CC BY 3.0
+    - "startbootstrap.com" # plantillas web Bootstrap, MIT
   artifact_dir: "data/artifacts/browser"
   user_agent: "kal-browser-agent/1.0"
+
+# Artifact Service (tool_integration/download_manager.py) — descarga
+# real de recursos (hoy solo imágenes, ver
+# tool_integration/adapters/vscode_files.py::ImportResourceTool).
+# SEPARADO de browser.allowed_domains a propósito (semántica distinta:
+# sin JS/cookies, con tope de tamaño real) aunque comparta los mismos
+# dominios reales ya confiados para este propósito.
+downloads:
+  allow_http: false  # solo https por default
+  max_size_mb: 10
+  allowed_domains:
+    - "unsplash.com"
+    - "pexels.com"
+    - "pixabay.com"
+    - "freesound.org"
+    - "html5up.net"
+    - "startbootstrap.com"

@@ -17,20 +17,21 @@
  * existentes para cruzar validación.
  *
  * Uso recomendado (dos terminales, o ver measure_overhead.sh para uno solo):
- *   Terminal A: sudo bpftrace sandbox/ebpf/prototype_syscalls.bt
+ *   Terminal A: sudo bpftrace kernel/lifecycle/ebpf/prototype_syscalls.bt
  *   Terminal B: pytest tests/test_sandbox_escape_resistance.py -v
  *
  * Uso con un contenedor puntual ya conocido (más preciso, sin ruido de
  * otros procesos "python" del host — ver limitación abajo):
- *   sudo bpftrace sandbox/ebpf/prototype_syscalls.bt <PID_del_contenedor>
+ *   sudo bpftrace kernel/lifecycle/ebpf/prototype_syscalls.bt <PID_del_contenedor>
  *   (obtener el PID con: docker inspect -f '{{.State.Pid}}' <container_id>)
  *
  * LIMITE CONOCIDO Y ACEPTADO de este prototipo (documentado a
  * propósito, mismo criterio que code_analysis/denylist.py): sin un PID
- * explícito, filtra por `comm == "python"` — en ESTA máquina el UID
- * fijo del sandbox (1000, ver sandbox/docker_runner.py::SANDBOX_UID)
- * coincide con el UID real del usuario del host, así que un filtro por
- * UID no serviría para distinguir contenedor de host. Cualquier otro
+ * explícito, filtra por `comm == "python"` — el contenedor del sandbox
+ * corre con el MISMO UID/GID que el proceso que lo lanza (ver
+ * kernel/lifecycle/docker_runner.py::run(), user=f"{os.getuid()}:
+ * {os.getgid()}"), así que un filtro por UID nunca serviría para
+ * distinguir contenedor de host. Cualquier otro
  * proceso "python" corriendo en el host en simultáneo (otro script,
  * este mismo Claude Code, etc.) también aparecerá acá — para esta
  * fase de validación de concepto, correlacionar a mano por PID/timestamp
