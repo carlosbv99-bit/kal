@@ -19,7 +19,7 @@ from agent_core import orchestrator as orchestrator_module
 from agent_core.llm.agent_loop import AgentRunResult, AgentStep
 from agent_core.llm.planner import Plan, PlanRunResult, PlanStep, PlanStepResult
 from agent_core.orchestrator import app
-from tool_integration.base_tool import Artifact
+from sdk.artifacts import Artifact
 
 client = TestClient(app)
 
