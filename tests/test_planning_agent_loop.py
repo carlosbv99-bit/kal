@@ -13,7 +13,7 @@ from agent_core.llm.agent_loop import AgentLoop, AgentTool
 from agent_core.llm.ollama_client import OllamaError
 from agent_core.llm.planner import Planner, PlanningAgentLoop
 from agent_core.llm.provider import ChatResponse, ToolCall
-from tool_integration.permissions import Permission
+from sdk.permissions import Permission
 
 
 class FakeOllamaClient:

@@ -80,9 +80,17 @@ def test_post_success_rebuilds_and_reinjects_the_client_everywhere(monkeypatch):
 
 def test_list_local_ollama_models_endpoint_reflects_module_state(monkeypatch):
     monkeypatch.setattr(orchestrator, "list_local_ollama_models", lambda: ["qwen3-coder:30b", "llava:7b"])
+    monkeypatch.setattr(
+        orchestrator, "get_ollama_model_capabilities",
+        lambda name: {"qwen3-coder:30b": ["completion", "tools"], "llava:7b": ["completion", "vision"]}[name],
+    )
     response = client.get("/settings/llm/ollama/models")
     assert response.status_code == 200
-    assert response.json() == {"models": ["qwen3-coder:30b", "llava:7b"], "ollama_available": True}
+    assert response.json() == {
+        "models": ["qwen3-coder:30b", "llava:7b"],
+        "capabilities": {"qwen3-coder:30b": ["completion", "tools"], "llava:7b": ["completion", "vision"]},
+        "ollama_available": True,
+    }
 
 
 def test_list_local_ollama_models_endpoint_degrades_gracefully_when_ollama_is_down(monkeypatch):

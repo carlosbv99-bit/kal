@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from agent_core.context_service import ContextService, EditorContextSignals
 from agent_core.sessions import SessionManager
-from tool_integration.base_tool import Artifact
+from sdk.artifacts import Artifact
 
 
 def _session_with_turns(n: int):
@@ -66,6 +66,37 @@ def test_session_context_describes_the_active_artifact():
     assert bundle.session_context["role"] == "system"
     assert "image" in bundle.session_context["content"]
     assert "data/artifacts/images/logo.png" in bundle.session_context["content"]
+
+
+def test_session_context_tells_the_model_to_call_analyze_image_for_an_active_image():
+    """
+    BUG REAL ENCONTRADO EN USO: pedido "describe esta imagen" sobre una
+    imagen recién generada (ya anunciada como artefacto activo) devolvió
+    "no puedo ver o analizar imágenes en este entorno" — el modelo tenía
+    disponibles el path del artefacto activo y la herramienta
+    analyze_image, pero nunca conectó una cosa con la otra.
+    """
+    service = ContextService()
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+    manager.update_active_artifact(session, Artifact(modality="image", uri="data/artifacts/images/leon.png"))
+
+    bundle = service.build(session)
+
+    assert "analyze_image" in bundle.session_context["content"]
+    assert "data/artifacts/images/leon.png" in bundle.session_context["content"]
+    assert "no podés ver imágenes" in bundle.session_context["content"]
+
+
+def test_session_context_does_not_mention_analyze_image_for_non_image_artifacts():
+    service = ContextService()
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+    manager.update_active_artifact(session, Artifact(modality="audio", uri="data/artifacts/audio/voz.wav"))
+
+    bundle = service.build(session)
+
+    assert "analyze_image" not in bundle.session_context["content"]
 
 
 def test_session_context_describes_editor_context():
@@ -153,6 +184,21 @@ def test_vscode_client_instruction_tells_the_model_to_use_a_subfolder_per_distin
     bundle = service.build(session, client="vscode")
 
     assert "subcarpeta" in bundle.session_context["content"]
+
+
+def test_vscode_client_instruction_tells_the_model_to_browse_before_importing_a_real_photo():
+    """
+    Artifact Service (import_resource): el modelo no debe inventar una
+    URL de Unsplash/Pexels a ciegas — tiene que confirmarla navegando
+    primero (browser, action='images').
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+
+    assert "import_resource" in bundle.session_context["content"]
+    assert "action='images'" in bundle.session_context["content"]
 
 
 def test_web_client_never_gets_the_vscode_instruction():
