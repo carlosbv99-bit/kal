@@ -4779,3 +4779,78 @@ incluidos los 3 tests end-to-end del Kernel Service Bus actualizados
 con `ALLOWED_ACTIONS`), `test_kernel_bus.py` + `test_kernel_bus_socket_server.py`
 + `test_orchestrator_artifact_url.py` (23) — todos verdes antes de
 correr la suite completa.
+
+## orchestrator.py deja de ser un god-file: 44 endpoints repartidos en routers por dominio (2026-07-20)
+
+Pedido explícito del usuario tras una revisión de arquitectura propia
+(7 observaciones, ver más abajo el resto de la lista pendiente):
+`agent_core/orchestrator.py` había crecido a 879 líneas con los 44
+endpoints HTTP del proyecto declarados directamente con
+`@app.get`/`@app.post`, importando prácticamente todos los subsistemas
+(memoria, self-mod, sesiones, diagnóstico, permisos de FS y red,
+registry, VS Code, audit...). Funcionaba, pero cualquier cambio tocaba
+ese archivo, y el acoplamiento por import dificultaba razonar sobre qué
+depende de qué.
+
+**Refactor mecánico, sin cambios de comportamiento**: 11 `APIRouter`
+nuevos bajo `agent_core/routers/` (health, llm_settings, chat, tasks,
+tools, memory, self_modification, permissions, diagnostics,
+vscode_integration, audit), cada uno con sus propios modelos Pydantic y
+endpoints, importando desde `agent_core.orchestrator` solo lo que
+necesita compartir: el singleton `orchestrator`, `require_admin_token`,
+`_artifact_url`, `_reinject_llm_client`. `agent_core/orchestrator.py`
+queda en 260 líneas — construye el singleton `Orchestrator`, arma la
+app de FastAPI, el token administrativo, sirve el frontend estático, y
+hace `app.include_router(...)` por cada dominio.
+
+**Orden de imports deliberado para evitar un import circular real**:
+los routers hacen `from agent_core.orchestrator import orchestrator,
+require_admin_token, ...`, y `agent_core/orchestrator.py` a su vez hace
+`from agent_core.routers import (chat, tasks, ...)` para incluirlos —
+un ciclo real entre los dos módulos. Se resuelve con ORDEN: todo lo que
+los routers necesitan importar (`orchestrator`, `require_admin_token`,
+`_artifact_url`, `_reinject_llm_client`) se define PRIMERO en
+`orchestrator.py`, y el `from agent_core.routers import ...` va
+DESPUÉS — cuando Python ejecuta ese import y entra a cada archivo de
+router, el módulo `agent_core.orchestrator` ya está en `sys.modules`
+(parcialmente ejecutado, pero con esos nombres ya definidos), así que
+la resolución funciona sin re-ejecutar nada.
+
+**Bug real encontrado verificando el refactor (no de lógica, de
+versión de dependencia)**: contar `len(app.routes)` antes/después de
+cada `app.include_router()` para confirmar que cada router aportaba
+sus endpoints mostraba solo +1 por router en vez de +3, +6, etc. — casi
+se interpreta como un bug del refactor. Investigado con una
+reproducción mínima aislada (`FastAPI()` + `APIRouter()` con 3 rutas
+sueltas, sin nada más del proyecto): FastAPI 0.139 cambió su
+representación interna de `app.routes` — `include_router()` ahora
+agrega un único objeto `_IncludedRouter` envolviendo las rutas
+incluidas, en vez de aplanarlas como antes. Nada roto: confirmado
+haciendo pedidos HTTP reales vía `TestClient` contra cada endpoint
+migrado (todos 200), no contando la estructura interna de `app.routes`
+(que cambió de forma en esta versión de FastAPI y ya no es un proxy
+confiable de "cuántos endpoints hay").
+
+**Bug real de test-double, no de código de producción**: 3 archivos de
+test (`test_orchestrator_admin_auth.py`, `test_orchestrator_llm_settings.py`,
+`test_orchestrator_vscode_integration.py`) mockeaban funciones
+(`update_llm_settings`, `pull_ollama_model`, `list_local_ollama_models`,
+`activate_cloud_profile`, `get_llm_settings`, `list_model_sources`,
+`get_ollama_model_capabilities`, `get_vscode_status`,
+`install_extension`) con `monkeypatch.setattr(orchestrator, "nombre",
+...)` — apuntando al módulo `agent_core.orchestrator`, que es donde
+esas funciones se importaban ANTES del refactor. Al mover los
+endpoints que las llaman a sus routers nuevos (que hacen su PROPIO
+`from agent_core.llm_settings import ...`/`from
+agent_core.vscode_integration import ...`), el mock dejó de tener
+efecto — cada nombre se resuelve en el namespace del módulo que lo
+importó, no en el del módulo que originalmente lo reexportaba. Corregido
+retargeteando esos `monkeypatch.setattr(...)` a
+`agent_core.routers.llm_settings`/`agent_core.routers.vscode_integration`.
+`build_llm_client` es la excepción: se queda apuntando a
+`orchestrator` porque esa función NUNCA se movió (la sigue llamando
+`_reinject_llm_client()`, que tampoco se movió).
+
+Verificado: 34 tests de los 6 archivos `test_orchestrator_*.py` +
+`test_llm_client_factory.py` en verde, más la suite completa (790
+passed, 0 regresiones, 19:24).

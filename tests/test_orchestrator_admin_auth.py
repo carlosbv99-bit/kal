@@ -40,8 +40,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from agent_core import orchestrator
 from agent_core.orchestrator import _ADMIN_TOKEN, app
+from agent_core.routers import llm_settings, vscode_integration
 
 client = TestClient(app)
 
@@ -81,11 +81,11 @@ def test_gated_endpoints_reject_wrong_token():
 def test_gated_endpoints_accept_correct_token_and_reach_real_logic(monkeypatch):
     # Sin esto, /integrations/vscode/install correría de verdad (compilaría
     # y trataría de instalar la extensión) solo para confirmar el gate.
-    monkeypatch.setattr(orchestrator, "install_extension", lambda: "ok (mockeado)")
+    monkeypatch.setattr(vscode_integration, "install_extension", lambda: "ok (mockeado)")
     # Sin esto, /settings/llm escribiría de verdad en config.yaml/.env
     # reales del proyecto solo para confirmar el gate.
-    monkeypatch.setattr(orchestrator, "update_llm_settings", lambda **kwargs: None)
-    monkeypatch.setattr(orchestrator, "pull_ollama_model", lambda model: None)
+    monkeypatch.setattr(llm_settings, "update_llm_settings", lambda **kwargs: None)
+    monkeypatch.setattr(llm_settings, "pull_ollama_model", lambda model: None)
 
     headers = {"X-Kal-Admin-Token": _ADMIN_TOKEN}
     for method, path, body in _GATED_REQUESTS:
