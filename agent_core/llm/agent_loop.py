@@ -28,7 +28,7 @@ peligroso se le permite ser.
 Catálogo de herramientas (arquitectura de plataforma): cuando no se
 inyecta `tools=` explícito (el override que usan los tests para
 inyectar dobles, que queda fijo tal cual se pasó), el catálogo se
-recalcula en CADA run() combinando tool_integration.registry
+recalcula en CADA run() combinando kernel.registry.registry
 (imagen/audio/video hoy; browser/skills/herramientas dinámicas del
 agente en fases futuras, sin tocar este archivo) con tres `Tool` de
 instancia atados a este loop en particular (run_code/remember/recall,
@@ -38,7 +38,6 @@ conversación debe quedar disponible en el siguiente turno.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
@@ -50,11 +49,12 @@ from agent_core.memory.manager import MemoryManager
 from audit.audit_log import AuditEvent, audit_log
 from task_execution.executor import TaskExecutor
 from tool_integration.adapters.core_tools import CodeExecutionTool, MemoryRecallTool, MemoryRememberTool
-from tool_integration.base_tool import Artifact, Tool
-from tool_integration.permission_cascade import permission_cascade, trust_tier_for
-from tool_integration.permissions import Permission
-from tool_integration.registry import ToolRegistry
-from tool_integration.registry import tool_registry as default_tool_registry
+from sdk.skill import Tool
+from sdk.artifacts import Artifact
+from kernel.permissions.permission_cascade import permission_cascade, trust_tier_for
+from sdk.permissions import Permission
+from kernel.registry.registry import ToolRegistry
+from kernel.registry.registry import tool_registry as default_tool_registry
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -73,7 +73,7 @@ class AgentTool:
     # firma de handler (sigue devolviendo str, no rompe los AgentTool de
     # test que ya inyectan handlers propios).
     last_artifact: Artifact | None = None
-    # Para la cascada de permisos (tool_integration/permissions.py::
+    # Para la cascada de permisos (sdk/permissions.py::
     # PermissionCascade) — poblados por _agent_tool_from_tool() a partir
     # del ToolManifest real. Los AgentTool de test que se construyen a
     # mano (tools=[AgentTool(...)] inyectado) quedan con los defaults de
@@ -127,10 +127,26 @@ Reglas:
 - Sé directo y conciso en la respuesta final.
 - Generá EXACTAMENTE lo que se pidió, ni más ni menos: si piden "una imagen de X", generá UNA
   sola, no varias variantes. No encadenes herramientas extra (agregar texto/título, componer o
-  combinar imágenes) a menos que el pedido lo mencione explícitamente. Bug real encontrado en uso:
-  pedido "generame un sombrero" terminó generando CUATRO imágenes de sombreros, agregándole título
-  a dos, y combinando dos en una composición — nada de eso se pidió, y cada llamada de más
-  desperdicia tiempo y recursos reales (cada generación de imagen tarda minutos en esta máquina).
+  combinar imágenes, o analizarla con analyze_image) a menos que el pedido lo mencione
+  explícitamente. Bug real encontrado en uso: pedido "generame un sombrero" terminó generando
+  CUATRO imágenes de sombreros, agregándole título a dos, y combinando dos en una composición —
+  nada de eso se pidió, y cada llamada de más desperdicia tiempo y recursos reales (cada
+  generación de imagen tarda minutos en esta máquina).
+- Si el pedido especifica algo verificable a simple vista (una CANTIDAD exacta de algo, "solo
+  una/un X"), podés llamar UNA vez a analyze_image sobre tu propio resultado recién generado para
+  confirmarlo, y si no coincide, regenerar COMO MUCHO una vez más — nunca más de eso (el sistema
+  lo bloquea estructuralmente de todos modos, no lo intentes). Los modelos de generación de
+  imágenes (SDXL-Turbo local, muy rápido) NO respetan de forma confiable cantidades exactas de
+  objetos — es una limitación real del generador, no algo que un tercer o cuarto intento vaya a
+  garantizar arreglar. Si tras ese único reintento el resultado TODAVÍA no coincide exactamente,
+  entregalo igual y decilo honestamente en tu respuesta final ("el modelo de imágenes generó un
+  grupo en vez de uno solo, es una limitación conocida") — nunca sigas intentando, y nunca afirmes
+  que coincide si no coincide. Para cualquier otro caso (el pedido no especifica algo verificable
+  así), NO llames a analyze_image sobre tu propia generación — encadenar una revisión innecesaria
+  desperdicia tiempo real sin ningún beneficio. Bug real encontrado en uso: pedido "crea una
+  naranja (solo una)" generó bien, pero el autochequeo sin límite llevó a regenerar una y otra vez
+  hasta agotar todos los pasos disponibles SIN darle ninguna respuesta al usuario, pese a haber
+  generado tres imágenes reales en el camino.
 - run_code NUNCA puede crear archivos que el usuario se lleve (una página web, una app, un
   proyecto con varios archivos): `import os` y `open()` están prohibidos a propósito en ese
   sandbox, cualquier intento falla con un error de validación ANTES de ejecutar nada. Si el pedido
@@ -144,7 +160,12 @@ Reglas:
 
 Ejemplos de cuándo NO llamar a ninguna herramienta (bugs reales encontrados en uso — el modelo
 llamó herramientas irrelevantes en casos exactamente como estos):
-- "hola" / "¿quién sos?" -> responder directo. NO es necesario generar audio ni ninguna otra cosa.
+- "hola" / "¿quién sos?" / "quien eres" -> responder directo, sin llamar a NINGUNA herramienta (ni
+  audio, ni system_info, ni ninguna otra). Bug real encontrado en uso: el modelo llamó a la skill
+  system_info (que levanta un contenedor Docker efímero) antes de responder "¿quién sos?", mezclando
+  SO/Python/disco libre en su autopresentación — la pregunta era puramente conversacional, no pedía
+  información del sistema. Es la misma familia de error que generar audio de más: una pregunta
+  conversacional no autoriza llamar CUALQUIER herramienta, no solo audio.
 - "¿qué hace este código? explicame" + código ya pegado en el mensaje -> leer el código dado y
   explicarlo con texto. NO hace falta ejecutar el código, ni buscar nada en internet, ni pedir
   información del sistema (system_info) — el código ya está completo en el mensaje, no falta info.
@@ -247,7 +268,7 @@ _MULTIMEDIA_TOOL_NAMES = frozenset({
 # ocurre del lado de la extensión tras la aprobación del usuario. El
 # cliente web no tiene ningún canal para aplicar esa propuesta, así que
 # ofrecérsela solo generaría una respuesta que nadie puede usar.
-_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files"})
+_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files", "import_resource"})
 
 
 class AgentLoop:
@@ -351,7 +372,7 @@ class AgentLoop:
         activo) son opcionales — sin ellos, el comportamiento es
         exactamente el de antes (conversación nueva de cero).
         `denied_permissions`: override de la cascada de permisos para
-        ESTA sesión (ver tool_integration/permissions.py::PermissionCascade
+        ESTA sesión (ver sdk/permissions.py::PermissionCascade
         y agent_core/sessions.py::Session.denied_permissions) — vacío por
         defecto, no restringe nada más de lo que ya restringen el techo
         global y el nivel de confianza de cada herramienta.
@@ -396,6 +417,24 @@ class AgentLoop:
         tool_schemas = [t.to_ollama_schema() for t in tools.values()]
         steps: list[AgentStep] = []
         tool_call_counts: dict[str, int] = {}
+        # BUG REAL ENCONTRADO EN USO: "crea una naranja (solo una)" generó
+        # bien la primera vez, pero analyze_image sobre esa MISMA imagen
+        # detectó que en realidad mostraba un grupo (SDXL-turbo, a solo 2
+        # pasos, no respeta de forma confiable cantidades exactas de
+        # objetos — una limitación real del modelo de imágenes, no del
+        # razonamiento) y el modelo intentó corregirlo regenerando una y
+        # otra vez, sin límite, hasta agotar max_steps sin responder
+        # nunca. `artifact_paths_this_turn` (uri -> nombre de la
+        # herramienta que lo generó) permite detectar cuándo
+        # analyze_image se llama sobre un artefacto generado EN ESTE
+        # MISMO turno (autochequeo) — `self_checked_tools` marca esa
+        # herramienta de origen para aplicarle un tope MÁS ESTRICTO (como
+        # mucho 2 generaciones totales: la original + un solo reintento)
+        # en vez del `max_tool_repeats` general. Estructural, no depende
+        # de que el modelo se autolimite solo — mismo criterio que el
+        # resto de este mecanismo.
+        artifact_paths_this_turn: dict[str, str] = {}
+        self_checked_tools: set[str] = set()
 
         for _ in range(max_steps):
             try:
@@ -426,19 +465,27 @@ class AgentLoop:
                 if tc.id is None:
                     tc.id = f"call_{uuid4().hex[:24]}"
 
-            # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
-            # ESTRICTO, a diferencia de Ollama que es tolerante) exige que
-            # tool_calls[].function.arguments sea un STRING con JSON adentro,
-            # nunca el objeto ya parseado — sin este dumps, Groq rechazaba
-            # CUALQUIER turno posterior a una llamada a herramienta con 400
-            # ("arguments: value must be a string"), rompiendo toda tarea de
-            # más de un paso contra un proveedor en la nube.
+            # `arguments` queda como el objeto ya parseado (dict) — formato
+            # CANÓNICO interno, el mismo que espera el /api/chat nativo de
+            # Ollama. BUG REAL ENCONTRADO EN USO (2026-07-19): esto antes
+            # serializaba `arguments` a un string JSON acá mismo (para
+            # satisfacer a Groq, ver más abajo) — pero Ollama nativo rechaza
+            # ESE formato con 400 ("Value looks like object, but can't find
+            # closing '}' symbol") en cualquier turno posterior a una llamada
+            # a herramienta, rompiendo TODA conversación de más de un paso
+            # contra Ollama (confirmado en vivo, incluso con "hola" simple:
+            # un solo tool call ya alcanza para el segundo turno). La
+            # necesidad real de un string (Groq/OpenAI-strict) es específica
+            # de ESE proveedor — se serializa dentro de
+            # OpenAICompatibleClient.chat(), no acá (el núcleo del loop no
+            # debe conocer el wire format de un proveedor concreto, ver
+            # agent_core/llm/provider.py).
             messages.append(
                 {
                     "role": "assistant",
                     "content": response.content,
                     "tool_calls": [
-                        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
                         for tc in effective_tool_calls
                     ],
                 }
@@ -447,20 +494,40 @@ class AgentLoop:
             for tool_call in effective_tool_calls:
                 tool_call_counts[tool_call.name] = tool_call_counts.get(tool_call.name, 0) + 1
                 artifact = None
-                if tool_call_counts[tool_call.name] > max_tool_repeats:
+                # Tope más estricto (2: la original + un solo reintento)
+                # si esta herramienta ya se autochequeó con analyze_image
+                # en este turno — nunca más permisivo que max_tool_repeats.
+                effective_limit = min(2, max_tool_repeats) if tool_call.name in self_checked_tools else max_tool_repeats
+                if tool_call_counts[tool_call.name] > effective_limit:
                     # Rechazado ANTES de ejecutar — cada llamada real a una
                     # herramienta de generación cuesta minutos de cómputo acá,
                     # no tiene sentido gastarlos en una repetición que ya
                     # sabemos que vamos a cortar.
-                    observation = (
-                        f"ERROR: ya llamaste a '{tool_call.name}' {max_tool_repeats} veces en este turno — "
-                        "no la llames de nuevo. Da tu respuesta final ahora con lo que ya generaste/obtuviste."
-                    )
-                    logger.warning(f"Tope de repeticiones excedido para '{tool_call.name}' (límite={max_tool_repeats}), rechazado sin ejecutar")
+                    if tool_call.name in self_checked_tools:
+                        observation = (
+                            f"ERROR: ya generaste con '{tool_call.name}' {effective_limit} veces en este turno "
+                            "(incluido un reintento después de revisarlo con analyze_image) — no lo intentes de "
+                            "nuevo. Da tu respuesta final AHORA con la última versión que generaste. Si todavía "
+                            "no coincide exactamente con lo pedido (p.ej. una cantidad exacta de algo), decilo "
+                            "honestamente en tu respuesta — los modelos de generación de imágenes no siempre "
+                            "respetan cantidades exactas, reintentar más no lo garantiza."
+                        )
+                    else:
+                        observation = (
+                            f"ERROR: ya llamaste a '{tool_call.name}' {effective_limit} veces en este turno — "
+                            "no la llames de nuevo. Da tu respuesta final ahora con lo que ya generaste/obtuviste."
+                        )
+                    logger.warning(f"Tope de repeticiones excedido para '{tool_call.name}' (límite={effective_limit}), rechazado sin ejecutar")
                 else:
                     observation = self._dispatch_tool(tool_call.name, tool_call.arguments, tools, denied_permissions)
                     dispatched_tool = tools.get(tool_call.name)
                     artifact = dispatched_tool.last_artifact if dispatched_tool is not None else None
+                    if artifact is not None and artifact.uri:
+                        artifact_paths_this_turn[artifact.uri] = tool_call.name
+                    if tool_call.name == "analyze_image":
+                        origin_tool = artifact_paths_this_turn.get(tool_call.arguments.get("image_path"))
+                        if origin_tool is not None:
+                            self_checked_tools.add(origin_tool)
                 steps.append(
                     AgentStep(
                         tool_name=tool_call.name, arguments=tool_call.arguments,
@@ -485,7 +552,7 @@ class AgentLoop:
         if tool is None:
             return f"ERROR: herramienta '{name}' no existe"
 
-        # Cascada de permisos (ver tool_integration/permissions.py::
+        # Cascada de permisos (ver sdk/permissions.py::
         # PermissionCascade): se resetea last_artifact ANTES del chequeo
         # para que un rechazo nunca deje pasar un artefacto viejo de una
         # llamada anterior a esta misma herramienta en el mismo run().
