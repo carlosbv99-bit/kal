@@ -5388,3 +5388,108 @@ movidos) más 2 archivos de test nuevos (`test_client_provider.py`,
 concretos). Congelar el SDK, Capability Broker/Registry, y el
 Marketplace quedan explícitamente para después, sin construir nada de
 eso todavía.
+
+### Segundo paso: Estabilizar SDK — tests de contrato + auditoría (2026-07-21)
+
+Con los dos casos de Provider validados, el usuario pidió avanzar al
+paso 3 del roadmap. "Estabilizar el SDK" tenía varias lecturas
+posibles (versionado formal, documentación para terceros, tests de
+contrato) — se acordó explícitamente el alcance más chico y de menor
+riesgo: pinnear la superficie ACTUAL de `sdk/` con tests, y auditar las
+Skills reales existentes, sin versionado formal ni documentación
+externa todavía (no hay ningún consumidor externo real que lo exija
+hoy).
+
+`tests/test_sdk_contract.py` (nuevo, 12 tests): fija los 6 nombres
+exportados por `sdk/__init__.py::__all__` (`Artifact`, `KernelError`,
+`Permission`, `Tool`, `ToolManifest`, `call`), los campos exactos de
+los dataclasses `Artifact`/`ToolManifest` (vía `dataclasses.fields()`,
+detecta un campo agregado/quitado/renombrado), los 9 valores del enum
+`Permission`, que `RUNTIME_ENFORCED`/`UNSUPPORTED_RUNTIME_PERMISSIONS`
+particionan el enum completo sin solapamiento, que `Tool` es un ABC
+que no se puede instanciar sin `execute()`, que `KernelError` es una
+`Exception`, la firma de `call()`, y el `SOCKET_PATH` fijo que
+coordina 3 archivos distintos (`sdk/context.py`,
+`kernel/lifecycle/skill_runner.py`,
+`kernel/registry/sandboxed_skill.py`) sin que ninguno importe al otro.
+
+Auditoría de las 6 Skills reales (`skills/*/tool.py`, un grep de cada
+línea `import`/`from`): las 6 importan EXCLUSIVAMENTE de
+`sdk.skill`/`sdk.artifacts`/`sdk.context` (más stdlib puro:
+`os`/`uuid`/`platform`/`shutil`) — cero referencias a `kernel.*` ni
+`agent_core.*`. Ninguna usa `Permission` directamente en código (los
+permisos se declaran como strings en su propio `skill.yaml`, parseados
+por el registro/firma, no por el `tool.py` de la Skill). Auditoría
+limpia, sin ningún hallazgo que corregir — confirma que la migración a
+`sdk/` (ver sección de kernel/SDK más arriba) sí logró su objetivo.
+
+Versionado formal (semver) y documentación pública del SDK para
+desarrolladores externos quedan explícitamente pospuestos — se
+revisitan cuando exista un consumidor externo real, mismo criterio de
+disciplina de alcance aplicado durante toda esta fase.
+
+## Conversation Engine: modelo chico como primer paso de /chat (2026-07-21)
+
+El usuario propuso separar "qué quiere el usuario" (Conversation
+Engine, un modelo chico y siempre residente) de "cómo se hace"
+(Planner existente) — el modelo residente nunca debería competir con
+los modelos grandes ni resolver el pedido él mismo, solo entender la
+intención y decidir qué capacidades hacen falta, vía un contrato JSON
+estructurado (`intent`/`confidence`/`required_capabilities`/
+`user_reply`).
+
+**Validación empírica antes de tocar código** (script standalone, no
+en este repo): 15 mensajes reales variados contra 3 candidatos
+(qwen2.5:3b, gemma3:4b, llama3.2:3b). Primera ronda: los tres
+confundieron "hacé una página web" con `web-browsing` en vez de
+`coding` (mismo error en los tres → problema del prompt, no de los
+modelos) y qwen2.5:3b/llama3.2:3b confundieron text-to-speech con
+speech-to-text. Segunda ronda, con el prompt corregido (definiciones
+explícitas por capacidad + 2 ejemplos few-shot): qwen2.5:3b corrigió
+ambos problemas sin regresiones (15/15 formato válido en las dos
+rondas) — gemma3:4b empeoró su confiabilidad de formato (pasó a fallar
+2/15) y llama3.2:3b introdujo un problema nuevo (capacidades vacías en
+pedidos claros). `qwen2.5:3b` ganó como modelo default.
+
+**Integración real, alcance deliberadamente acotado** (mismo criterio
+que todo este roadmap: el paso más chico que ya aporta valor, sin
+construir el Capability Broker que todavía no tiene ningún caso real):
+el Conversation Engine se agrega como paso PREVIO y OPCIONAL a
+`/chat` — si detecta baja confianza, responde de inmediato con la
+aclaración (`user_reply`) sin correr el planner/agent_loop completo
+(ahorro real de cómputo ante un pedido ambiguo). `required_capabilities`
+se calcula pero no rutea a ningún proveedor todavía — es la pieza de
+datos que el futuro Capability Broker va a necesitar, no una decisión
+forzada hoy.
+
+Piezas nuevas: `utils/config.py::ConversationEngineConfig` (mismo
+criterio que `VisionConfig`: `base_url` fijo a Ollama local, NUNCA el
+proveedor configurable de `llm.*`, que podría estar apuntando a la
+nube). `agent_core/llm/ollama_client.py::chat()` gana un parámetro
+opcional `response_format` (mapea a `"format"` en el payload de
+Ollama — aditivo, default `None` preserva el comportamiento de todos
+los demás llamadores). `agent_core/conversation_engine.py` (nuevo):
+`ConversationEngine.classify()`, diseño **"fail-open" deliberado** —
+cualquier falla (red, JSON inválido, clave faltante, deshabilitado)
+devuelve `None` y el llamador sigue con el flujo normal como si esto
+no existiera; nunca lanza, nunca bloquea un pedido real. Wireado en
+`Orchestrator.__init__` e integrado en `agent_core/routers/chat.py`
+justo después de construir el `context_bundle`.
+
+**Bug real encontrado al testear, corregido antes de terminar**: sin
+ningún ajuste extra, CUALQUIER test existente que llamara a `/chat`
+sin mockear `orchestrator.conversation_engine` disparaba una llamada
+REAL a Ollama en cada request — tests antes instantáneos (mockeados
+end-to-end) pasaron a tardar 8+ segundos reales y a depender de que
+Ollama estuviera corriendo con qwen2.5:3b descargado. Corregido con un
+fixture `autouse=True` en `tests/conftest.py` que neutraliza
+`conversation_engine.classify()` a `None` por defecto en TODOS los
+tests — cualquier test que sí quiera ejercitarlo (ver
+`tests/test_orchestrator_chat_conversation_engine.py`) lo sobreescribe
+con su propio `monkeypatch.setattr`, que gana por correr después.
+
+Verificado: 873 tests pasando (3 nuevos en `test_ollama_client.py`
+para `response_format`, 8 en `test_conversation_engine.py`, 3 en
+`test_orchestrator_chat_conversation_engine.py`), suite completa sin
+regresiones ni aumento real de tiempo total (confirma que el fixture
+de aislamiento funciona).

@@ -153,8 +153,8 @@ def update_llm_settings(
     if provider == "ollama" and default_model is not None and not _ollama_model_supports_tools(default_model):
         raise LLMSettingsError(
             f"'{default_model}' no soporta llamadas a herramientas (tool-calling) — kal necesita "
-            "esa capacidad en CUALQUIER modelo que actúe como cerebro del agente, ya que siempre "
-            "ofrece herramientas en cada mensaje. Elegí otro modelo (o usalo solo para "
+            "esa capacidad en CUALQUIER modelo configurado como default_model del agente, ya que "
+            "siempre ofrece herramientas en cada mensaje. Elegí otro modelo (o usalo solo para "
             "multimodal.vision.model en config.yaml, si es un modelo de visión)."
         )
 

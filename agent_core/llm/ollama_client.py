@@ -1,9 +1,10 @@
 """
 Cliente HTTP mínimo para Ollama — una implementación de LLMProvider
-(agent_core/llm/provider.py) entre varias posibles. El "cerebro" de kal
-corre 100% local vía Ollama por defecto, nunca contra una API en la
-nube (ver LLMConfig en utils/config.py: modelos ":cloud" como
-glm-5.1:cloud deben seleccionarse explícitamente, nunca como default).
+(agent_core/llm/provider.py) entre varias posibles. El modelo de
+lenguaje del agente corre 100% local vía Ollama por defecto, nunca
+contra una API en la nube (ver LLMConfig en utils/config.py: modelos
+":cloud" como glm-5.1:cloud deben seleccionarse explícitamente, nunca
+como default).
 
 NOTA DE TRANSPARENCIA: no tengo forma de ejecutar Ollama en el entorno
 donde escribo este código (sin red, sin el binario instalado). La
@@ -89,6 +90,7 @@ class OllamaClient:
         model: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         images: list[str] | None = None,
+        response_format: str | None = None,
     ) -> ChatResponse:
         """
         Llama a POST /api/chat. `messages` sigue el formato
@@ -99,6 +101,12 @@ class OllamaClient:
         visión (p.ej. llama3.2-vision) — se adjuntan al ÚLTIMO mensaje,
         formato documentado de /api/chat de Ollama. No modifica
         `messages` in-place (evita mutar la lista del llamador).
+        `response_format`: pasa tal cual como "format" en el payload de
+        Ollama — p.ej. "json" fuerza que `message.content` sea un
+        string JSON válido (usado por agent_core/conversation_engine.py,
+        validado empíricamente contra qwen2.5:3b/gemma3:4b/llama3.2:3b).
+        Default None preserva el comportamiento actual de todo el resto
+        de los llamadores (agent_loop.py, planner.py, self_diagnosis.py).
         """
         # Libera RAM de servicios multimedia inactivos ANTES de pedirle a
         # Ollama (local, misma RAM del sistema) que genere — ver
@@ -115,6 +123,8 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = tools
+        if response_format:
+            payload["format"] = response_format
 
         response = self._post_with_retry(payload)
         data = response.json()

@@ -19,8 +19,9 @@ lógica nueva, solo un lugar de verdad único por responsabilidad:
                     mantienen calientes entre llamadas).
   - broker/      — ciclo de vida de recursos pesados (Resource Broker):
                     libera RAM de servicios inactivos bajo presión, para
-                    que el "cerebro" (Ollama) no compita por la misma
-                    RAM que las herramientas multimedia.
+                    que el modelo de lenguaje del agente (Ollama) no
+                    compita por la misma RAM que las herramientas
+                    multimedia.
   - registry/    — alta/baja de herramientas: registro de Tools de
                     primera parte y dinámicas (registry.py), descubrimiento
                     y carga de Skills instaladas (skills.py), el puente

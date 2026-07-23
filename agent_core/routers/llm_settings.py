@@ -100,8 +100,8 @@ def list_local_ollama_models_endpoint():
 
     `capabilities`: un mapa {modelo: ["tools", "vision", ...]} — para
     que la interfaz explique POR QUÉ un modelo como llava:13b no
-    aparece en el selector de cerebro (sin soporte de "tools"), en vez
-    de dejarlo como una ausencia sin explicación.
+    aparece en el selector de modelo del agente (sin soporte de
+    "tools"), en vez de dejarlo como una ausencia sin explicación.
     """
     try:
         models = list_local_ollama_models()

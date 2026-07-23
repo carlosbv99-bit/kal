@@ -23,7 +23,12 @@ load_dotenv()
 
 class LLMConfig(BaseModel):
     """
-    Configuración del "cerebro" del agente. Por defecto un modelo local
+    Configuración del modelo de lenguaje que usa el agente para el
+    trabajo real (distinto del modelo chico y siempre local del
+    Conversation Engine, ver ConversationEngineConfig más abajo — no
+    hay un único "cerebro" fijo, el modelo configurado acá puede ser
+    local o en la nube según lo que el usuario elija). Por defecto un
+    modelo local
     vía Ollama — nunca apunta a un servicio en la nube por defecto, hay
     que elegirlo explícitamente (`provider: openai_compatible`), para
     no romper el principio de "sin red inesperada" del resto del
@@ -175,7 +180,8 @@ class VisionConfig(BaseModel):
     # cambia cuando el usuario activa un perfil de nube (p.ej. Groq,
     # ver LLMConfig más arriba), y esta herramienta necesita hablar
     # SIEMPRE con el Ollama LOCAL (el modelo de visión corre ahí, no en
-    # la nube), sin importar qué proveedor use el "cerebro" del agente.
+    # la nube), sin importar qué proveedor esté configurado para el
+    # modelo de lenguaje del agente (llm.provider).
     base_url: str = "http://localhost:11434"
     # Modelo de Ollama con soporte de visión (necesita `ollama pull
     # llava:13b` u otro modelo de visión — no se descarga solo, a
@@ -231,6 +237,27 @@ class ResourceBrokerConfig(BaseModel):
     """
     idle_timeout_seconds: int = 300
     min_available_ram_mb: int = 2048
+
+
+class ConversationEngineConfig(BaseModel):
+    """
+    Primer paso opcional de /chat (ver agent_core/conversation_engine.py):
+    un modelo CHICO y siempre local clasifica intención/capacidades
+    antes de correr el planner/agent_loop completo — si la confianza es
+    baja, responde de inmediato con una aclaración sin gastar cómputo
+    en el pipeline pesado. Validado empíricamente (2026-07-21) contra
+    qwen2.5:3b, gemma3:4b y llama3.2:3b — qwen2.5:3b fue el más
+    confiable (formato + semántica) de los tres.
+    """
+    enabled: bool = True
+    # NUNCA reusar llm.base_url — mismo motivo que VisionConfig.base_url:
+    # ese campo cambia si el usuario activa un proveedor en la nube, y
+    # este modelo tiene que seguir siendo local siempre.
+    base_url: str = "http://localhost:11434"
+    model: str = "qwen2.5:3b"
+    # Por debajo de esto, se trata la respuesta como "necesita
+    # aclaración" y NUNCA se corre el agente completo.
+    confidence_threshold: float = 0.5
 
 
 class SandboxConfig(BaseModel):
@@ -378,6 +405,7 @@ class Settings(BaseModel):
     error_handling: ErrorHandlingConfig
     multimodal: MultimodalConfig = MultimodalConfig()
     resource_broker: ResourceBrokerConfig = ResourceBrokerConfig()
+    conversation_engine: ConversationEngineConfig = ConversationEngineConfig()
     context: ContextConfig = ContextConfig()
     sandbox: SandboxConfig
     tool_integration: ToolIntegrationConfig

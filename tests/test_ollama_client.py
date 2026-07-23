@@ -64,6 +64,34 @@ def test_chat_succeeds_on_first_try_without_retrying():
     assert len(calls) == 1
 
 
+def test_chat_sends_format_in_payload_when_response_format_is_given():
+    # Usado por agent_core/conversation_engine.py para forzar que Ollama
+    # devuelva JSON válido en message.content — ver ConversationEngine.
+    captured = {}
+
+    def post_fn(url, json=None, **kw):
+        captured["payload"] = json
+        return FakeResponse({"message": {"content": "{}"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}], response_format="json")
+
+    assert captured["payload"]["format"] == "json"
+
+
+def test_chat_omits_format_from_payload_by_default():
+    captured = {}
+
+    def post_fn(url, json=None, **kw):
+        captured["payload"] = json
+        return FakeResponse({"message": {"content": "hola"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert "format" not in captured["payload"]
+
+
 def test_chat_parses_tool_call_id_when_present():
     # BUG REAL ENCONTRADO EN USO: Groq (a diferencia de Ollama) valida
     # ESTRICTO el formato OpenAI y exige un 'id' por tool_call para

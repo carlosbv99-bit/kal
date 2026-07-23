@@ -855,10 +855,10 @@ async function refreshModelSettings() {
       const caps = capabilities[name] || [];
       const item = el("div", "dash-item", name);
       if (caps.includes("tools")) {
-        item.appendChild(el("span", "dash-item-meta", " — puede ser el cerebro del chat"));
+        item.appendChild(el("span", "dash-item-meta", " — puede usarse como modelo del chat"));
       } else if (caps.includes("vision")) {
         item.appendChild(
-          el("span", "dash-item-meta", " — solo visión, no soporta herramientas (no aparece como cerebro)")
+          el("span", "dash-item-meta", " — solo visión, no soporta herramientas (no aparece en el selector)")
         );
       }
       modelLocalList.appendChild(item);

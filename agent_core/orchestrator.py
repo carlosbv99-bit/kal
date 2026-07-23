@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent_core.context_service import ContextService
+from agent_core.conversation_engine import ConversationEngine
 from agent_core.llm.agent_loop import AgentLoop
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
@@ -53,8 +54,8 @@ def build_llm_client() -> LLMProvider:
     """
     Fábrica del LLMProvider real según settings.llm.provider — kal se
     distribuye a usuarios con hardware muy distinto (ver
-    docs/HISTORY.md), así que el cerebro del agente no puede quedar
-    hardcodeado a Ollama local. "ollama" (default) no cambia nada del
+    docs/HISTORY.md), así que el modelo de lenguaje del agente no puede
+    quedar hardcodeado a Ollama local. "ollama" (default) no cambia nada del
     comportamiento de siempre. "openai_compatible" sirve tanto para un
     proveedor real en la nube (Qwen/DashScope, Grok/xAI, OpenAI,
     OpenRouter...) como para el propio endpoint OpenAI-compatible de
@@ -84,6 +85,7 @@ class Orchestrator:
         self.self_modification = self_modification_manager
         self.sessions = session_manager
         self.context_service = ContextService()
+        self.conversation_engine = ConversationEngine()
         self.llm = build_llm_client()
         self.agent = AgentLoop(llm_client=self.llm, task_executor=self.tasks, memory=self.memory)
         self.planning_agent = PlanningAgentLoop(self.agent)

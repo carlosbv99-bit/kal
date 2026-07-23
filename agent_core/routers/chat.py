@@ -96,6 +96,25 @@ def chat(req: ChatRequest):
         )
     context_bundle = orchestrator.context_service.build(session, editor_context, client=req.client)
 
+    # Conversation Engine (ver agent_core/conversation_engine.py): paso
+    # PREVIO y opcional, "fail-open" — si detecta baja confianza (pedido
+    # ambiguo), responde de inmediato con la aclaración sin correr el
+    # planner/agent_loop completo. Si falla por cualquier motivo o la
+    # confianza alcanza, el flujo sigue exactamente como antes de este
+    # cambio.
+    ce_result = orchestrator.conversation_engine.classify(req.goal)
+    if ce_result is not None and ce_result.confidence < settings.conversation_engine.confidence_threshold:
+        orchestrator.sessions.record_turn(session, req.goal, ce_result.user_reply)
+        return {
+            "session_id": session.id,
+            "correlation_id": correlation_id,
+            "goal": req.goal,
+            "final_answer": ce_result.user_reply,
+            "status": "needs_clarification",
+            "plan": [],
+            "steps": [],
+        }
+
     try:
         result = orchestrator.planning_agent.run(
             req.goal, model=req.model, use_planner=use_planner,

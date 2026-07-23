@@ -8,8 +8,8 @@ image_editing.py), esto no genera ni modifica ninguna imagen — solo
 devuelve texto (mismo patrón que speech_to_text.py: Artifact con
 modality="text"). Y a diferencia de esos, el modelo no corre dentro de
 este proceso vía un Kernel Service (ImageService/STTService): corre en
-el servidor Ollama ya en ejecución, igual que el "cerebro" del agente
-— por eso usa OllamaClient directo en vez de un servicio nuevo.
+el servidor Ollama ya en ejecución, igual que el modelo de lenguaje del
+agente — por eso usa OllamaClient directo en vez de un servicio nuevo.
 
 Deliberadamente usa OllamaClient() SIEMPRE, sin pasar por la fábrica de
 settings.llm.provider (que puede apuntar a un proveedor en la nube):
