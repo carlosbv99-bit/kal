@@ -44,6 +44,7 @@ from typing import Any, Callable
 
 import requests
 
+from kernel.services.provider import TTSProvider
 from kernel.services.services import AudioService
 from sdk.skill import Tool, ToolManifest
 from sdk.artifacts import Artifact
@@ -68,17 +69,18 @@ class AudioGenerationTool(Tool):
         },
     )
 
-    def __init__(self, http_post: Callable[..., Any] | None = None, audio_service: AudioService | None = None):
+    def __init__(self, http_post: Callable[..., Any] | None = None, audio_service: TTSProvider | None = None):
         self.cfg = settings.multimodal.audio
         self.http_post = http_post or requests.post
         Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
-        # La carga/síntesis real vive en AudioService (kernel/services/services.py)
-        # — mismo patrón que ImageGenerationTool/ImageService: por
-        # defecto, sin inyectar, arma su PROPIO AudioService con su
-        # MISMO self.cfg (un test que monkeypatchea artifact_dir antes
-        # de instanciar esta clase sigue funcionando igual). En
-        # producción, la instancia compartida real es la misma que usa
-        # el Kernel Service Bus para skills con
+        # El tipo declarado es TTSProvider (kernel/services/provider.py)
+        # — este adaptador no necesita saber que el motor concreto es
+        # piper-tts. Por defecto, sin inyectar, arma su PROPIO
+        # AudioService con su MISMO self.cfg (un test que monkeypatchea
+        # artifact_dir antes de instanciar esta clase sigue funcionando
+        # igual) — mismo patrón que ImageGenerationTool/ImageService.
+        # En producción, la instancia compartida real es la misma que
+        # usa el Kernel Service Bus para skills con
         # kernel_services: ["audio.synthesize"].
         self.audio_service = audio_service or AudioService(cfg=self.cfg)
 

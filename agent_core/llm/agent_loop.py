@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
 
+from agent_core.client_provider import _VSCODE_ONLY_TOOL_NAMES, get_client_provider
 from agent_core.llm.json_extraction import extract_json_array, extract_json_object
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.provider import LLMProvider, ProviderError, ToolCall
@@ -256,37 +257,15 @@ def _agent_tool_from_tool(name: str, tool: Tool) -> AgentTool:
     return agent_tool
 
 
-# Herramientas de generación/edición multimedia, excluidas del toolset
-# cuando client="vscode" (ver agent_core/context_service.py y
-# AgentLoop._build_tools_from_registry). Restricción ESTRUCTURAL, no
-# una instrucción de prompt: ya se probó en vivo que una regla de
-# SYSTEM_PROMPT sola no evita que el modelo llame a estas herramientas
-# para pedidos de código ("creá la página web para una panadería"
-# generó fotos de panadería en vez de HTML/CSS/JS, dos veces, con
-# distintas reglas de prompt) — mismo criterio que max_tool_repeats
-# más abajo: un tope estructural, no una petición que el modelo puede
-# ignorar. Lista explícita (no una categoría genérica en ToolManifest
-# todavía): si se agrega una herramienta multimedia nueva, hay que
-# sumarla acá a mano.
-_MULTIMEDIA_TOOL_NAMES = frozenset({
-    "image_generation", "audio_generation", "video_composition",
-    "image_editing", "image_composition", "speech_to_text",
-    "image_via_kernel", "audio_via_kernel",
-    "voice_roundtrip_via_kernel", "image_inpaint_via_kernel",
-})
-
-# Inverso del conjunto de arriba: herramientas que SOLO tienen sentido
-# para client="vscode" — el backend nunca toca el filesystem real del
-# usuario él mismo (ver tool_integration/adapters/vscode_files.py):
-# propose_project_files/import_resource escriben recién del lado de la
-# extensión, tras la aprobación del usuario; read_workspace_file (2026-
-# 07-20) lee recién del lado de la extensión, que encadena la
-# respuesta automáticamente (ver vscode-extension/src/
-# readWorkspaceFile.ts). El cliente web no tiene ningún workspace real
-# que leer ni ningún canal para aplicar una propuesta de escritura, así
-# que ofrecerle cualquiera de las tres solo generaría una respuesta que
-# nadie puede usar.
-_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files", "import_resource", "read_workspace_file"})
+# _MULTIMEDIA_TOOL_NAMES/_VSCODE_ONLY_TOOL_NAMES viven en
+# agent_core/client_provider.py (el único lugar que sabe qué significa
+# cada `client`, ver ClientProvider). Acá solo se importa
+# _VSCODE_ONLY_TOOL_NAMES directamente porque además se usa más abajo
+# para el tope de repeticiones por turno de esas 3 herramientas
+# específicamente — un uso que NO depende de cuál sea el `client`
+# activo (propiedad intrínseca de las herramientas: piden aprobación
+# async, una segunda llamada en el mismo turno nunca tiene información
+# nueva), así que no pasa por ClientProvider.excluded_tool_names().
 
 
 class AgentLoop:
@@ -320,10 +299,8 @@ class AgentLoop:
             "recall": MemoryRecallTool(self.memory),
         }
         merged: dict[str, Tool] = {**self.tool_registry.active_tools(), **instance_tools}
-        if client == "vscode":
-            merged = {name: tool for name, tool in merged.items() if name not in _MULTIMEDIA_TOOL_NAMES}
-        else:
-            merged = {name: tool for name, tool in merged.items() if name not in _VSCODE_ONLY_TOOL_NAMES}
+        excluded = get_client_provider(client).excluded_tool_names()
+        merged = {name: tool for name, tool in merged.items() if name not in excluded}
         return {name: _agent_tool_from_tool(name, tool) for name, tool in merged.items()}
 
     def _extract_fallback_tool_call(self, content: str, tools: dict[str, AgentTool]) -> ToolCall | None:

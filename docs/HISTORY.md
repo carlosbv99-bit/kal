@@ -5303,3 +5303,88 @@ respuesta final ahora", pero este modelo local (vía el fallback de
 texto plano) no lo respeta de forma confiable. Con el tope de tiempo
 ya resuelto deja de ser bloqueante, pero sigue siendo lento — queda
 anotado para revisar si vuelve a ser un problema.
+
+## Pivote de visión: de "agregar funcionalidades" a "consolidar el Kernel" (2026-07-21)
+
+El usuario planteó, después de una revisión profunda del trabajo
+acumulado, un cambio de pregunta que guía el desarrollo: ya no "¿cómo
+implemento esta capacidad nueva?" sino "¿dónde debe vivir esta
+capacidad dentro del Kernel?". Roadmap de 5 pasos acordado: Consolidar
+Kernel → Extraer responsabilidades → Estabilizar SDK → Capability
+Broker → Marketplace. Tesis central: "las Skills aportan
+funcionalidad, el Kernel aporta coherencia" — el Kernel coordina, no
+decide (Kernel → Capability Broker → Service → Skill, en vez de
+Orchestrator → Planner → LLM → Skill). Todo debería convertirse en un
+"Provider" (Filesystem/Editor/Speech/Conversation Provider) detrás de
+una interfaz común, y las Skills deberían declarar QUÉ necesitan
+("necesito: archivo activo, árbol del proyecto") en vez de recibir
+contexto ya resuelto — el Context Service decide cómo conseguirlo,
+sin que la Skill sepa si viene de VS Code, la web, o la CLI.
+
+Reserva compartida con el usuario antes de empezar: congelar el SDK
+ahora, con solo 6 Skills reales y ningún desarrollador externo
+todavía, arriesga fijar la abstracción equivocada — se acordó validar
+el patrón "Provider" sobre 2 casos reales YA existentes primero,
+posponiendo "congelar el SDK" hasta tener esa evidencia.
+
+### Primer paso: Extraer responsabilidades — dos casos de validación
+
+Investigación real del código (antes de diseñar nada) mostró que el
+patrón "Provider" YA existe, completo, en un solo lugar:
+`agent_core/llm/provider.py::LLMProvider` — un `typing.Protocol`
+`@runtime_checkable` que `OllamaClient`/`OpenAICompatibleClient`
+satisfacen sin que ningún llamador (`agent_loop.py`, `planner.py`,
+`self_diagnosis.py`) sepa cuál está activo. Ese fue el molde exacto a
+repetir. También se confirmó que Filesystem/Network YA son
+provider-like (el `AccessManager` genérico + adaptadores tipados, ver
+la sección de Access Manager más arriba) — nada que hacer ahí. Los dos
+casos reales elegidos para validar el patrón, ambos ad-hoc hoy:
+
+**1. Editor/Client Provider.** Antes de este cambio, `client ==
+"vscode"` aparecía en exactamente 2 lugares de todo el backend
+(`agent_core/context_service.py:189`, decidiendo qué instrucción de
+prompt inyectar; `agent_core/llm/agent_loop.py:311-327`, decidiendo
+qué herramientas excluir del toolset) — un string crudo comparado dos
+veces, sin ninguna interfaz. Nuevo archivo
+`agent_core/client_provider.py`: `ClientProvider` (`Protocol`
+`@runtime_checkable` con `system_prompt_addendum()`/
+`excluded_tool_names()`), `VSCodeClientProvider`/`WebClientProvider`
+como implementaciones, y `get_client_provider(client)` como el ÚNICO
+lugar del código que ahora compara `client` contra un string literal.
+`_VSCODE_CLIENT_INSTRUCTION` (movida desde context_service.py) y
+`_MULTIMEDIA_TOOL_NAMES`/`_VSCODE_ONLY_TOOL_NAMES` (movidas desde
+agent_loop.py) viven ahora ahí. `_VSCODE_ONLY_TOOL_NAMES` también se
+usa en agent_loop.py para el tope de repeticiones por turno de esas 3
+herramientas específicas — un uso intrínseco a las herramientas (piden
+aprobación async), no al `client` activo, así que sigue importando la
+misma constante en vez de pasar por `ClientProvider`.
+
+**2. Speech Provider (TTS + STT).** `kernel/services/services.py`
+tenía `AudioService`/`STTService` hardcodeados a piper-tts/
+faster-whisper respectivamente, sin protocolo — pero los dos
+adaptadores que las usan (`tool_integration/adapters/audio_gen.py`,
+`speech_to_text.py`) YA hacían inyección por constructor
+(`audio_service: AudioService | None = None`), solo faltaba que el
+tipo declarado fuera abstracto. Nuevo archivo
+`kernel/services/provider.py`: `TTSProvider` (`synthesize()`) y
+`STTProvider` (`transcribe()`), ambos `Protocol` `@runtime_checkable`
+sin dataclasses de resultado todavía (`ChatResponse` se justifica con
+DOS wire formats reales distintos; acá hay una sola implementación de
+cada lado — tipificar el resultado ahora sería abstracción prematura).
+`AudioService`/`STTService` cumplen la forma estructuralmente sin
+ningún cambio de lógica — solo una línea de docstring notándolo. Los
+dos adaptadores cambian su type hint de la clase concreta al
+protocolo (`audio_service: TTSProvider | None = None`); el default
+(`AudioService(cfg=self.cfg)`) se queda igual — mismo criterio que
+`LLMProvider`: los sitios de composición (`kernel/registry/registry.py`,
+`kernel/api/bus.py`) pueden seguir conociendo el tipo concreto, los
+adaptadores ya no.
+
+Cero cambio de comportamiento — reorganización pura, verificado con 0
+tests existentes rotos (ninguno importaba directamente los nombres
+movidos) más 2 archivos de test nuevos (`test_client_provider.py`,
+`test_speech_providers.py`, mismo estilo que `test_llm_provider.py`:
+`isinstance(Implementación(), Protocolo)` + verificación de valores
+concretos). Congelar el SDK, Capability Broker/Registry, y el
+Marketplace quedan explícitamente para después, sin construir nada de
+eso todavía.
