@@ -94,6 +94,40 @@ def test_direct_answer_without_tool_calls():
     assert len(fake_llm.calls) == 1
 
 
+def test_a_failed_tool_call_attempt_is_never_shown_as_the_final_answer():
+    # BUG REAL ENCONTRADO EN USO (2026-07-21): un saludo simple hizo que
+    # el modelo devolviera '{"name": null, "arguments": {}}' como
+    # respuesta final — _extract_fallback_tool_call ya lo rechaza
+    # correctamente (name=null no es ninguna herramienta), pero antes de
+    # este fix ese texto rechazado se mostraba tal cual al usuario. Ahora
+    # se le devuelve como error al modelo y el loop sigue.
+    responses = [
+        ChatResponse(content='{"name": null, "arguments": {}}'),
+        ChatResponse(content="¡Hola! Estoy bien, ¿y vos?"),
+    ]
+    loop, fake_llm = _loop(responses)
+
+    result = loop.run("Hola, ¿cómo estás?")
+
+    assert result.status == "success"
+    assert result.final_answer == "¡Hola! Estoy bien, ¿y vos?"
+    assert len(fake_llm.calls) == 2
+    # El segundo llamado al LLM debe incluir el error explicándole al
+    # modelo que su intento anterior no era válido.
+    second_call_messages = fake_llm.calls[1]["messages"]
+    assert "ERROR" in second_call_messages[-1]["content"]
+
+
+def test_a_normal_plain_text_answer_is_not_mistaken_for_a_failed_tool_call():
+    loop, fake_llm = _loop([ChatResponse(content="La respuesta es 4.")])
+
+    result = loop.run("¿Cuánto es 2+2?")
+
+    assert result.status == "success"
+    assert result.final_answer == "La respuesta es 4."
+    assert len(fake_llm.calls) == 1
+
+
 def test_single_tool_call_then_final_answer():
     task_executor = FakeTaskExecutor()
     responses = [
