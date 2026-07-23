@@ -151,8 +151,8 @@ multimodal:
   vision:
     backend: local                       # solo local por ahora, vía Ollama
     # NO reusa llm.base_url a propósito: ese campo cambia si activás un
-    # perfil de nube (Groq/OpenAI/etc.) para el "cerebro" del agente,
-    # pero el modelo de visión corre en el Ollama LOCAL siempre.
+    # perfil de nube (Groq/OpenAI/etc.) para el modelo de lenguaje del
+    # agente, pero el modelo de visión corre en el Ollama LOCAL siempre.
     base_url: "http://localhost:11434"
     # BUG REAL ENCONTRADO EN USO: llama3.2-vision (arquitectura "mllama")
     # dejó de cargar en Ollama >=0.30.0 — regresión conocida y sin
@@ -193,6 +193,18 @@ resource_broker:
   # Si la RAM disponible del sistema cae debajo de esto, libera TODOS
   # los pipelines cargados de inmediato, sin esperar el timeout.
   min_available_ram_mb: 2048
+
+# Primer paso opcional de /chat (ver agent_core/conversation_engine.py):
+# un modelo CHICO y siempre local clasifica intención/capacidades antes
+# de correr el planner/agent_loop completo — si la confianza es baja,
+# responde de inmediato con una aclaración sin gastar cómputo en el
+# pipeline pesado. Validado empíricamente (2026-07-21) contra
+# qwen2.5:3b/gemma3:4b/llama3.2:3b — qwen2.5:3b ganó en confiabilidad.
+conversation_engine:
+  enabled: true
+  base_url: "http://localhost:11434"    # SIEMPRE local, nunca el proveedor en la nube de llm.*
+  model: "qwen2.5:3b"                   # necesita `ollama pull qwen2.5:3b` (no se auto-descarga)
+  confidence_threshold: 0.5
 
 sandbox:
   network_mode: none
