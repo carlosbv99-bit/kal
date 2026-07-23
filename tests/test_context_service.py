@@ -335,6 +335,25 @@ def test_vscode_client_instruction_clarifies_image_generation_is_mode_specific_n
     assert "import_resource" in content
 
 
+def test_vscode_client_instruction_tells_the_model_to_ask_for_clarification_instead_of_inventing_a_limitation():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-21): pedido vago ("necesito que
+    me ayudes con algo", sin mencionar internet ni ninguna herramienta)
+    respondió "no tengo acceso a internet ni a servicios externos" SIN
+    haber intentado ninguna herramienta — una incapacidad inventada de
+    la nada. La instrucción ahora pide aclaración concreta en vez de
+    inventar una limitación no probada.
+    """
+    service = ContextService()
+    session = _session_with_turns(0)
+
+    bundle = service.build(session, client="vscode")
+    content = bundle.session_context["content"]
+
+    assert "con qué necesitás ayuda" in content.lower()
+    assert "sin haber intentado" in content.lower()
+
+
 def test_vscode_client_instruction_tells_the_model_to_use_read_workspace_file():
     """
     Pieza mínima de "Editor Context Provider" (2026-07-20): kal no debe

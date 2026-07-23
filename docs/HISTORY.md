@@ -5493,3 +5493,50 @@ para `response_format`, 8 en `test_conversation_engine.py`, 3 en
 `test_orchestrator_chat_conversation_engine.py`), suite completa sin
 regresiones ni aumento real de tiempo total (confirma que el fixture
 de aislamiento funciona).
+
+## Dos bugs reales de la validación en vivo del Conversation Engine, corregidos (2026-07-21)
+
+Probando `/chat` contra el servidor real (no tests) para validar el
+Conversation Engine recién integrado, aparecieron 2 bugs reales en el
+pipeline PRINCIPAL (no en el Conversation Engine, que clasificó bien
+los 4 casos probados) — corregidos el mismo día a pedido del usuario.
+
+**1. Un tool-call con `"name": null` se mostraba crudo al usuario.**
+Pedido simple ("Hola, ¿cómo estás?") devolvía literalmente
+`{"name": null, "arguments": {}}` en vez de una respuesta — reproducible
+2/2. Causa: `agent_core/llm/agent_loop.py::_extract_fallback_tool_call()`
+rechaza correctamente un intento de tool-call sin nombre válido, pero
+después de rechazarlo no había ningún paso siguiente — el texto crudo
+rechazado se devolvía tal cual como `final_answer`. Fix: nuevo método
+`AgentLoop._looks_like_a_failed_tool_call_attempt()` (deliberadamente
+angosto: solo dispara con `name` vacío/None, para no romper el test ya
+existente que trata un nombre de herramienta inexistente-pero-presente
+como respuesta legítima) — cuando dispara, se le devuelve el error al
+modelo y el loop continúa, en vez de mostrarle el JSON crudo al
+usuario. 2 tests nuevos en `test_agent_loop.py`.
+
+**2. Un pedido vago disparaba "no tengo acceso a internet" sin haber
+intentado nada.** "Necesito que me ayudes con algo" (client=vscode)
+respondió con una incapacidad inventada de la nada — más grave que el
+bug ya corregido antes (ese generalizaba un rechazo REAL de dominio;
+este inventaba un rechazo que nunca ocurrió). Fix: nuevo párrafo en
+`agent_core/client_provider.py::_VSCODE_CLIENT_INSTRUCTION` — ante un
+pedido vago, pedir aclaración concreta SIEMPRE, nunca inventar una
+limitación no probada. 1 test nuevo en `test_context_service.py`.
+
+Ambos verificados en vivo contra el servidor real tras el fix: el
+saludo ya no muestra JSON crudo, el pedido vago ya responde "¿Con qué
+necesitas ayuda?" en vez de mentir sobre el acceso a internet.
+
+**Hallazgo aparte, NO corregido**: verificando estos dos fixes en vivo,
+apareció un patrón más amplio y distinto — el modelo a veces llama a
+una herramienta irrelevante (`audio_generation`, `system_info`) para un
+mensaje simple/vago, en vez de responder directo sin usar ninguna. La
+respuesta final terminaba siendo razonable en ambos casos, pero la
+llamada a la herramienta fue gratuita (cómputo real, a veces con
+efectos secundarios como generar un archivo de audio no pedido).
+Anotado para después — candidatos: reforzar el prompt, o ajustar el
+Conversation Engine para interceptar estos casos antes de llegar al
+pipeline principal.
+
+Suite completa: 876 tests pasando (3 nuevos), 0 regresiones.

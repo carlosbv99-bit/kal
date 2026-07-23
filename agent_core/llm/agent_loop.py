@@ -348,6 +348,29 @@ class AgentLoop:
 
         return None
 
+    @staticmethod
+    def _looks_like_a_failed_tool_call_attempt(content: str) -> bool:
+        """
+        BUG REAL ENCONTRADO EN USO (2026-07-21): un saludo simple ("Hola,
+        ¿cómo estás?") hizo que el modelo devolviera el texto literal
+        '{"name": null, "arguments": {}}' como respuesta final —
+        _extract_fallback_tool_call ya rechaza esto correctamente (no es
+        ninguna herramienta real), pero antes de este fix el texto
+        rechazado se mostraba tal cual al usuario en vez de pedirle al
+        modelo una respuesta de verdad.
+
+        Deliberadamente ANGOSTO: solo dispara con "name" vacío/None
+        (un intento de tool call a medio completar, sin haber elegido
+        ninguna herramienta todavía) — NO con cualquier nombre presente,
+        aunque no exista (ver test_json_with_unknown_tool_name_is_not_
+        treated_as_tool_call: un JSON que MENCIONA un nombre de
+        herramienta que no existe se sigue tratando como respuesta final
+        real, no como un intento fallido — mismo criterio ya establecido
+        para evitar falsos positivos).
+        """
+        data = extract_json_object(content)
+        return isinstance(data, dict) and "name" in data and not data.get("name")
+
     # --- Loop principal ---
 
     def run(
@@ -446,6 +469,25 @@ class AgentLoop:
                     effective_tool_calls = [fallback]
 
             if not effective_tool_calls:
+                if self._looks_like_a_failed_tool_call_attempt(response.content):
+                    # Ver _looks_like_a_failed_tool_call_attempt: nunca
+                    # mostrarle al usuario un intento de tool call
+                    # rechazado como si fuera la respuesta final — se lo
+                    # devolvemos al modelo como un error, mismo patrón
+                    # que el resto de los rechazos de este loop.
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "ERROR: eso no es ninguna herramienta válida ni una respuesta real. Si querés "
+                                "usar una herramienta, elegí una de las disponibles con su nombre exacto. Si "
+                                "no, respondé directamente en texto natural — nunca un JSON ni un bloque "
+                                "imitando una llamada a herramienta."
+                            ),
+                        }
+                    )
+                    continue
                 return AgentRunResult(goal=goal, final_answer=response.content, steps=steps, status="success")
 
             # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
