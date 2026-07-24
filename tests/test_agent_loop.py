@@ -586,6 +586,75 @@ def test_propose_project_files_is_capped_at_one_call_per_turn():
     assert result.status == "success"
 
 
+def test_a_failed_attempt_at_a_vscode_only_tool_can_be_retried():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-24, VS Code): "generame un logo
+    simple... con un tomate y una hoja de albahaca" hizo que el modelo
+    llamara a import_resource con una ruta ABSOLUTA (mal formada) — el
+    primer intento falló (ProjectFilesRejectedError) sin proponer nada
+    al usuario. El tope de 1 llamada por turno para
+    _VSCODE_ONLY_TOOL_NAMES (pensado para bloquear una SEGUNDA
+    propuesta después de una YA exitosa) bloqueó también ese segundo
+    intento — la única chance real del modelo de corregir su propio
+    error — y terminó llamando a una herramienta totalmente distinta y
+    equivocada (qr_code) en vez de la correcta (image_generation). El
+    tope de 1 ahora solo aplica DESPUÉS de un intento que tuvo éxito de
+    verdad.
+    """
+    calls: list = []
+
+    def handler(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return "ERROR inesperado ejecutando 'import_resource': ruta absoluta"
+        return "recurso importado"
+
+    tools = [
+        AgentTool(
+            name="import_resource", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=handler,
+        ),
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="import_resource", arguments={"destination_path": "/tmp/tomato.jpg"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="import_resource", arguments={"destination_path": "assets/tomato.jpg"})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("logo con un tomate", max_steps=10, max_tool_repeats=5)
+
+    # El reintento (con la ruta corregida) SÍ se ejecutó — no se rechazó
+    # de entrada solo porque ya se había "intentado" antes.
+    assert len(calls) == 2
+    assert result.status == "success"
+
+
+def test_a_vscode_only_tool_still_caps_at_one_call_after_it_already_succeeded():
+    """Regresión: el fix de arriba no debe reabrir el bug original
+    (propose_project_files/import_resource llamado varias veces DESPUÉS
+    de ya haber propuesto algo con éxito)."""
+    calls: list = []
+
+    tools = [
+        AgentTool(
+            name="import_resource", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: calls.append(kw) or "recurso importado",
+        ),
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="import_resource", arguments={"destination_path": "assets/tomato.jpg"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="import_resource", arguments={"destination_path": "assets/tomato2.jpg"})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("logo con un tomate", max_steps=10, max_tool_repeats=5)
+
+    assert len(calls) == 1
+    assert "ERROR" in result.steps[-1].observation
+
+
 def test_default_max_tool_repeats_comes_from_settings(monkeypatch):
     from utils.config import settings
 

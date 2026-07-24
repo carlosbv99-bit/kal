@@ -360,6 +360,7 @@ browser:
 downloads:
   allow_http: false  # solo https por default
   max_size_mb: 10
+  artifact_dir: "data/artifacts/downloads"
   allowed_domains:
     - "unsplash.com"
     - "pexels.com"

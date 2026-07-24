@@ -25,9 +25,17 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
+from audit.audit_log import AuditEvent, audit_log
 from kernel.broker.resource_broker import resource_broker
+from kernel.permissions.network_access_manager import network_access_manager as default_network_access_manager
+from kernel.permissions.network_permissions import NetworkAction, NetworkScope
+from tool_integration.download_manager import (
+    DownloadValidationError,
+    download_manager as default_download_manager,
+)
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -407,5 +415,80 @@ class STTService:
                 "audio_path": audio_path,
                 "detected_language": info.language,
                 "model_size": self.cfg.model_size,
+            },
+        }
+
+
+class DownloadService:
+    """
+    Kernel Download Service: para que una Skill de terceros pueda bajar
+    un archivo real de Internet SIN necesitar `Permission.NETWORK`
+    (que le daría red cruda sin validar nada, ver
+    kernel/registry/sandboxed_skill.py:134 — network_mode="bridge").
+    Reusa tal cual tool_integration/download_manager.py::DownloadManager
+    (IP-safety anti-DNS-rebinding, tope de tamaño, escaneo ClamAV,
+    validación de contenido real) — hoy el único otro consumidor es
+    ImportResourceTool (agente de VS Code, proceso host, con su PROPIA
+    UX de aprobación de dos gates: red + filesystem, genuinamente
+    distinta de lo que necesita una Skill acá, por eso no comparten
+    código más allá de DownloadManager).
+
+    Primer servicio del bus que necesita saber QUÉ Skill lo llama (el
+    permiso de red es por-skill) — ver kernel/api/bus.py::dispatch(),
+    que inyecta `skill_name` solo a acciones que lo declaran como
+    parámetro, así ImageService/AudioService/STTService no se ven
+    afectados.
+    """
+
+    ALLOWED_ACTIONS = frozenset({"fetch"})
+
+    def __init__(self, cfg=None, download_manager=None, network_access_manager=None):
+        self.cfg = cfg or settings.downloads
+        self.download_manager = download_manager or default_download_manager
+        self.network_access_manager = network_access_manager or default_network_access_manager
+        Path(self.cfg.artifact_dir).mkdir(parents=True, exist_ok=True)
+
+    def fetch(self, url: str, expected_type: str, skill_name: str) -> dict[str, Any]:
+        hostname = urlparse(url).hostname or url
+        decision = self.network_access_manager.evaluate(
+            skill_name=skill_name, scope=NetworkScope.INTERNET,
+            action=NetworkAction.DOWNLOAD, resource_key=hostname,
+        )
+        if decision != "auto_allowed":
+            pending = self.network_access_manager.create_pending_request(
+                skill_name=skill_name, scope=NetworkScope.INTERNET,
+                action=NetworkAction.DOWNLOAD, resource_key=hostname,
+            )
+            raise KernelServiceError(
+                f"Descargar desde '{hostname}' requiere aprobación humana (pedido #{pending.id} "
+                "registrado) — probá de nuevo después de que se apruebe."
+            )
+
+        try:
+            resource = self.download_manager.download_and_validate(url, expected_type)
+        except DownloadValidationError as e:
+            raise KernelServiceError(str(e)) from e
+
+        artifact_id = str(uuid4())
+        path = Path(self.cfg.artifact_dir) / f"{artifact_id}.{expected_type}"
+        path.write_bytes(resource.content)
+
+        audit_log.record(
+            AuditEvent(
+                event_type="artifact_downloaded",
+                summary=f"Skill '{skill_name}' descargó '{url}' vía el Kernel Download Service",
+                context={
+                    "skill": skill_name, "url": url, "sha256": resource.sha256,
+                    "mime": resource.mime, "size_bytes": resource.size_bytes,
+                },
+                outcome="success",
+            )
+        )
+
+        return {
+            "artifact": f"artifact://download/{artifact_id}",
+            "path": str(path),
+            "metadata": {
+                "url": url, "mime": resource.mime, "sha256": resource.sha256, "size_bytes": resource.size_bytes,
             },
         }

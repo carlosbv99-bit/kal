@@ -382,6 +382,13 @@ class DownloadsConfig(BaseModel):
     allow_http: bool = False  # solo https por default — una respuesta http puede alterarse en tránsito
     allowed_domains: list[str] = Field(default_factory=list)  # deny-by-default, igual que browser.allowed_domains
     max_size_mb: int = 10
+    # Usado por kernel/services/services.py::DownloadService (Kernel
+    # Service Bus) — donde ImportResourceTool guarda su resultado como
+    # una PROPUESTA sin tocar disco, DownloadService sí necesita un
+    # directorio propio: su consumidor es una Skill aislada, que recibe
+    # el archivo como artifact://, mismo patrón que
+    # multimodal.image.artifact_dir.
+    artifact_dir: str = "data/artifacts/downloads"
 
 
 class AgentConfig(BaseModel):

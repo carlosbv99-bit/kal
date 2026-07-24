@@ -22,13 +22,16 @@ from utils.correlation import set_correlation_id
 
 
 class FakeService:
-    ALLOWED_ACTIONS = frozenset({"echo", "boom"})
+    ALLOWED_ACTIONS = frozenset({"echo", "boom", "whoami"})
 
     def echo(self, text):
         return {"echoed": text}
 
     def boom(self):
         raise RuntimeError("boom interno")
+
+    def whoami(self, skill_name):
+        return {"skill_name": skill_name}
 
 
 @pytest.fixture
@@ -68,6 +71,23 @@ def test_allowed_method_dispatches_successfully(bus, socket_path):
         server.stop()
 
     assert response == {"jsonrpc": "2.0", "id": 1, "result": {"echoed": "hola"}}
+
+
+def test_skill_name_of_the_calling_skill_reaches_the_bus_dispatch(bus, socket_path):
+    """DownloadService (kernel/services/services.py) necesita saber
+    QUÉ skill lo llama para el permiso de red por-skill — el servidor
+    de socket ya sabe su propio `self.skill_name` (viene de
+    sandboxed_skill.py al construirlo), esto confirma que llega hasta
+    dispatch() sin que la skill misma tenga que mandarlo como
+    parámetro (no debería poder suplantar a otra skill)."""
+    server = KernelBusSocketServer(bus, allowed_methods=["test.whoami"], socket_path=socket_path, skill_name="download_via_kernel")
+    server.start()
+    try:
+        response = _send(socket_path, {"jsonrpc": "2.0", "id": 1, "method": "test.whoami", "params": {}})
+    finally:
+        server.stop()
+
+    assert response == {"jsonrpc": "2.0", "id": 1, "result": {"skill_name": "download_via_kernel"}}
 
 
 def test_method_not_declared_is_rejected_before_touching_the_bus(bus, socket_path):

@@ -172,7 +172,7 @@ class KernelBusSocketServer:
             )
 
         try:
-            result = self.bus.dispatch(request.method, request.params)
+            result = self.bus.dispatch(request.method, request.params, skill_name=self.skill_name)
         except (ServiceNotFoundError, ActionNotFoundError, ArtifactNotFoundError) as e:
             # Errores de protocolo del propio bus — el mensaje solo cita
             # el nombre de servicio/acción/artefacto que la SKILL misma
