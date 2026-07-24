@@ -1,0 +1,30 @@
+name: download_via_kernel
+description: "Descarga un recurso real desde una URL (hoy solo imágenes), pidiéndoselo al Kernel Service Bus — nunca abre su propia conexión de red."
+version: "0.1.0"
+entry_point: "tool:DownloadViaKernelTool"
+# Skill de REFERENCIA para el Kernel Download Service (ver
+# kernel/services/services.py::DownloadService) — espejo directo de
+# skills/audio_via_kernel/, aplicado a download.fetch. Sin
+# Permission.NETWORK a propósito: es exactamente el punto de este
+# mecanismo — una Skill puede bajar un archivo REAL validado (IP
+# segura, tamaño, malware, contenido) sin necesitar red cruda dentro
+# de su propio contenedor (que le daría network_mode="bridge", sin
+# ninguna de esas validaciones).
+enabled: true
+permissions: []
+requirements: []
+kernel_services:
+  - "download.fetch"
+parameters_schema:
+  type: object
+  properties:
+    url:
+      type: string
+      description: "URL real del recurso a descargar (https, dominio permitido)"
+    expected_type:
+      type: string
+      enum: ["image"]
+      description: "Tipo de recurso esperado — hoy solo 'image'"
+  required:
+    - url
+    - expected_type

@@ -25,12 +25,19 @@ de dos que puedan divergir. El resto de las validaciones (IP seguna,
 tamaño, malware, contenido real) siguen acá, sin cambios.
 
 Usado por tool_integration/adapters/vscode_files.py::ImportResourceTool
-— el consumidor real de hoy (crear archivos de imagen reales en un
-proyecto de VS Code). El mecanismo es genérico a propósito
-(`expected_type` es un parámetro, no algo hardcodeado a "image"), pero
-solo "image" tiene un validador real implementado — cualquier otro
-valor falla cerrado con un mensaje claro, nunca acepta un binario sin
-poder confirmar de verdad qué es.
+(agente de VS Code, proceso host) Y por
+kernel/services/services.py::DownloadService (2026-07-24, Kernel
+Download Service — expuesto vía el Kernel Service Bus para que una
+Skill de terceros pueda bajar un archivo real SIN necesitar
+Permission.NETWORK, que le daría red cruda sin ninguna de estas
+validaciones, ver kernel/registry/sandboxed_skill.py). Cada consumidor
+gatea el dominio a SU manera (ImportResourceTool con su propia UX de
+aprobación interactiva + gate de filesystem; DownloadService con el
+skill_name real de quien llama) antes de llegar acá — el mecanismo es
+genérico a propósito (`expected_type` es un parámetro, no algo
+hardcodeado a "image"), pero solo "image" tiene un validador real
+implementado — cualquier otro valor falla cerrado con un mensaje
+claro, nunca acepta un binario sin poder confirmar de verdad qué es.
 """
 from __future__ import annotations
 

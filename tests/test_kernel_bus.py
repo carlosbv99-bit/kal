@@ -11,7 +11,7 @@ from kernel.api.bus import ActionNotFoundError, ArtifactNotFoundError, KernelSer
 
 
 class FakeEchoService:
-    ALLOWED_ACTIONS = frozenset({"echo", "boom", "with_artifact", "describe"})
+    ALLOWED_ACTIONS = frozenset({"echo", "boom", "with_artifact", "describe", "whoami"})
 
     def echo(self, text):
         return {"echoed": text}
@@ -24,6 +24,12 @@ class FakeEchoService:
 
     def describe(self, path):
         return {"received_path": path}
+
+    def whoami(self, skill_name):
+        """Único método de este fake que declara `skill_name` — igual
+        que DownloadService.fetch() (ver kernel/services/services.py),
+        el único servicio real que hoy lo necesita."""
+        return {"skill_name": skill_name}
 
     def not_an_action(self):
         """Público y callable, pero deliberadamente fuera de ALLOWED_ACTIONS."""
@@ -111,3 +117,26 @@ def test_dispatch_raises_for_unknown_artifact_uri(bus):
 def test_dispatch_leaves_non_artifact_strings_untouched(bus):
     result = bus.dispatch("test.describe", {"path": "/ya/es/una/ruta/real.png"})
     assert result == {"received_path": "/ya/es/una/ruta/real.png"}
+
+
+# --- Inyección de skill_name (agregado para DownloadService, ver
+# kernel/services/services.py — el permiso de red es por-skill, el
+# único servicio que hoy necesita saber quién lo llama) ---
+
+
+def test_dispatch_injects_skill_name_into_actions_that_declare_it(bus):
+    result = bus.dispatch("test.whoami", {}, skill_name="download_via_kernel")
+    assert result == {"skill_name": "download_via_kernel"}
+
+
+def test_dispatch_does_not_inject_skill_name_into_actions_that_do_not_declare_it(bus):
+    """Regresión: image.generate/audio.synthesize/etc. no esperan
+    skill_name — pasarlo igual rompería con un TypeError si se
+    inyectara sin condición."""
+    result = bus.dispatch("test.echo", {"text": "hola"}, skill_name="cualquier_skill")
+    assert result == {"echoed": "hola"}
+
+
+def test_dispatch_without_skill_name_still_works_for_actions_that_do_not_need_it(bus):
+    result = bus.dispatch("test.echo", {"text": "hola"})
+    assert result == {"echoed": "hola"}

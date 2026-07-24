@@ -487,6 +487,23 @@ class AgentLoop:
         # resto de este mecanismo.
         artifact_paths_this_turn: dict[str, str] = {}
         self_checked_tools: set[str] = set()
+        # BUG REAL ENCONTRADO EN USO (2026-07-24, VS Code): "logo con un
+        # tomate y una hoja de albahaca" llamó a import_resource con una
+        # ruta ABSOLUTA (mal formada) — el primer intento falló
+        # (ProjectFilesRejectedError) sin proponer nada al usuario. El
+        # tope estricto de 1 llamada para herramientas de
+        # _VSCODE_ONLY_TOOL_NAMES (pensado para bloquear una SEGUNDA
+        # propuesta después de una YA exitosa, ver test de
+        # propose_project_files) bloqueó también ese segundo intento —
+        # la única chance real del modelo de corregir su propio error —
+        # y, sin poder reintentar, terminó llamando a una herramienta
+        # totalmente distinta y equivocada (qr_code) en vez de la
+        # correcta (image_generation). `succeeded_vscode_only_tools`
+        # distingue "ya propuso algo con éxito" (bloquear más llamadas)
+        # de "todavía no logró proponer nada" (dejar reintentar, hasta
+        # el tope general max_tool_repeats, igual que cualquier otra
+        # herramienta).
+        succeeded_vscode_only_tools: set[str] = set()
 
         for _ in range(max_steps):
             try:
@@ -574,18 +591,31 @@ class AgentLoop:
                 # Tope más estricto si esta herramienta ya se autochequeó
                 # con analyze_image en este turno (2: la original + un
                 # solo reintento), o si es una propuesta asincrónica tipo
-                # propose_project_files/import_resource (1: la revisión
-                # del usuario pasa FUERA de este turno, así que una
-                # segunda llamada nunca tiene información nueva que
-                # justifique una revisión — ver BUG REAL más abajo).
-                # Nunca más permisivo que max_tool_repeats.
+                # propose_project_files/import_resource (1 SOLA vez
+                # exitosa por turno — la revisión del usuario pasa FUERA
+                # de este turno, así que una segunda propuesta ya exitosa
+                # nunca tiene información nueva que la justifique; un
+                # intento que falló sin proponer nada todavía puede
+                # reintentarse, ver BUG REAL más abajo). Nunca más
+                # permisivo que max_tool_repeats.
                 if tool_call.name in self_checked_tools:
                     effective_limit = min(2, max_tool_repeats)
+                    over_limit = tool_call_counts[tool_call.name] > effective_limit
                 elif tool_call.name in _VSCODE_ONLY_TOOL_NAMES:
-                    effective_limit = min(1, max_tool_repeats)
+                    # Ver BUG REAL de arriba: el tope de 1 solo se aplica
+                    # una vez que la herramienta YA tuvo éxito — un
+                    # intento fallido (sin artefacto real propuesto) no
+                    # cuenta contra ese tope, pero sigue acotado por
+                    # max_tool_repeats como cualquier otra herramienta.
+                    effective_limit = max_tool_repeats
+                    over_limit = (
+                        tool_call.name in succeeded_vscode_only_tools
+                        or tool_call_counts[tool_call.name] > effective_limit
+                    )
                 else:
                     effective_limit = max_tool_repeats
-                if tool_call_counts[tool_call.name] > effective_limit:
+                    over_limit = tool_call_counts[tool_call.name] > effective_limit
+                if over_limit:
                     # Rechazado ANTES de ejecutar — cada llamada real a una
                     # herramienta de generación cuesta minutos de cómputo acá,
                     # no tiene sentido gastarlos en una repetición que ya
@@ -600,20 +630,27 @@ class AgentLoop:
                             "respetan cantidades exactas, reintentar más no lo garantiza."
                         )
                     elif tool_call.name in _VSCODE_ONLY_TOOL_NAMES:
-                        # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): el
-                        # modelo llamó a propose_project_files 3 veces en el
-                        # mismo turno (revisando su propio intento anterior,
-                        # sin ninguna señal real de que hiciera falta) — la
-                        # extensión mostraba solo UNA propuesta al usuario
-                        # (antes de otro fix, ni siquiera la última), así que
-                        # las llamadas de más eran cómputo puro perdido.
-                        observation = (
-                            f"ERROR: ya llamaste a '{tool_call.name}' en este turno — no la llames de nuevo. "
-                            "El usuario todavía no vio ni decidió sobre esa propuesta (su revisión ocurre "
-                            "DESPUÉS de tu respuesta, nunca en este mismo turno), así que no tenés ninguna "
-                            "información nueva que justifique proponer de nuevo. Da tu respuesta final ahora, "
-                            "describiendo lo que ya propusiste."
-                        )
+                        if tool_call.name in succeeded_vscode_only_tools:
+                            # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): el
+                            # modelo llamó a propose_project_files 3 veces en el
+                            # mismo turno (revisando su propio intento anterior,
+                            # sin ninguna señal real de que hiciera falta) — la
+                            # extensión mostraba solo UNA propuesta al usuario
+                            # (antes de otro fix, ni siquiera la última), así que
+                            # las llamadas de más eran cómputo puro perdido.
+                            observation = (
+                                f"ERROR: ya llamaste a '{tool_call.name}' en este turno — no la llames de nuevo. "
+                                "El usuario todavía no vio ni decidió sobre esa propuesta (su revisión ocurre "
+                                "DESPUÉS de tu respuesta, nunca en este mismo turno), así que no tenés ninguna "
+                                "información nueva que justifique proponer de nuevo. Da tu respuesta final ahora, "
+                                "describiendo lo que ya propusiste."
+                            )
+                        else:
+                            observation = (
+                                f"ERROR: ya intentaste '{tool_call.name}' {effective_limit} veces en este turno sin "
+                                "éxito — no lo intentes de nuevo. Si hay otra herramienta más apropiada para lo que "
+                                "el usuario pidió, usá esa en su lugar; si no, respondé explicando la limitación."
+                            )
                     else:
                         observation = (
                             f"ERROR: ya llamaste a '{tool_call.name}' {effective_limit} veces en este turno — "
@@ -626,6 +663,11 @@ class AgentLoop:
                     artifact = dispatched_tool.last_artifact if dispatched_tool is not None else None
                     if artifact is not None and artifact.uri:
                         artifact_paths_this_turn[artifact.uri] = tool_call.name
+                    if (
+                        tool_call.name in _VSCODE_ONLY_TOOL_NAMES
+                        and not observation.startswith("ERROR")
+                    ):
+                        succeeded_vscode_only_tools.add(tool_call.name)
                     if tool_call.name == "analyze_image":
                         origin_tool = artifact_paths_this_turn.get(tool_call.arguments.get("image_path"))
                         if origin_tool is not None:

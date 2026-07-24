@@ -7,6 +7,7 @@ skill aislada).
 """
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 
@@ -40,7 +41,7 @@ class KernelServiceBus:
     def register(self, name: str, service: Any) -> None:
         self._services[name] = service
 
-    def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(self, method: str, params: dict[str, Any], skill_name: str | None = None) -> dict[str, Any]:
         service_name, _, action_name = method.partition(".")
         service = self._services.get(service_name)
         if service is None:
@@ -65,6 +66,13 @@ class KernelServiceBus:
             raise ActionNotFoundError(f"acción desconocida: '{method}'")
 
         params = self._resolve_input_artifacts(params)
+        # Único caso hoy que necesita saber QUIÉN llama (DownloadService,
+        # el permiso de red es por-skill) — inyectado solo si la propia
+        # acción lo declara como parámetro, así ImageService/AudioService/
+        # STTService (que no lo esperan) siguen recibiendo exactamente lo
+        # mismo que siempre.
+        if skill_name is not None and "skill_name" in inspect.signature(action).parameters:
+            params = {**params, "skill_name": skill_name}
         result = action(**params)
 
         # "path" es un detalle de host — nunca cruza al otro lado del
@@ -106,12 +114,13 @@ class KernelServiceBus:
 
 
 def _build_default_bus() -> KernelServiceBus:
-    from kernel.services.services import AudioService, ImageService, STTService
+    from kernel.services.services import AudioService, DownloadService, ImageService, STTService
 
     bus = KernelServiceBus()
     bus.register("image", ImageService())
     bus.register("audio", AudioService())
     bus.register("stt", STTService())
+    bus.register("download", DownloadService())
     return bus
 
 

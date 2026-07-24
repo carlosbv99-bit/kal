@@ -5698,3 +5698,79 @@ no repetirla.
 incluido explícitamente el caso del prompt reformulado; 1 assertion
 nueva en `test_agent_loop.py` confirmando que `self_checked_tools`
 queda expuesto). Suite completa: 890 tests, 0 regresiones.
+
+## Bug real: un intento fallido de import_resource no podía corregirse (2026-07-24)
+
+Investigando el límite documentado del Capability Broker ("el modelo a
+veces elige la herramienta desbloqueada equivocada", ver la entrada de
+más arriba), tracé en `logs/agent.log` el pedido real que lo disparó:
+"generame un logo simple... con un tomate y una hoja de albahaca"
+(correlation_id `15a426ef9b47`). La causa NO era el modelo eligiendo
+mal por gusto — llamó primero a `import_resource` con una ruta de
+destino ABSOLUTA (`/tmp/tomato.jpg`, inválida — tiene que ser relativa
+al proyecto), que falló con `ProjectFilesRejectedError` sin proponer
+nada. El tope estructural de "1 sola llamada por turno" para
+herramientas VS-Code-only (`_VSCODE_ONLY_TOOL_NAMES` en
+`agent_core/llm/agent_loop.py`, pensado para bloquear una SEGUNDA
+propuesta después de una YA exitosa — ver el bug de
+`propose_project_files` de 2026-07-20) bloqueó también ese SEGUNDO
+intento, que era la única chance real del modelo de corregir su propio
+error de ruta. Sin poder reintentar, terminó llamando a `qr_code` —
+una herramienta totalmente ajena al pedido — en vez de la correcta
+(`image_generation`).
+
+**Fix**: nuevo `succeeded_vscode_only_tools: set[str]` — el tope
+estricto de 1 ahora se basa en "¿esta herramienta ya tuvo éxito antes
+en este turno?" (mirando si la observación NO empieza con `"ERROR"`),
+no en "¿ya se intentó?". Un intento que falló sin proponer nada puede
+reintentarse hasta `max_tool_repeats` general, igual que cualquier
+otra herramienta — una vez que SÍ tuvo éxito, el tope de 1 sigue
+aplicando exactamente como antes (regresión cubierta con test
+explícito). 2 tests nuevos en `test_agent_loop.py` (60 tests en ese
+archivo). Suite completa: 923 tests, 0 regresiones.
+
+## Kernel Download Service (2026-07-24)
+
+Propuesta del usuario de una sesión anterior: "ninguna Skill puede
+escribir en disco algo que provenga de Internet [sin pasar por una
+validación central]". Investigando el estado real del código,
+encontré que `tool_integration/download_manager.py::DownloadManager`
+YA es ese motor genérico (HTTPS-only, IP-safety anti-DNS-rebinding,
+tope de tamaño, escaneo ClamAV, validación de contenido real) — pero
+el hueco real seguía abierto: una Skill de terceros que declare
+`Permission.NETWORK` en su `skill.yaml` recibe `network_mode="bridge"`
+(`kernel/registry/sandboxed_skill.py`) — red cruda SIN ninguna de esas
+validaciones, pudiendo bajar cualquier cosa por su cuenta.
+
+**Diseño**: nuevo `DownloadService` en `kernel/services/services.py`
+(mismo molde que `ImageService`/`AudioService`/`STTService`), expuesto
+en el Kernel Service Bus como `download.fetch`. Reusa
+`download_manager` tal cual para la validación real; antes de
+descargar, gatea el dominio vía `network_access_manager.evaluate()`
+con el `skill_name` REAL de quien llama (auto-permitido por
+`downloads.allowed_domains`, o registra un pedido pendiente de
+aprobación humana y falla esa llamada puntual con un mensaje claro —
+misma naturaleza asincrónica que el resto del Access Manager). Es el
+PRIMER servicio del bus que necesita saber quién lo llama —
+`KernelServiceBus.dispatch()` gana un parámetro `skill_name` opcional
+que se inyecta SOLO en las acciones que lo declaran (vía
+`inspect.signature`), así `ImageService.generate()`/etc. no se ven
+afectados en absoluto.
+
+Nueva skill de referencia `skills/download_via_kernel/` (espejo directo
+de `skills/audio_via_kernel/`, `permissions: []` — sin
+`Permission.NETWORK`, que es exactamente el punto), firmada con
+`scripts/sign_skill.py`. Verificado de punta a punta con Docker real +
+ClamAV real + socket real (solo la conexión HTTP en sí queda inyectada,
+mismo criterio que `test_download_manager.py`, para no depender de
+Internet real en la suite): la skill, SIN ningún permiso de red,
+recibe igual el artefacto descargado.
+
+Deliberadamente fuera de alcance: no se tocó `ImportResourceTool` (su
+UX de aprobación + gate de filesystem es genuinamente distinta de lo
+que necesita una Skill); `Permission.NETWORK` sigue existiendo para
+casos que de verdad necesiten red cruda; ningún tipo de recurso nuevo
+más allá de "image". 8 tests nuevos (`test_download_service.py`,
+`test_kernel_bus.py`, `test_kernel_bus_socket_server.py`,
+`test_kernel_bus_download_service_integration.py`). Suite completa:
+932 tests, 0 regresiones.
