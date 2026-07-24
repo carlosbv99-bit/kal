@@ -18,6 +18,7 @@ from agent_core.conversation_engine import ConversationEngineResult
 from agent_core.llm.agent_loop import AgentRunResult, AgentStep
 from agent_core.llm.planner import Plan, PlanRunResult, PlanStep, PlanStepResult
 from agent_core.orchestrator import app
+from utils.config import settings
 
 client = TestClient(app)
 
@@ -68,6 +69,10 @@ def test_low_confidence_responds_immediately_without_running_the_agent(monkeypat
     assert body["plan"] == []
     assert body["steps"] == []
     assert fake_ce.calls == ["eh"]
+    # "Último modelo utilizado" (ver frontend/app.js): en el camino de
+    # aclaración, el que resolvió el turno es el del Conversation
+    # Engine, nunca el modelo principal.
+    assert body["model_used"] == settings.conversation_engine.model
 
 
 def test_high_confidence_runs_the_agent_normally(monkeypatch):
@@ -88,6 +93,26 @@ def test_high_confidence_runs_the_agent_normally(monkeypatch):
     body = response.json()
     assert body["final_answer"] == "Respuesta real del agente."
     assert body["status"] != "needs_clarification"
+    # Sin req.model explícito, el que de verdad resolvió el turno es
+    # settings.llm.default_model (misma resolución que OllamaClient.chat()).
+    assert body["model_used"] == settings.llm.default_model
+
+
+def test_model_used_reflects_an_explicit_model_override(monkeypatch):
+    fake_ce = _FakeConversationEngine(
+        ConversationEngineResult(
+            intent="saludo", confidence=0.95, required_capabilities=["conversation"], user_reply="listo"
+        )
+    )
+    monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
+    monkeypatch.setattr(
+        orchestrator_module.orchestrator, "planning_agent",
+        type("_", (), {"run": staticmethod(lambda *a, **kw: _scripted_planning_result())})(),
+    )
+
+    response = client.post("/chat", json={"goal": "hola", "model": "otro-modelo:1b"})
+
+    assert response.json()["model_used"] == "otro-modelo:1b"
 
 
 def test_conversation_engine_returning_none_falls_through_to_the_agent_normally(monkeypatch):
