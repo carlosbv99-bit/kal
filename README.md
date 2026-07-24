@@ -1,5 +1,7 @@
 # Kal
 
+🇬🇧 English | 🇪🇸 [Español](README.es.md)
+
 **A secure microkernel for intelligent capabilities.**
 
 Most AI assistants tightly couple their features to one specific model

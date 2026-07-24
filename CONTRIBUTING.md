@@ -1,5 +1,7 @@
 # Contributing a Skill
 
+🇬🇧 English | 🇪🇸 [Español](CONTRIBUTING.es.md)
+
 Kal's Skill Market ([browse it here](https://carlosbv99-bit.github.io/kal/))
 is this repository's `skills/` folder. Publishing a Skill means
 opening a pull request against it.
