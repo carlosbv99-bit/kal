@@ -113,6 +113,12 @@ def chat(req: ChatRequest):
             "status": "needs_clarification",
             "plan": [],
             "steps": [],
+            # El modelo que resolvió ESTE turno — acá, el del Conversation
+            # Engine (nunca el "cerebro" principal, ver
+            # utils/config.py::ConversationEngineConfig). Usado por el
+            # frontend para mostrar "Último modelo utilizado" (ver
+            # frontend/app.js).
+            "model_used": settings.conversation_engine.model,
         }
 
     try:
@@ -120,6 +126,12 @@ def chat(req: ChatRequest):
             req.goal, model=req.model, use_planner=use_planner,
             history=context_bundle.history, session_context=context_bundle.session_context,
             denied_permissions=session.denied_permissions, client=req.client,
+            # Ver agent_core/capability_broker.py: desbloquea SOLO las
+            # herramientas multimedia que este pedido puntual necesita
+            # (p.ej. una página web en VS Code que además pide una
+            # imagen) — None si el clasificador falló/está deshabilitado,
+            # preservando el comportamiento actual sin cambios.
+            required_capabilities=ce_result.required_capabilities if ce_result is not None else None,
         )
     except ProviderError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -130,7 +142,41 @@ def chat(req: ChatRequest):
         if step.artifact is not None and step.artifact.modality != "text":
             orchestrator.sessions.update_active_artifact(session, step.artifact)
 
-    def _step_artifact(step) -> dict | None:
+    # BUG REAL ENCONTRADO EN USO (2026-07-24): el autochequeo de
+    # image_generation (generar -> analyze_image -> regenerar UNA vez si
+    # hace falta, ver agent_loop.py::self_checked_tools) llama a la
+    # MISMA herramienta dos veces en un turno — el frontend mostraba las
+    # DOS imágenes como si fueran dos resultados distintos, en vez de la
+    # segunda (post-autochequeo) reemplazando a la primera. Deliberado
+    # usar `self_checked_tools` (ver agent_core/llm/agent_loop.py) en vez
+    # de comparar argumentos idénticos: el modelo a veces REFORMULA el
+    # prompt al regenerar (confirmado en vivo — "un globo aerostático en
+    # el cielo azul" pasó a "...con una silueta de tierra y líneas
+    # costeras" en el reintento), así que dos llamadas con argumentos
+    # DISTINTOS también deben colapsarse si esa herramienta está
+    # marcada como autochequeada este turno. Nunca afecta a una
+    # herramienta que NO se autochequeó — dos imágenes de verdad
+    # distintas pedidas en el mismo turno siguen mostrándose ambas.
+    all_self_checked_tools: set[str] = set()
+    for step_result in result.step_results:
+        all_self_checked_tools |= set(step_result.result.self_checked_tools)
+
+    _last_index_for_self_checked_tool: dict[str, int] = {}
+    for i, step in enumerate(all_steps):
+        if step.tool_name in all_self_checked_tools and step.artifact is not None and step.artifact.modality == "image":
+            _last_index_for_self_checked_tool[step.tool_name] = i
+    superseded_step_indices = {
+        i
+        for i, step in enumerate(all_steps)
+        if step.tool_name in all_self_checked_tools
+        and step.artifact is not None
+        and step.artifact.modality == "image"
+        and _last_index_for_self_checked_tool[step.tool_name] != i
+    }
+
+    def _step_artifact(step, index: int) -> dict | None:
+        if index in superseded_step_indices:
+            return None
         if step.artifact is None:
             return None
         if step.artifact.modality == "project_files":
@@ -169,12 +215,17 @@ def chat(req: ChatRequest):
         "final_answer": result.final_answer,
         "status": result.status,
         "plan": [s.description for s in result.plan.steps],
+        # El modelo que de verdad resolvió este turno — misma resolución
+        # que ya hace OllamaClient.chat() internamente (model or
+        # settings.llm.default_model), expuesta acá para que el frontend
+        # pueda mostrar "Último modelo utilizado" (ver frontend/app.js).
+        "model_used": req.model or settings.llm.default_model,
         "steps": [
             {
                 "tool": s.tool_name, "arguments": s.arguments, "observation": s.observation,
-                "artifact": _step_artifact(s),
+                "artifact": _step_artifact(s, i),
             }
-            for s in all_steps
+            for i, s in enumerate(all_steps)
         ],
     }
 

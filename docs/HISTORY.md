@@ -5540,3 +5540,161 @@ Conversation Engine para interceptar estos casos antes de llegar al
 pipeline principal.
 
 Suite completa: 876 tests pasando (3 nuevos), 0 regresiones.
+
+## Capability Broker: desbloqueo dinámico de multimedia en VS Code (2026-07-24)
+
+El paso 4 del roadmap (Capability Broker) parecía sin caso real
+todavía — LLM/audio/imagen siguen siendo un proveedor configurado a la
+vez, no varios compitiendo. Pero el usuario señaló un escenario
+concreto: armando una página web en VS Code, a veces hace falta
+ADEMÁS generar/importar una imagen o un sonido — y eso estaba
+bloqueado de raíz: `_MULTIMEDIA_TOOL_NAMES` excluye TODA herramienta
+multimedia para `client="vscode"` sin excepción (fix deliberado de un
+bug real anterior: "creá la página web para una panadería" generó
+fotos en vez de código), un martillo demasiado grande que también
+bloqueaba los casos legítimos.
+
+Primer consumidor real de `required_capabilities` (el Conversation
+Engine ya lo calculaba desde su integración, sin ningún consumidor).
+Nuevo `agent_core/capability_broker.py`: mapeo capacidad → nombres de
+herramientas reales (construido contra el inventario real de las 21
+herramientas registradas hoy, no aspiracional). En
+`agent_loop.py::_build_tools_from_registry()`, `required_capabilities`
+desbloquea SOLO lo que se necesita: `excluded - (capability_broker.
+tool_names_for(required_capabilities) & _MULTIMEDIA_TOOL_NAMES)`. La
+intersección con `_MULTIMEDIA_TOOL_NAMES` es la barrera de seguridad
+clave — para `client="web"` (`excluded == _VSCODE_ONLY_TOOL_NAMES`,
+disjunto de `_MULTIMEDIA_TOOL_NAMES` por construcción), la
+intersección siempre da vacío: `required_capabilities=["coding"]` en
+la web NUNCA desbloquea `propose_project_files`/`read_workspace_file`
+(imposible estructuralmente para ese cliente, no una cuestión de
+capacidad) — sin necesitar comparar `client` de nuevo en este archivo.
+`required_capabilities: list[str] | None = None` se agregó a la MISMA
+cadena que ya lleva `client`
+(`_build_tools_from_registry`→`_current_tools`→`AgentLoop.run()`→
+`PlanningAgentLoop.run()`→`chat.py`, donde `ce_result` ya estaba en
+scope justo antes de `planning_agent.run(...)`).
+
+**Bug real encontrado en la verificación en vivo, corregido de
+inmediato**: con el desbloqueo ya funcionando (confirmado
+directamente: `image_generation` SÍ aparecía en el toolset), un pedido
+real de VS Code que necesitaba código + un logo respondió igual "no
+puedo generar imágenes directamente ahora" — la instrucción vieja en
+`_VSCODE_CLIENT_INSTRUCTION` afirmaba como HECHO FIJO que la
+herramienta "no está disponible en ESTE modo", sin condicionarlo a si
+el Capability Broker la desbloqueó para ese turno puntual. Corregido:
+la instrucción ahora le pide al modelo revisar su lista REAL de
+herramientas disponibles antes de asumir que está bloqueada. 1 test
+nuevo en `test_context_service.py`.
+
+Verificado en vivo: el mismo tipo de pedido ya no repite la falsa
+incapacidad; un pedido más concreto ("logo con un tomate y una hoja de
+albahaca") sí usó herramientas antes bloqueadas (`import_resource`,
+`qr_code`) en vez de negarse de entrada — aunque la elección final de
+CUÁL herramienta usar para ese logo específico no fue ideal (llamó
+`qr_code` en vez de `image_generation`), un problema de juicio del
+modelo al elegir entre varias opciones ya disponibles, no del
+mecanismo de desbloqueo en sí (que se confirmó funcionando por separado
+con una llamada directa a `_build_tools_from_registry`).
+
+Suite completa: 886 tests pasando (10 nuevos: 6 en
+`test_capability_broker.py`, 3 en `test_agent_loop.py`, 1 en
+`test_context_service.py`), 0 regresiones. Fuera de alcance,
+documentado como pendiente: elegir entre VARIOS proveedores reales
+compitiendo por una capacidad (sigue sin existir ese caso), y un
+Capability Registry consultable como componente separado (el mapeo
+vive como constante interna por ahora).
+
+## "Último modelo utilizado" en la web (2026-07-24)
+
+De paso, el usuario cambió `llm.default_model` a `qwen2.5:3b` (el
+modelo del Conversation Engine) pensando que así lo convertía en el
+"modelo conversacional principal" — aclarado que el Conversation
+Engine ya usa su propio modelo por separado
+(`conversation_engine.model`, independiente de `llm.default_model`
+desde su integración), así que tocar `llm.default_model` en realidad
+afecta el modelo que hace el TRABAJO REAL (Planner/AgentLoop: código,
+herramientas), no solo la conversación. Revertido a
+`qwen2.5-coder:14b` a pedido del usuario.
+
+Como consecuencia directa de esa aclaración, el usuario pidió que el
+selector de modelo de la interfaz web muestre automáticamente cuál
+modelo resolvió el ÚLTIMO turno — útil justamente porque, con el
+Conversation Engine de por medio, eso puede variar turno a turno (una
+aclaración rápida la resuelve el modelo chico, un pedido real lo
+resuelve el modelo principal). Alcance acordado explícitamente: NO en
+vivo/streaming durante el procesamiento (requeriría websockets, cambio
+grande), sino reflejado DESPUÉS de cada respuesta.
+
+`agent_core/routers/chat.py`: nuevo campo `model_used` en la respuesta
+de `/chat`, en ambos caminos — `settings.conversation_engine.model`
+si la respondió el Conversation Engine (aclaración temprana), o
+`req.model or settings.llm.default_model` si corrió el pipeline
+completo (misma resolución que ya hace `OllamaClient.chat()`
+internamente). `frontend/`: el `<select id="model-select">` ahora
+vive envuelto en `.model-select-wrap` con un `<span
+class="model-select-label">` chico arriba ("Último modelo
+utilizado") — el select en sí no cambió de tamaño. Nueva función
+`reflectLastModelUsed(modelUsed)` en `app.js`, llamada después de
+cada respuesta de `/chat`: busca `modelUsed` entre las opciones ya
+cargadas y la marca como seleccionada (sin disparar el listener de
+"change", que persistiría un cambio de configuración real — esto solo
+refleja visualmente qué se usó).
+
+4 tests nuevos en `test_orchestrator_chat_conversation_engine.py`
+(`model_used` en el camino de aclaración, en el normal, y con un
+`model` explícito en el pedido). Suite completa: 887 tests, 0
+regresiones. Verificado en vivo: `/chat` devuelve `model_used`
+correctamente en ambos caminos.
+
+## Dos hallazgos reales probando "Último modelo utilizado" en vivo (2026-07-24)
+
+Probando la feature de arriba con "crea un globo aerostático", el
+usuario reportó dos cosas: (1) el selector no mostraba "llava:13b"
+como el modelo que "hizo el trabajo", y (2) le llegaron dos imágenes
+distintas.
+
+**(1) Confusión real, aclarada — no era un bug**: `llava:13b` es un
+modelo de VISIÓN (analiza/describe imágenes ya existentes, usado por
+`analyze_image`), nunca genera imágenes nuevas. La generación real
+pasa siempre por SDXL-Turbo (`stabilityai/sdxl-turbo`), un modelo de
+difusión de Hugging Face sin relación con Ollama/llava. `model_used`
+refleja el modelo de RAZONAMIENTO/tool-calling (hoy
+`qwen2.5-coder:14b`), nunca el backend especializado que ejecuta cada
+herramienta puntual (SDXL para imagen, llava para visión, piper/
+whisper para audio) — el usuario esperaba lo segundo, el diseño actual
+da lo primero.
+
+**(2) Bug real, confirmado y corregido**: el log mostró
+`"Generando imagen"` DOS veces para el mismo `correlation_id` — el
+mecanismo de autochequeo ya conocido (generar → `analyze_image` →
+regenerar UNA vez si hace falta, ver
+`agent_loop.py::self_checked_tools`) hizo exactamente lo que estaba
+diseñado a hacer, pero el frontend mostraba las DOS imágenes (la
+original y la regenerada) como si fueran resultados distintos, en vez
+de la segunda reemplazando a la primera.
+
+Primer intento de fix: deduplicar por "misma herramienta + mismos
+argumentos". Insuficiente — confirmado en vivo que el modelo a veces
+REFORMULA el prompt al regenerar ("un globo aerostático en el cielo
+azul" pasó a "...con una silueta de tierra y líneas costeras" en el
+reintento), así que comparar argumentos idénticos no detecta ese caso
+real.
+
+**Fix definitivo**: `AgentRunResult` (agent_core/llm/agent_loop.py)
+gana un campo nuevo, `self_checked_tools: frozenset[str]` — expone
+hacia afuera lo que antes era puramente local a `run()` (agregado en
+los 3 `return` del loop). `agent_core/routers/chat.py` deduplica por
+"esta herramienta está marcada como autochequeada este turno" en vez
+de por argumentos — así colapsa CUALQUIER regeneración de una
+herramienta autochequeada (sin importar si el prompt cambió), pero
+nunca toca una herramienta que NO se autochequeó (dos imágenes de
+verdad distintas pedidas en el mismo turno se siguen mostrando ambas).
+Los pasos intermedios se siguen viendo en el log colapsado de pasos
+(tool/argumentos/observación), solo se suprime la imagen adjunta para
+no repetirla.
+
+4 tests (3 en `test_orchestrator_chat_repeated_image_generation.py`,
+incluido explícitamente el caso del prompt reformulado; 1 assertion
+nueva en `test_agent_loop.py` confirmando que `self_checked_tools`
+queda expuesto). Suite completa: 890 tests, 0 regresiones.

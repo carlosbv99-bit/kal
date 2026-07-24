@@ -258,6 +258,28 @@ button, input, textarea, select {
   display: none;
 }
 
+.model-select-wrap {
+  /* Envuelve el <select> para agregarle un título chico arriba sin
+     tocar su tamaño — .model-select sigue siendo 40px fijo, este
+     wrapper solo agrega el label como una línea extra encima. */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-select-label {
+  /* Un punto menos que .pending-indicator (11.5px) — es solo un
+     título aclaratorio, nunca debe competir visualmente con el
+     selector real. */
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 170px;
+}
+
 .model-select {
   height: 40px; /* fijo: con align-items: flex-end ya no lo estira el flex */
   background: transparent;

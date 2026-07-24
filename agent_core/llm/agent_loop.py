@@ -42,7 +42,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
 
-from agent_core.client_provider import _VSCODE_ONLY_TOOL_NAMES, get_client_provider
+from agent_core.capability_broker import capability_broker
+from agent_core.client_provider import _MULTIMEDIA_TOOL_NAMES, _VSCODE_ONLY_TOOL_NAMES, get_client_provider
 from agent_core.llm.json_extraction import extract_json_array, extract_json_object
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.provider import LLMProvider, ProviderError, ToolCall
@@ -104,6 +105,14 @@ class AgentRunResult:
     final_answer: str
     steps: list[AgentStep] = field(default_factory=list)
     status: str = "success"  # success | max_steps_exceeded | llm_error
+    # Nombres de herramientas que se autochequearon con analyze_image en
+    # este turno (ver el comentario de self_checked_tools más abajo en
+    # run()) — agent_core/routers/chat.py lo usa para saber qué llamadas
+    # repetidas a la MISMA herramienta son en realidad una regeneración
+    # que reemplaza al intento anterior (no dos resultados distintos),
+    # incluso si el prompt de la regeneración quedó reformulado distinto
+    # al original.
+    self_checked_tools: frozenset[str] = frozenset()
 
 
 SYSTEM_PROMPT = """Eres kal, un agente de IA que ejecuta tareas usando herramientas reales, \
@@ -287,12 +296,16 @@ class AgentLoop:
             {tool.name: tool for tool in tools} if tools is not None else None
         )
 
-    def _current_tools(self, client: str | None = None) -> dict[str, AgentTool]:
+    def _current_tools(
+        self, client: str | None = None, required_capabilities: list[str] | None = None
+    ) -> dict[str, AgentTool]:
         if self._explicit_tools is not None:
             return self._explicit_tools
-        return self._build_tools_from_registry(client)
+        return self._build_tools_from_registry(client, required_capabilities)
 
-    def _build_tools_from_registry(self, client: str | None = None) -> dict[str, AgentTool]:
+    def _build_tools_from_registry(
+        self, client: str | None = None, required_capabilities: list[str] | None = None
+    ) -> dict[str, AgentTool]:
         instance_tools: dict[str, Tool] = {
             "run_code": CodeExecutionTool(self.task_executor),
             "remember": MemoryRememberTool(self.memory),
@@ -300,6 +313,17 @@ class AgentLoop:
         }
         merged: dict[str, Tool] = {**self.tool_registry.active_tools(), **instance_tools}
         excluded = get_client_provider(client).excluded_tool_names()
+        if required_capabilities:
+            # Ver agent_core/capability_broker.py: SOLO desbloquea
+            # herramientas normalmente excluidas por _MULTIMEDIA_TOOL_NAMES
+            # (client="vscode"). La intersección es la barrera de
+            # seguridad clave — para client="web", `excluded` es
+            # _VSCODE_ONLY_TOOL_NAMES (disjunto de _MULTIMEDIA_TOOL_NAMES
+            # por construcción), así que esto nunca desbloquea
+            # propose_project_files/read_workspace_file ahí, sin
+            # necesidad de comparar `client` de nuevo acá.
+            unlocked = capability_broker.tool_names_for(required_capabilities) & _MULTIMEDIA_TOOL_NAMES
+            excluded = excluded - unlocked
         merged = {name: tool for name, tool in merged.items() if name not in excluded}
         return {name: _agent_tool_from_tool(name, tool) for name, tool in merged.items()}
 
@@ -383,6 +407,7 @@ class AgentLoop:
         session_context: dict | None = None,
         denied_permissions: frozenset[Permission] = frozenset(),
         client: str | None = None,
+        required_capabilities: list[str] | None = None,
     ) -> AgentRunResult:
         """
         `history` (turnos previos de la misma sesión, ver
@@ -412,10 +437,19 @@ class AgentLoop:
         ESTRUCTURAL (el modelo ni siquiera ve estas herramientas en la
         lista disponible), no una instrucción de prompt. Ya se probó en
         vivo que pedirle por prompt que no las llame no alcanza.
+        `required_capabilities`: lista calculada por el Conversation
+        Engine para ESTE turno puntual (ver agent_core/
+        conversation_engine.py::ConversationEngineResult) — desbloquea,
+        vía agent_core/capability_broker.py, SOLO las herramientas
+        multimedia que este pedido puntual señaló como necesarias
+        (p.ej. una página web en VS Code que además necesita generar
+        una imagen). None/vacío (Conversation Engine deshabilitado o
+        sin señal) preserva el comportamiento actual sin cambios — la
+        restricción por `client` sigue siendo la misma de siempre.
         """
         max_steps = max_steps or settings.llm.max_agent_steps
         max_tool_repeats = max_tool_repeats or settings.llm.max_tool_repeats
-        tools = self._current_tools(client)
+        tools = self._current_tools(client, required_capabilities)
         # BUG REAL ENCONTRADO EN USO: session_context como un SEGUNDO
         # mensaje role="system" separado (en vez de fundido en el
         # primero) hacía que qwen3-coder:30b lo ignorara por completo —
@@ -459,7 +493,10 @@ class AgentLoop:
                 response = self.llm.chat(messages, model=model, tools=tool_schemas)
             except ProviderError as e:
                 logger.error(f"Error llamando al proveedor de LLM: {e}")
-                return AgentRunResult(goal=goal, final_answer=str(e), steps=steps, status="llm_error")
+                return AgentRunResult(
+                    goal=goal, final_answer=str(e), steps=steps, status="llm_error",
+                    self_checked_tools=frozenset(self_checked_tools),
+                )
 
             effective_tool_calls = list(response.tool_calls)
             if not effective_tool_calls:
@@ -488,7 +525,10 @@ class AgentLoop:
                         }
                     )
                     continue
-                return AgentRunResult(goal=goal, final_answer=response.content, steps=steps, status="success")
+                return AgentRunResult(
+                    goal=goal, final_answer=response.content, steps=steps, status="success",
+                    self_checked_tools=frozenset(self_checked_tools),
+                )
 
             # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
             # ESTRICTO, a diferencia de Ollama que es tolerante) exige un
@@ -604,6 +644,7 @@ class AgentLoop:
             final_answer="No llegué a una respuesta final dentro del límite de pasos permitido.",
             steps=steps,
             status="max_steps_exceeded",
+            self_checked_tools=frozenset(self_checked_tools),
         )
 
     def _dispatch_tool(

@@ -193,6 +193,23 @@ async function loadModels() {
   }
 }
 
+// "Último modelo utilizado" (pedido explícito del usuario, 2026-07-24):
+// con el Conversation Engine de por medio, el modelo que de verdad
+// resolvió el ÚLTIMO turno puede ser distinto del configurado como
+// default_model (p.ej. una aclaración rápida la resuelve el modelo
+// chico del Conversation Engine, no el principal) — /chat ahora manda
+// `model_used` (ver agent_core/routers/chat.py) reflejando eso. Solo
+// actualiza la SELECCIÓN visible, nunca dispara el listener de
+// "change" de abajo (no persiste ningún cambio de configuración real).
+function reflectLastModelUsed(modelUsed) {
+  if (!modelUsed) return;
+  const select = document.getElementById("model-select");
+  const match = Array.from(select.options).find((opt) => opt.value === modelUsed);
+  if (match) {
+    match.selected = true;
+  }
+}
+
 document.getElementById("model-select").addEventListener("change", async (ev) => {
   const source = ev.target.selectedOptions[0]?.dataset.source;
   const modelName = ev.target.value;
@@ -372,6 +389,7 @@ chatForm.addEventListener("submit", async (ev) => {
     sessionId = result.session_id;
     hidePending();
     appendAgentResult(result);
+    reflectLastModelUsed(result.model_used);
   } catch (e) {
     hidePending();
     if (e.name === "AbortError") {

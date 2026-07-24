@@ -518,6 +518,10 @@ def test_self_check_via_analyze_image_lowers_the_repeat_limit_to_one_retry():
     assert "ERROR" in result.steps[-1].observation
     assert "image_generation" in result.steps[-1].observation
     assert result.status == "success"
+    # agent_core/routers/chat.py usa esto para deduplicar la imagen
+    # ANTERIOR al reintento (ver test_orchestrator_chat_repeated_image_generation.py) —
+    # tiene que quedar expuesto en el resultado, no solo local a run().
+    assert "image_generation" in result.self_checked_tools
 
 
 def test_analyze_image_on_an_unrelated_path_does_not_tighten_the_limit():
@@ -762,6 +766,53 @@ def test_vscode_client_gets_the_read_workspace_file_tool():
 
     tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
     assert "read_workspace_file" in tool_names_sent
+
+
+# --- Capability Broker: desbloqueo dinámico de multimedia en VS Code ---
+#
+# Ver agent_core/capability_broker.py — pedido explícito del usuario
+# (2026-07-24): una tarea de código en VS Code a veces necesita ADEMÁS
+# una capacidad multimedia puntual (p.ej. generar una imagen para el
+# proyecto). required_capabilities (calculado por el Conversation
+# Engine) desbloquea SOLO lo que ese turno señaló como necesario.
+
+
+def test_vscode_client_without_required_capabilities_still_blocks_multimedia():
+    """Sin required_capabilities, el comportamiento es EXACTAMENTE el de siempre."""
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola", client="vscode")
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "image_generation" not in tool_names_sent
+
+
+def test_vscode_client_with_required_capabilities_unlocks_the_matching_multimedia_tool():
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hacé la web y generame un logo", client="vscode", required_capabilities=["coding", "image-generation"])
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "image_generation" in tool_names_sent
+    # No desbloquea OTRAS capacidades multimedia que no se pidieron.
+    assert "audio_generation" not in tool_names_sent
+
+
+def test_web_client_never_gets_vscode_only_tools_even_with_coding_capability():
+    """
+    Barrera de seguridad clave: required_capabilities=["coding"] mapea
+    también a propose_project_files/read_workspace_file (VS-Code-only),
+    pero para client="web" NUNCA deben desbloquearse — son
+    estructuralmente imposibles para ese cliente (no hay workspace
+    real), no una cuestión de capacidad declarada.
+    """
+    loop, fake_llm = _loop([ChatResponse(content="listo")], tools=None)
+
+    loop.run("hola", required_capabilities=["coding"])
+
+    tool_names_sent = {s["function"]["name"] for s in fake_llm.calls[0]["tools"]}
+    assert "propose_project_files" not in tool_names_sent
+    assert "read_workspace_file" not in tool_names_sent
 
 
 def test_a_raw_json_array_of_files_is_detected_as_a_propose_project_files_call():

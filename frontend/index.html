@@ -39,7 +39,7 @@
   <section class="chat-panel">
     <div class="chat-scroll" id="chat-scroll">
       <div class="chat-empty" id="chat-empty">
-        <p>Decile a kal qué necesitás. Cada acción real (código, memoria, generación de contenido) queda auditada — mirá el panel de la derecha mientras trabaja.</p>
+        <p>Dile a kal qué necesitas. Cada acción real (código, memoria, generación de contenido) queda auditada — mira el panel de la derecha mientras trabaja.</p>
       </div>
     </div>
 
@@ -50,7 +50,10 @@
     </div>
 
     <form class="chat-input-row" id="chat-form">
-      <select id="model-select" class="model-select" title="Modelo"></select>
+      <div class="model-select-wrap">
+        <span class="model-select-label">Último modelo utilizado</span>
+        <select id="model-select" class="model-select" title="Modelo"></select>
+      </div>
       <label class="upload-btn" title="Subir una imagen propia">
         📎<input type="file" id="image-upload-input" accept="image/png,image/jpeg,image/webp" hidden />
       </label>
