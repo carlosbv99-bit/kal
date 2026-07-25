@@ -118,6 +118,51 @@ def test_a_failed_tool_call_attempt_is_never_shown_as_the_final_answer():
     assert "ERROR" in second_call_messages[-1]["content"]
 
 
+def test_a_malformed_pseudo_tool_call_with_a_real_tool_name_is_never_shown_as_the_final_answer():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-25): "el tiburón en esta imagen
+    tiene dos colas y no tiene cabeza, corregilo" hizo que el modelo
+    devolviera prosa + un bloque ```json``` con "name": "image_editing"
+    (una herramienta REAL) pero JSON de verdad inválido — un comentario
+    "//" estilo JS y un placeholder [x1, y1, x2, y2] sin comillas en vez
+    de números reales. Ni _extract_fallback_tool_call (JSON no parsea)
+    ni la versión angosta previa de _looks_like_a_failed_tool_call_attempt
+    (requiere que el JSON SÍ parsee para mirar "name") detectaban esto
+    — el texto crudo (prosa + JSON roto) se mostraba tal cual como si
+    fuera la respuesta final real, sin ejecutar nada.
+    """
+    image_editing_tool = AgentTool(
+        name="image_editing", description="d", parameters_schema={"type": "object", "properties": {}},
+        handler=lambda **kw: "editado",
+    )
+    malformed = (
+        "Entiendo. Para corregir la imagen, usaré la herramienta correspondiente.\n\n"
+        "```json\n"
+        "{\n"
+        '  "name": "image_editing",\n'
+        '  "arguments": {\n'
+        '    "image_path": "data/artifacts/uploads/x.png",\n'
+        '    "operation": "inpaint",\n'
+        "    \"box\": [x1, y1, x2, y2],  // Estos valores deben ser estimados a ciegas.\n"
+        '    "prompt": "agregar una cabeza de tiburón"\n'
+        "  }\n"
+        "}\n"
+        "```"
+    )
+    responses = [
+        ChatResponse(content=malformed),
+        ChatResponse(content="No tengo forma de estimar las coordenadas exactas — ¿podés indicarme la posición del tiburón?"),
+    ]
+    loop, fake_llm = _loop(responses, tools=[image_editing_tool])
+
+    result = loop.run("el tiburón en esta imagen tiene dos colas y no tiene cabeza, corregilo")
+
+    assert result.status == "success"
+    assert result.final_answer == "No tengo forma de estimar las coordenadas exactas — ¿podés indicarme la posición del tiburón?"
+    assert len(fake_llm.calls) == 2
+    assert "ERROR" in fake_llm.calls[1]["messages"][-1]["content"]
+
+
 def test_a_normal_plain_text_answer_is_not_mistaken_for_a_failed_tool_call():
     loop, fake_llm = _loop([ChatResponse(content="La respuesta es 4.")])
 
@@ -547,6 +592,44 @@ def test_self_check_via_analyze_image_lowers_the_repeat_limit_to_one_retry():
     # ANTERIOR al reintento (ver test_orchestrator_chat_repeated_image_generation.py) —
     # tiene que quedar expuesto en el resultado, no solo local a run().
     assert "image_generation" in result.self_checked_tools
+
+
+def test_ignoring_the_self_check_rejection_twice_cuts_the_turn_short_instead_of_exhausting_steps():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-25): "crea una calle concurrida
+    de moscú" — a diferencia del test de arriba (donde el modelo, tras
+    UN rechazo, respondió en texto por su cuenta), acá el modelo
+    insistió con 'image_generation' una y otra vez pese al rechazo
+    explícito, hasta agotar max_steps SIN darle nunca una respuesta al
+    usuario — ni siquiera mencionar que la imagen YA estaba generada.
+    Fix: si el modelo ignora el rechazo una SEGUNDA vez (insiste con la
+    MISMA herramienta ya tapada), se corta el turno con una respuesta
+    sintetizada en vez de seguir gastando pasos reales de cómputo.
+    """
+    gen_calls: list = []
+    analyze_calls: list = []
+    tools = [_generative_tool("image_generation", gen_calls), _analyze_image_tool(analyze_calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una calle"})]),
+        ChatResponse(
+            content="",
+            tool_calls=[ToolCall(name="analyze_image", arguments={"image_path": "data/artifacts/images/1.png", "question": "¿es correcta?"})],
+        ),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una calle, de nuevo"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una calle, tercera vez"})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={"prompt": "una calle, cuarta vez"})]),
+    ]
+    loop, _ = _loop(responses, tools=tools)
+
+    result = loop.run("crea una calle concurrida", max_steps=10, max_tool_repeats=5)
+
+    # Nunca se llegó a la 4ta respuesta guionada (el 5to elemento de
+    # `responses` de arriba ni existe) — el loop cortó ANTES, en el
+    # segundo rechazo, no agotó max_steps=10.
+    assert len(gen_calls) == 2  # la original + el único reintento permitido
+    assert result.status == "success"  # nunca "max_steps_exceeded"
+    assert "image_generation" in result.final_answer
+    assert "arriba" in result.final_answer  # le avisa que el resultado real ya está visible
 
 
 def test_analyze_image_on_an_unrelated_path_does_not_tighten_the_limit():
