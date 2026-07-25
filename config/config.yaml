@@ -205,6 +205,7 @@ conversation_engine:
   base_url: "http://localhost:11434"    # SIEMPRE local, nunca el proveedor en la nube de llm.*
   model: "qwen2.5:3b"                   # necesita `ollama pull qwen2.5:3b` (no se auto-descarga)
   confidence_threshold: 0.5
+  temperature: 0.1                      # bajo a propósito: es una clasificación, no charla creativa
 
 sandbox:
   network_mode: none

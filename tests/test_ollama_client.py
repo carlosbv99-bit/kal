@@ -92,6 +92,35 @@ def test_chat_omits_format_from_payload_by_default():
     assert "format" not in captured["payload"]
 
 
+def test_chat_sends_temperature_in_payload_options_when_given():
+    # BUG REAL ENCONTRADO EN USO (2026-07-25): agent_core/
+    # conversation_engine.py necesita esto para que su clasificación sea
+    # consistente entre llamadas — ver ConversationEngineConfig.temperature.
+    captured = {}
+
+    def post_fn(url, json=None, **kw):
+        captured["payload"] = json
+        return FakeResponse({"message": {"content": "{}"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}], temperature=0.1)
+
+    assert captured["payload"]["options"] == {"temperature": 0.1}
+
+
+def test_chat_omits_options_from_payload_by_default():
+    captured = {}
+
+    def post_fn(url, json=None, **kw):
+        captured["payload"] = json
+        return FakeResponse({"message": {"content": "hola"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert "options" not in captured["payload"]
+
+
 def test_chat_parses_tool_call_id_when_present():
     # BUG REAL ENCONTRADO EN USO: Groq (a diferencia de Ollama) valida
     # ESTRICTO el formato OpenAI y exige un 'id' por tool_call para

@@ -258,6 +258,14 @@ class ConversationEngineConfig(BaseModel):
     # Por debajo de esto, se trata la respuesta como "necesita
     # aclaración" y NUNCA se corre el agente completo.
     confidence_threshold: float = 0.5
+    # BUG REAL ENCONTRADO EN USO (2026-07-25): sin fijar esto, Ollama usaba
+    # su temperature default (alto) para una tarea de CLASIFICACIÓN
+    # estructurada — el mismo pedido exacto ("crea una naranja") devolvía
+    # confidence=0.9 en una llamada y <0.5 en la siguiente, cruzando
+    # confidence_threshold de forma no determinística ("a veces genera,
+    # a veces no" para pedidos idénticos). Bajo pero no cero: deja algo
+    # de margen sin la variabilidad alta que rompía la consistencia.
+    temperature: float = 0.1
 
 
 class SandboxConfig(BaseModel):

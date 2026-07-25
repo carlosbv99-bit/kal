@@ -26,8 +26,10 @@ class _FakeLLMClient:
         self._raises = raises
         self.calls: list[dict] = []
 
-    def chat(self, messages, model=None, response_format=None):
-        self.calls.append({"messages": messages, "model": model, "response_format": response_format})
+    def chat(self, messages, model=None, response_format=None, temperature=None):
+        self.calls.append({
+            "messages": messages, "model": model, "response_format": response_format, "temperature": temperature,
+        })
         if self._raises is not None:
             raise self._raises
         return _FakeChatResponse(content=self._content)
@@ -35,7 +37,7 @@ class _FakeLLMClient:
 
 def _engine(content: str | None = None, raises: Exception | None = None, enabled: bool = True) -> tuple[ConversationEngine, _FakeLLMClient]:
     fake_llm = _FakeLLMClient(content=content, raises=raises)
-    cfg = ConversationEngineConfig(enabled=enabled, model="qwen2.5:3b", confidence_threshold=0.5)
+    cfg = ConversationEngineConfig(enabled=enabled, model="qwen2.5:3b", confidence_threshold=0.5, temperature=0.1)
     return ConversationEngine(llm_client=fake_llm, cfg=cfg), fake_llm
 
 
@@ -59,6 +61,22 @@ def test_classify_calls_the_llm_with_the_configured_model_and_json_format():
 
     assert fake_llm.calls[0]["model"] == "qwen2.5:3b"
     assert fake_llm.calls[0]["response_format"] == "json"
+
+
+def test_classify_uses_the_configured_low_temperature():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-25): sin fijar temperature, el
+    mismo pedido exacto ("crea una naranja") devolvía confidence=0.9 en
+    una llamada y <0.5 en la siguiente — no determinístico, cruzaba
+    confidence_threshold al azar. Confirmar que se pasa el temperature
+    configurado (bajo) en vez de dejar el default alto de Ollama.
+    """
+    engine, fake_llm = _engine(content='{"intent": "x", "confidence": 1.0, '
+                                        '"required_capabilities": [], "user_reply": "y"}')
+
+    engine.classify("crea una naranja")
+
+    assert fake_llm.calls[0]["temperature"] == 0.1
 
 
 def test_classify_defaults_required_capabilities_to_empty_list_when_absent():
