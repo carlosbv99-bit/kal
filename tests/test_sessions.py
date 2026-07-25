@@ -93,3 +93,33 @@ def test_update_denied_permissions_replaces_not_accumulates():
     manager.update_denied_permissions(session, frozenset({Permission.BROWSER}))
 
     assert session.denied_permissions == frozenset({Permission.BROWSER})
+
+
+def test_new_session_has_no_progress_by_default():
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+
+    assert session.progress == []
+
+
+def test_append_progress_accumulates_in_order():
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+
+    manager.append_progress(session, {"stage": "conversation_engine", "model": "qwen2.5:3b"})
+    manager.append_progress(session, {"stage": "main_model", "model": "qwen2.5-coder:14b"})
+
+    assert session.progress == [
+        {"stage": "conversation_engine", "model": "qwen2.5:3b"},
+        {"stage": "main_model", "model": "qwen2.5-coder:14b"},
+    ]
+
+
+def test_clear_progress_empties_it():
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+    manager.append_progress(session, {"stage": "main_model", "model": "x"})
+
+    manager.clear_progress(session)
+
+    assert session.progress == []
