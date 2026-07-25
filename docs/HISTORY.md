@@ -5942,3 +5942,103 @@ abajo).
 2 tests nuevos (`test_orchestrator_chat_progress.py`: backend_model
 presente/ausente según la herramienta). Suite (subconjunto rápido):
 914 tests, 0 regresiones.
+
+## Runtime Manager: el Kernel deja de asumir hardware concreto (2026-07-25)
+
+Diagnosticando la lentitud extrema de un pedido de visión, expliqué la
+causa en términos específicos de esta máquina (GPU integrada sin VRAM
+propia, Radeon 780M). El usuario reencuadró la conversación con un
+principio arquitectónico durable: **el Kernel de kal nunca debe
+razonar sobre hardware concreto** (VRAM, CUDA, ROCm, Vulkan, Metal,
+RAM compartida) — eso pertenece exclusivamente al Runtime que ejecuta
+un modelo. Propuso la jerarquía `Capability → Provider → Runtime →
+Execution`, con 5 escenarios de usuario reales y muy distintos
+(portátil con iGPU, RTX 4090 con Ollama+vLLM, MacBook con MLX, sin GPU
+con APIs en la nube, servidor con 4 GPUs) — todos deberían poder usar
+el MISMO Kernel. El disparador no fue hipotético: el problema de
+contención real de esta misma conversación (varios pedidos
+concurrentes compitiendo por cargar/descargar modelos grandes) es
+exactamente lo que esta pieza resuelve.
+
+**Validado antes de diseñar**: `agent_core/llm/provider.py::LLMProvider`
+YA es un contrato hardware-agnóstico (dos implementaciones reales:
+`OllamaClient`, `OpenAICompatibleClient`). Lo que NO existía: ningún
+concepto de capacidad/cola/paralelismo para llamadas al LLM —
+`kernel/broker/resource_broker.py` es RAM-específico y solo cubre los
+pipelines propios de kal (imagen/audio/voz), no a Ollama.
+
+**Diseño implementado** (`agent_core/runtime/`, nuevo paquete):
+- `protocol.py`: `Runtime` (Protocol: `capabilities()`/`status()`/
+  `execute()`), `RuntimeCapabilities` (`supports`, `max_parallel`),
+  `RuntimeStatus`, `ExecutionRequest` — genérico a propósito, `execute()`
+  devuelve `Any`: un futuro Runtime de otra capacidad (imagen, audio)
+  no necesita que este contrato sepa qué es un `ChatResponse`.
+- `manager.py::RuntimeManager`: registro de runtimes + un semáforo por
+  runtime, calculado de `capabilities().max_parallel` — bloquea una
+  ejecución nueva si ya hay `max_parallel` en curso para ESE runtime.
+  Nunca sabe POR QUÉ un runtime tarda o cuánta memoria usa.
+- `llm_runtimes.py`: `OllamaRuntime`/`OpenAICompatibleRuntime` —
+  envuelven los clientes YA existentes sin tocar su lógica interna.
+- `managed_provider.py::RuntimeManagedLLMProvider`: implementa
+  `LLMProvider` delegando en el Runtime Manager — `AgentLoop`/
+  `Planner`/`SelfDiagnosisAgent` siguen llamando `self.llm.chat(...)`
+  exactamente como siempre, sin enterarse de que este mecanismo existe
+  (cero cambio de comportamiento para el núcleo, mismo criterio que el
+  Provider Pattern anterior). `list_models()`/`is_available()`
+  deliberadamente NO pasan por el semáforo (metadata liviana, debe
+  responder aunque el runtime esté ocupado).
+- Config nueva: `settings.runtimes.ollama.max_parallel` (default 1 —
+  esta máquina no tolera 2 modelos grandes a la vez),
+  `settings.runtimes.openai_compatible.max_parallel` (default 20).
+- `agent_core/orchestrator.py::build_llm_client()` registra el cliente
+  elegido en `runtime_manager` bajo el nombre fijo `"active"` y
+  devuelve el `RuntimeManagedLLMProvider` que lo envuelve.
+
+**Dos decisiones tomadas durante la implementación, distintas del
+plan inicial**:
+1. **Ubicación**: el plan decía `kernel/runtime/` — implementado en
+   `agent_core/runtime/` en cambio. Motivo real encontrado al escribir
+   el código: `kernel/` nunca importa de `agent_core/` en este
+   proyecto (dirección de dependencia ya establecida — confirmado con
+   grep, cero excepciones), y este paquete necesita `ChatResponse` de
+   `agent_core/llm/provider.py`. Mismo criterio que
+   `agent_core/capability_broker.py`/`agent_core/conversation_engine.py`,
+   que también son componentes de orquestación "de nivel Kernel" en el
+   sentido arquitectónico, pero viven físicamente en `agent_core/`.
+2. **`_reinject_llm_client()` sin cambios**: el plan sugería
+   simplificar la re-inyección manual en los 4 lugares
+   (`orchestrator.llm`/`.agent.llm`/`.planning_agent.planner.llm`/
+   `.self_diagnosis.llm`), ya que el nuevo
+   `RuntimeManagedLLMProvider` podría quedar fijo y solo cambiar qué
+   runtime hay detrás. Se decidió NO hacerlo en esta fase: el
+   mecanismo actual de reinyección ya tiene tests de regresión reales
+   (`test_orchestrator_llm_settings.py`) que dependen de ese
+   comportamiento exacto, y tocarlo no era necesario para resolver el
+   problema real de contención — menor riesgo, mismo criterio de este
+   proyecto de no refactorizar más de lo que hace falta.
+
+**Verificado**: tests nuevos con threads reales y sincronización por
+`Event` (no timing-based/frágil) confirman que `max_parallel=1`
+serializa dos ejecuciones concurrentes al mismo runtime, y que
+`max_parallel=2` sí permite paralelismo real — determinístico, sin
+depender de sleeps. En vivo: 2 pedidos `/chat` reales lanzados con 8ms
+de diferencia — el log confirma que el segundo (el que llamó a una
+herramienta) no mostró NINGUNA actividad real hasta ~10 segundos
+después de iniciado, justo cuando el primero ya estaba terminando —
+consistente con haber esperado el semáforo en vez de competir por
+cómputo desde el primer instante.
+
+12 tests nuevos (`test_runtime_manager.py`: 7,
+`test_runtime_managed_provider.py`: 4, +1 en `test_llm_provider.py`) +
+2 en `test_llm_client_factory.py` actualizados a la nueva forma de
+retorno de `build_llm_client()`. Suite (subconjunto rápido, sin los
+tests lentos de modelos reales): 926 tests, 0 regresiones.
+
+**Fuera de alcance de esta fase, diseñado pero no implementado**:
+Runtimes para capacidades no-LLM (imagen/audio/voz/visión, mismo
+patrón exacto); reclasificación de `resource_broker.py` como detalle
+interno de runtimes locales; MLX/ComfyUI/vLLM/inferencia distribuida
+(sin ningún caso real hoy); routing entre varios runtimes reales para
+la misma capacidad (sigue siendo 1:1); cola visible/priorización
+real (el semáforo ya resuelve "esperar", "cancelar"/"priorizar"
+quedan para cuando haya un caso real).

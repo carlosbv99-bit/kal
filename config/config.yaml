@@ -79,6 +79,21 @@ llm:
   # real cuesta minutos de cómputo acá, no es gratis dejarlo correr).
   max_tool_repeats: 3
 
+# Runtime Manager (2026-07-25, ver agent_core/runtime/ y docs/HISTORY.md):
+# cuántas ejecuciones concurrentes tolera cada runtime real ANTES de que
+# las siguientes esperen su turno — nunca una cifra de VRAM/memoria, un
+# número que ajustás según tu propio hardware. "ollama" en 1 por default:
+# una máquina sin VRAM dedicada no puede tener 2 modelos grandes cargados
+# a la vez (confirmado en vivo: varios pedidos concurrentes competían por
+# cargar/descargar modelos de 10-15GB, tardando minutos cada uno en vez de
+# segundos). "openai_compatible" mucho más alto — una API en la nube no
+# tiene este problema.
+runtimes:
+  ollama:
+    max_parallel: 1
+  openai_compatible:
+    max_parallel: 20
+
 memory:
   short_term:
     max_tokens: 8000

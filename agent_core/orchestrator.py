@@ -37,6 +37,9 @@ from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
 from agent_core.llm.planner import PlanningAgentLoop
 from agent_core.llm.provider import LLMProvider
 from agent_core.llm_settings import read_llm_env_var
+from agent_core.runtime.llm_runtimes import OllamaRuntime, OpenAICompatibleRuntime
+from agent_core.runtime.managed_provider import RuntimeManagedLLMProvider
+from agent_core.runtime.manager import runtime_manager
 from agent_core.memory.manager import MemoryManager
 from agent_core.self_diagnosis import SelfDiagnosisAgent
 from agent_core.self_modification import self_modification_manager
@@ -48,6 +51,12 @@ from utils.config import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Nombre fijo bajo el que build_llm_client() registra el runtime elegido
+# en runtime_manager (agent_core/runtime/manager.py) — un solo proveedor
+# de LLM activo a la vez, igual que siempre (ver LLMConfig.provider).
+_ACTIVE_RUNTIME_NAME = "active"
 
 
 def build_llm_client() -> LLMProvider:
@@ -65,6 +74,17 @@ def build_llm_client() -> LLMProvider:
     criterio que IMAGE_GEN_API_KEY/AUDIO_GEN_API_KEY en los adaptadores
     multimodales (tool_integration/adapters/image_gen.py), nunca
     intentar sin autenticación y fallar tarde con un error confuso.
+
+    Runtime Manager (2026-07-25, ver agent_core/runtime/): en vez de
+    devolver el cliente concreto directo, lo registra como Runtime bajo
+    `_ACTIVE_RUNTIME_NAME` y devuelve un `RuntimeManagedLLMProvider` que
+    lo envuelve — así CUALQUIER llamada a `.chat()` pasa por el
+    semáforo de `max_parallel` del runtime activo (settings.runtimes),
+    evitando que varias ejecuciones concurrentes compitan por
+    cargar/descargar modelos grandes en la misma máquina (problema real
+    encontrado en uso, ver docs/HISTORY.md "Runtime Manager").
+    `AgentLoop`/`Planner`/`SelfDiagnosisAgent` no se enteran de este
+    mecanismo — solo siguen viendo un `LLMProvider` normal.
     """
     if settings.llm.provider == "openai_compatible":
         api_key = read_llm_env_var("LLM_API_KEY")
@@ -73,8 +93,13 @@ def build_llm_client() -> LLMProvider:
                 "LLM_API_KEY no configurada — completá .env (ver .env.example) "
                 "para usar llm.provider: openai_compatible."
             )
-        return OpenAICompatibleClient(base_url=settings.llm.base_url, api_key=api_key)
-    return OllamaClient()
+        client = OpenAICompatibleClient(base_url=settings.llm.base_url, api_key=api_key)
+        runtime = OpenAICompatibleRuntime(client, max_parallel=settings.runtimes.openai_compatible.max_parallel)
+    else:
+        client = OllamaClient()
+        runtime = OllamaRuntime(client, max_parallel=settings.runtimes.ollama.max_parallel)
+    runtime_manager.register(_ACTIVE_RUNTIME_NAME, runtime)
+    return RuntimeManagedLLMProvider(runtime_manager, _ACTIVE_RUNTIME_NAME)
 
 
 class Orchestrator:
