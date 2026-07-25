@@ -6042,3 +6042,56 @@ interno de runtimes locales; MLX/ComfyUI/vLLM/inferencia distribuida
 la misma capacidad (sigue siendo 1:1); cola visible/priorización
 real (el semáforo ya resuelve "esperar", "cancelar"/"priorizar"
 quedan para cuando haya un caso real).
+
+## Dos bugs reales de validar el Conversation Engine en vivo, corregidos (2026-07-25)
+
+El usuario reportó dos casos concretos probando kal en vivo el mismo
+día del Runtime Manager.
+
+**(1) El agente insistía después de un rechazo, agotando max_steps sin
+responder nunca**: "crea una calle concurrida de moscú" — tras el
+ciclo normal de autochequeo (generar → revisar con `analyze_image` →
+regenerar una vez, ver `technical_conversation_engine_temperature_nondeterminism`
+y el mecanismo ya documentado en `technical_agent_image_overgeneration`),
+el modelo volvió a intentar `image_generation` una TERCERA vez pese al
+rechazo explícito ("da tu respuesta final AHORA"), y siguió intentando
+3 veces MÁS — agotando `max_steps=8` sin darle nunca una respuesta al
+usuario, ni siquiera mencionar que la imagen YA estaba generada (dos
+veces). El tope de repeticiones en sí funcionaba bien (rechazó los 4
+intentos de más sin ejecutarlos) — el bug real era que nada cortaba el
+turno cuando el modelo IGNORABA el rechazo.
+
+Fix: `agent_core/llm/agent_loop.py::AgentLoop.run()` cuenta cuántas
+veces se rechaza cada herramienta autochequeada
+(`rejection_counts_for_self_checked`) — si el modelo insiste con la
+MISMA herramienta ya tapada una SEGUNDA vez, el turno se corta con una
+respuesta sintetizada honesta (mencionando que el resultado ya está
+generado, visible arriba) en vez de seguir gastando pasos reales de
+cómputo. 1 test nuevo con el escenario exacto (4 intentos guionados,
+nunca llega al 5to — corta en el 2do rechazo).
+
+**(2) Un intento de tool call con JSON de verdad inválido se filtraba
+como respuesta final real**: "el tiburón en esta imagen tiene dos
+colas y no tiene cabeza, corregilo" — el modelo devolvió prosa + un
+bloque ` ```json ` con `"name": "image_editing"` (una herramienta
+REAL) pero JSON roto de verdad: un comentario estilo JS (`// Estos
+valores deben ser estimados a ciegas`) y un placeholder sin comillas
+(`[x1, y1, x2, y2]`, identificadores en vez de números). Ni
+`_extract_fallback_tool_call` (el JSON ni siquiera parsea) ni la
+versión angosta previa de `_looks_like_a_failed_tool_call_attempt`
+(que también dependía de que el JSON parseara para mirar `"name"`)
+detectaban esto — ese texto crudo se le mostró al usuario tal cual
+como si fuera la respuesta final, sin haber ejecutado nada.
+
+Fix: `_looks_like_a_failed_tool_call_attempt()` gana una segunda vía
+de detección — un regex busca `"name": "<algo>"` + `"arguments"` en el
+texto crudo, sin depender de que el JSON completo parsee; solo
+dispara si el nombre capturado es una herramienta REAL (mismo criterio
+que ya existía: un nombre inventado sigue tratándose como respuesta
+final legítima, para no generar falsos positivos). 1 test nuevo con
+el JSON malformado exacto del caso real.
+
+Ambos bugs vinieron del mismo pedido real, en el mismo turno fallido
+— se investigaron y corrigieron juntos. 2 tests nuevos en
+`test_agent_loop.py`. Suite (subconjunto rápido): 928 tests, 0
+regresiones.

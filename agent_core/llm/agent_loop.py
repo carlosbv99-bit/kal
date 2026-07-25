@@ -38,6 +38,7 @@ conversación debe quedar disponible en el siguiente turno.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
@@ -373,7 +374,7 @@ class AgentLoop:
         return None
 
     @staticmethod
-    def _looks_like_a_failed_tool_call_attempt(content: str) -> bool:
+    def _looks_like_a_failed_tool_call_attempt(content: str, tools: dict[str, AgentTool] | None = None) -> bool:
         """
         BUG REAL ENCONTRADO EN USO (2026-07-21): un saludo simple ("Hola,
         ¿cómo estás?") hizo que el modelo devolviera el texto literal
@@ -391,9 +392,30 @@ class AgentLoop:
         herramienta que no existe se sigue tratando como respuesta final
         real, no como un intento fallido — mismo criterio ya establecido
         para evitar falsos positivos).
+
+        BUG REAL ENCONTRADO EN USO (2026-07-25, VS Code): "el tiburón en
+        esta imagen tiene dos colas y no tiene cabeza, corregilo" hizo
+        que el modelo devolviera prosa + un bloque ```json``` con
+        "name": "image_editing" real, pero con JSON INVÁLIDO de verdad
+        (un comentario "// estimado a ciegas" y un placeholder
+        `[x1, y1, x2, y2]` sin comillas en vez de números) — ni
+        siquiera parsea como dict, así que el chequeo de arriba
+        (`data.get("name")` falsy) nunca lo detectaba, y ese texto
+        crudo se mostraba tal cual como si fuera la respuesta final
+        real, sin ejecutar ninguna herramienta. Detecta la FORMA de un
+        intento de tool call (nombre de una herramienta REAL junto a
+        "arguments") por regex, sin depender de que el JSON en sí
+        parsee — mismo criterio de "nombre real" que arriba para no
+        confundir esto con prosa legítima que solo MENCIONA JSON.
         """
         data = extract_json_object(content)
-        return isinstance(data, dict) and "name" in data and not data.get("name")
+        if isinstance(data, dict) and "name" in data and not data.get("name"):
+            return True
+        if tools is not None and '"arguments"' in content:
+            match = re.search(r'"name"\s*:\s*"(\w+)"', content)
+            if match is not None and match.group(1) in tools:
+                return True
+        return False
 
     # --- Loop principal ---
 
@@ -512,6 +534,19 @@ class AgentLoop:
         # el tope general max_tool_repeats, igual que cualquier otra
         # herramienta).
         succeeded_vscode_only_tools: set[str] = set()
+        # BUG REAL ENCONTRADO EN USO (2026-07-25): "crea una calle concurrida
+        # de moscú" — tras el ciclo normal de autochequeo (generar -> revisar
+        # -> regenerar UNA vez), el modelo volvió a intentar 'image_generation'
+        # una TERCERA vez pese al rechazo explícito ("da tu respuesta final
+        # AHORA") — y siguió intentando 3 veces MÁS, agotando max_steps SIN
+        # llegar nunca a una respuesta (el usuario se quedó sin texto Y sin
+        # confirmación de la imagen que YA se había generado dos veces).
+        # `rejection_counts_for_self_checked` cuenta cuántas veces se rechazó
+        # cada herramienta autochequeada — si el modelo ignora el rechazo una
+        # SEGUNDA vez (sigue intentando la misma herramienta ya tapada), se
+        # corta el turno con una respuesta sintetizada honesta en vez de
+        # seguir gastando pasos reales de cómputo esperando que reaccione.
+        rejection_counts_for_self_checked: dict[str, int] = {}
 
         for _ in range(max_steps):
             try:
@@ -531,7 +566,7 @@ class AgentLoop:
                     effective_tool_calls = [fallback]
 
             if not effective_tool_calls:
-                if self._looks_like_a_failed_tool_call_attempt(response.content):
+                if self._looks_like_a_failed_tool_call_attempt(response.content, tools):
                     # Ver _looks_like_a_failed_tool_call_attempt: nunca
                     # mostrarle al usuario un intento de tool call
                     # rechazado como si fuera la respuesta final — se lo
@@ -629,6 +664,9 @@ class AgentLoop:
                     # no tiene sentido gastarlos en una repetición que ya
                     # sabemos que vamos a cortar.
                     if tool_call.name in self_checked_tools:
+                        rejection_counts_for_self_checked[tool_call.name] = (
+                            rejection_counts_for_self_checked.get(tool_call.name, 0) + 1
+                        )
                         observation = (
                             f"ERROR: ya generaste con '{tool_call.name}' {effective_limit} veces en este turno "
                             "(incluido un reintento después de revisarlo con analyze_image) — no lo intentes de "
@@ -688,6 +726,33 @@ class AgentLoop:
                 if on_step is not None:
                     on_step(new_step)
                 messages.append({"role": "tool", "content": observation, "tool_call_id": tool_call.id})
+
+                if rejection_counts_for_self_checked.get(tool_call.name, 0) >= 2:
+                    logger.warning(
+                        f"'{tool_call.name}' fue rechazada 2 veces por el tope de autochequeo y el modelo "
+                        "insistió igual — se corta el turno con una respuesta sintetizada en vez de seguir "
+                        "gastando pasos reales."
+                    )
+                    last_uri = next(
+                        (uri for uri, name in reversed(list(artifact_paths_this_turn.items())) if name == tool_call.name),
+                        None,
+                    )
+                    if last_uri is not None:
+                        final_answer = (
+                            f"Generé el resultado con '{tool_call.name}', pero no logré confirmar que coincida "
+                            "exactamente con lo pedido (los modelos de generación no siempre son exactos) — "
+                            "intenté corregirlo pero seguí insistiendo de más, así que corté acá. Podés ver el "
+                            "resultado arriba."
+                        )
+                    else:
+                        final_answer = (
+                            f"No logré completar el pedido con '{tool_call.name}' — insistí de más sin éxito, "
+                            "así que corté acá en vez de seguir gastando tiempo."
+                        )
+                    return AgentRunResult(
+                        goal=goal, final_answer=final_answer, steps=steps, status="success",
+                        self_checked_tools=frozenset(self_checked_tools),
+                    )
 
         logger.warning(f"Agente agotó max_steps={max_steps} sin respuesta final para: {goal!r}")
         return AgentRunResult(
