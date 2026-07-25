@@ -305,7 +305,11 @@ function _progressLineFor(entry) {
   if (entry.stage === "conversation_engine") {
     text = `🧠 ${entry.model} analizó tu pedido (intención: ${entry.intent}, confianza: ${entry.confidence.toFixed(2)})`;
   } else if (entry.stage === "main_model") {
-    text = `⚙️ Modelo principal: ${entry.model}`;
+    // NUNCA "modelo principal" acá — kal no tiene un "cerebro" fijo (ver
+    // agent_core/llm/provider.py y la aclaración del usuario en
+    // docs/HISTORY.md sobre la terminología "cerebro"): esto es
+    // simplemente el modelo configurado que está resolviendo ESTE turno.
+    text = `⚙️ Modelo trabajando: ${entry.model}`;
   } else if (entry.stage === "tool_call") {
     text = `🔧 ${entry.tool}`;
   } else {

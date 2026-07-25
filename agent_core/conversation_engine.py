@@ -55,7 +55,12 @@ Ejemplos: "leeme esto en voz alta", "convertí este texto en audio".
 (audio → texto). Ejemplos: "transcribí este audio", "qué dice esta grabación". \
 NUNCA uses speech-to-text si el pedido es al revés (texto a audio) — son direcciones opuestas, \
 usá solo UNA de las dos salvo que el pedido pida EXPLÍCITAMENTE ambas direcciones.
-- "image-generation": crear una imagen nueva desde cero (a partir de una descripción).
+- "image-generation": crear una imagen nueva desde cero (a partir de una descripción). "Creá una \
+naranja"/"hacé un gato"/"generá una torta" son SIEMPRE image-generation (crear una IMAGEN de eso), \
+NUNCA "conversation" ni un rechazo tipo "no puedo crear un objeto físico" — nadie te está pidiendo \
+el objeto real, te están pidiendo una imagen de él. BUG REAL ENCONTRADO EN USO: "crea una naranja" \
+se clasificó como intent="conversation" con user_reply "no puedo crear una naranja" — mal, tenía \
+que ser image-generation.
 - "image-editing": modificar una imagen YA EXISTENTE (fondo, recorte, colores).
 - "vision": describir o analizar el CONTENIDO de una imagen ya existente.
 - "video": crear o editar un video — nunca uses image-editing para un pedido sobre VIDEO.
@@ -118,6 +123,7 @@ class ConversationEngine:
                 ],
                 model=self.cfg.model,
                 response_format="json",
+                temperature=self.cfg.temperature,
             )
         except ProviderError as e:
             logger.warning(f"Conversation Engine no disponible, se sigue con el flujo normal: {e}")

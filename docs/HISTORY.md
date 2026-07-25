@@ -5821,6 +5821,70 @@ Fuera de alcance: WebSockets/SSE reales (no se justifican con un solo
 worker); persistencia de `progress` más allá del turno; pasar a
 múltiples workers de uvicorn (si se hiciera en el futuro, este
 mecanismo dejaría de ser confiable, queda anotado en el código).
-8 tests nuevos (`test_sessions.py`, `test_agent_loop.py`,
+9 tests nuevos (`test_sessions.py`, `test_agent_loop.py`,
 `test_planning_agent_loop.py`, `test_orchestrator_chat_progress.py`
 nuevo). Suite completa: 940 tests, 0 regresiones.
+
+## Bug real: el Conversation Engine clasificaba el mismo pedido distinto cada vez (2026-07-25)
+
+El usuario reportó que, tras algunos pedidos, kal "dejó de crear
+imágenes" — y de paso pidió corregir el texto del panel de recorido en
+vivo ("Modelo principal..." nunca debe decir eso, kal no tiene un
+modelo principal fijo, ver la aclaración del usuario del 2026-07-21).
+
+**Investigando el bug real**: `logs/agent.log` mostraba varios pedidos
+("crea una manzana verde", "crea una naranja y muéstramela aquí")
+donde NO aparecía ninguna actividad después de la línea `POST /chat` —
+ni "Generando imagen", ni ningún tool call. Confirmé contra el
+servidor real que esos pedidos habían tomado el camino de
+`needs_clarification` (`model_used: "qwen2.5:3b"`, `plan: []`,
+`steps: []`) — el Conversation Engine los clasificó con confianza por
+debajo de `confidence_threshold` (0.5), cortando el turno antes de
+llegar al agente real.
+
+Llamando a `ConversationEngine.classify()` directamente y repetidas
+veces con el MISMO pedido exacto ("crea una naranja"), confirmé que la
+confianza variaba de forma no determinística entre llamadas — a veces
+0.9, a veces por debajo de 0.5 — cruzando el umbral al azar para un
+pedido idéntico. Causa raíz: `OllamaClient.chat()` nunca fijaba
+`temperature`, así que el Conversation Engine usaba el valor default
+de Ollama (alto, pensado para charla variada) para una tarea que en
+realidad es de CLASIFICACIÓN estructurada, donde la consistencia
+importa mucho más que la variedad.
+
+De paso, encontré una SEGUNDA causa relacionada: en algunas corridas,
+el modelo clasificaba "crea una naranja" como `intent="conversation"`
+con `user_reply: "no puedo crear una naranja"` — alucinando que crear
+un objeto físico es imposible, en vez de entender "crear una IMAGEN de
+una naranja". Con confianza alta esto no rompía nada (el flujo seguía
+al agente real), pero si esa MISMA mala clasificación coincidía con
+confianza baja, el usuario veía literalmente "no puedo crear eso" como
+respuesta final.
+
+**Fix, dos partes**:
+1. `OllamaClient.chat()` gana un parámetro `temperature: float | None`
+   (aditivo — `None` preserva el comportamiento de siempre para
+   `agent_loop.py`/`planner.py`/`self_diagnosis.py`, ninguno de los
+   cuales lo pasa). `ConversationEngineConfig` gana `temperature: float
+   = 0.1` (config.yaml), y `ConversationEngine.classify()` lo pasa en
+   cada llamada.
+2. Refuerzo del `_SYSTEM_PROMPT` del Conversation Engine: nueva regla
+   explícita ("crear un objeto" = SIEMPRE `image-generation`, nunca
+   `conversation`/rechazo), citando este bug real como ejemplo — mismo
+   patrón de "regla + ejemplo real concreto" que el resto del proyecto.
+
+Verificado en vivo: 8 llamadas seguidas a `classify()` con "crea una
+naranja" (antes inconsistente) dieron `image_generation`/0.95 las 8
+veces. Repetido con los otros pedidos que habían fallado ("crea una
+manzana verde", "quita las velas de la torta y deja solo tres", "crea
+un gato") — estables en las 4 corridas de cada uno.
+
+**Fix de texto, de paso**: el panel de recorrido en vivo decía "⚙️
+Modelo principal: X" — corregido a "⚙️ Modelo trabajando: X" (kal no
+tiene un "modelo principal" fijo, ver la aclaración del usuario del
+2026-07-21 sobre la terminología "cerebro").
+
+4 tests nuevos (`test_ollama_client.py`: 2 sobre `options.temperature`
+en el payload; `test_conversation_engine.py`: 1 sobre el temperature
+configurado). Suite (subconjunto rápido, sin los tests lentos de
+modelos reales): 912 tests, 0 regresiones.

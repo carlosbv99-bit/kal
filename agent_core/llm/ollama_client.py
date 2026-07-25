@@ -91,6 +91,7 @@ class OllamaClient:
         tools: list[dict[str, Any]] | None = None,
         images: list[str] | None = None,
         response_format: str | None = None,
+        temperature: float | None = None,
     ) -> ChatResponse:
         """
         Llama a POST /api/chat. `messages` sigue el formato
@@ -107,6 +108,16 @@ class OllamaClient:
         validado empíricamente contra qwen2.5:3b/gemma3:4b/llama3.2:3b).
         Default None preserva el comportamiento actual de todo el resto
         de los llamadores (agent_loop.py, planner.py, self_diagnosis.py).
+        `temperature`: pasa tal cual en "options.temperature" del payload
+        de Ollama. BUG REAL ENCONTRADO EN USO (2026-07-25): sin esto,
+        agent_core/conversation_engine.py::classify() usaba el
+        temperature default de Ollama (alto, pensado para conversación
+        variada) — el MISMO pedido exacto ("crea una naranja") devolvía
+        a veces confidence=0.9 y a veces <0.5, cruzando el
+        confidence_threshold de forma no determinística: el usuario veía
+        "a veces genera, a veces no" para pedidos idénticos. Default
+        None preserva el comportamiento actual para todo el resto de los
+        llamadores.
         """
         # Libera RAM de servicios multimedia inactivos ANTES de pedirle a
         # Ollama (local, misma RAM del sistema) que genere — ver
@@ -125,6 +136,8 @@ class OllamaClient:
             payload["tools"] = tools
         if response_format:
             payload["format"] = response_format
+        if temperature is not None:
+            payload["options"] = {"temperature": temperature}
 
         response = self._post_with_retry(payload)
         data = response.json()
