@@ -75,7 +75,42 @@ def test_progress_includes_conversation_engine_main_model_and_tool_calls(monkeyp
         "intent": "image-generation", "confidence": 0.9,
     }
     assert progress[1] == {"stage": "main_model", "model": settings.llm.default_model}
-    assert progress[2] == {"stage": "tool_call", "tool": "image_generation", "ok": True}
+    assert progress[2] == {
+        "stage": "tool_call", "tool": "image_generation", "ok": True,
+        "backend_model": settings.multimodal.image.model,
+    }
+
+
+def test_progress_includes_the_backend_model_for_analyze_image(monkeypatch):
+    """Pedido explícito del usuario: quería ver llava:13b en acción en
+    el panel — antes el recorrido solo mostraba el nombre de la
+    herramienta, nunca qué modelo especializado la resuelve."""
+    fake_ce = _FakeConversationEngine(None)
+    steps = [AgentStep(tool_name="analyze_image", arguments={}, observation="ok", artifact=None)]
+    monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
+    monkeypatch.setattr(orchestrator_module.orchestrator, "planning_agent", _FakePlanningAgentThatCallsOnStep(steps))
+
+    response = client.post("/chat", json={"goal": "describí esta imagen"})
+    session_id = response.json()["session_id"]
+
+    progress = client.get(f"/chat/progress/{session_id}").json()["progress"]
+
+    assert {"stage": "tool_call", "tool": "analyze_image", "ok": True, "backend_model": settings.multimodal.vision.model} in progress
+
+
+def test_progress_omits_backend_model_for_a_tool_without_one(monkeypatch):
+    fake_ce = _FakeConversationEngine(None)
+    steps = [AgentStep(tool_name="run_code", arguments={}, observation="ok", artifact=None)]
+    monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
+    monkeypatch.setattr(orchestrator_module.orchestrator, "planning_agent", _FakePlanningAgentThatCallsOnStep(steps))
+
+    response = client.post("/chat", json={"goal": "corré este código"})
+    session_id = response.json()["session_id"]
+
+    progress = client.get(f"/chat/progress/{session_id}").json()["progress"]
+
+    tool_call_entry = next(e for e in progress if e["stage"] == "tool_call")
+    assert "backend_model" not in tool_call_entry
 
 
 def test_progress_marks_a_failed_tool_call_as_not_ok(monkeypatch):

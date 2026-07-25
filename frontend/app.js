@@ -311,7 +311,12 @@ function _progressLineFor(entry) {
     // simplemente el modelo configurado que está resolviendo ESTE turno.
     text = `⚙️ Modelo trabajando: ${entry.model}`;
   } else if (entry.stage === "tool_call") {
-    text = `🔧 ${entry.tool}`;
+    // backend_model: el modelo ESPECIALIZADO detrás de esta herramienta
+    // puntual (p.ej. llava:13b para analyze_image, SDXL-Turbo para
+    // image_generation) — ver agent_core/routers/chat.py::
+    // _backend_model_for_tool. Pedido explícito del usuario: antes solo
+    // se veía el nombre de la herramienta, nunca qué modelo la resuelve.
+    text = entry.backend_model ? `🔧 ${entry.tool} (${entry.backend_model})` : `🔧 ${entry.tool}`;
   } else {
     text = JSON.stringify(entry);
   }
@@ -424,9 +429,9 @@ chatInput.addEventListener("input", autoResizeChatInput);
 chatForm.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const goal = chatInput.value.trim();
-  if (!goal) return;
+  const fileToUpload = pendingUploadFile;
+  if (!goal && !fileToUpload) return;
 
-  appendUserMessage(goal);
   chatInput.value = "";
   autoResizeChatInput(); // vuelve a una línea
   sendBtn.disabled = true;
@@ -449,6 +454,26 @@ chatForm.addEventListener("submit", async (ev) => {
   const model = document.getElementById("model-select").value;
 
   try {
+    // Adjuntar una imagen y escribir una instrucción para ella eran
+    // dos acciones separadas (subía sola, apenas se elegía el
+    // archivo) — ahora la imagen queda ESPERANDO (ver
+    // imageUploadInput más abajo) hasta que el usuario aprieta Enter,
+    // y acá se sube justo antes de mandar el pedido, en el mismo
+    // envío. Si la subida falla, no se llega a mandar el pedido de
+    // texto (el archivo queda esperando para reintentar).
+    if (fileToUpload) {
+      const uploaded = await uploadImage(fileToUpload, sessionId, controller);
+      sessionId = uploaded.session_id;
+      appendImageMessage(uploaded.url, "Imagen subida");
+      setPendingUploadFile(null);
+    }
+
+    if (!goal) {
+      hidePending();
+      return;
+    }
+
+    appendUserMessage(goal);
     const result = await api("/chat", {
       method: "POST",
       body: JSON.stringify({ goal, model: model || null, session_id: sessionId }),
@@ -472,45 +497,52 @@ chatForm.addEventListener("submit", async (ev) => {
   }
 });
 
-// ---------- Subir una imagen propia ----------
+// ---------- Adjuntar una imagen propia (queda esperando hasta el Enter) ----------
+//
+// BUG DE UX ENCONTRADO EN USO: antes, elegir un archivo lo subía DE
+// INMEDIATO — el usuario no tenía forma de escribir una instrucción
+// para esa imagen ANTES de que se subiera; tenía que subir primero y
+// después mandar un mensaje aparte. Ahora el archivo elegido queda
+// "esperando" (pendingUploadFile) — se muestra como un chip arriba del
+// textarea, el foco pasa al textarea, y recién se sube de verdad
+// cuando el usuario aprieta Enter (ver chatForm submit más arriba),
+// en el mismo envío que su instrucción.
 
 const imageUploadInput = document.getElementById("image-upload-input");
+const pendingAttachment = document.getElementById("pending-attachment");
+const pendingAttachmentName = document.getElementById("pending-attachment-name");
+const pendingAttachmentRemove = document.getElementById("pending-attachment-remove");
+let pendingUploadFile = null;
 
-function appendUploadedImage(url, path) {
-  appendImageMessage(url, "Imagen subida");
+function setPendingUploadFile(file) {
+  pendingUploadFile = file;
+  pendingAttachment.hidden = !file;
+  if (file) {
+    pendingAttachmentName.textContent = file.name;
+    chatInput.focus();
+  }
 }
 
-imageUploadInput.addEventListener("change", async () => {
+imageUploadInput.addEventListener("change", () => {
   const file = imageUploadInput.files[0];
   if (!file) return;
+  setPendingUploadFile(file);
+  imageUploadInput.value = ""; // permite elegir el mismo archivo de nuevo si se quita y se re-adjunta
+});
 
+pendingAttachmentRemove.addEventListener("click", () => setPendingUploadFile(null));
+
+async function uploadImage(file, sessionIdForUpload, controller) {
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("session_id", sessionId || "");
-
-  const controller = new AbortController();
-  showPending(controller);
-  try {
-    const res = await fetch(API + "/uploads", { method: "POST", body: formData, signal: controller.signal });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    const result = await res.json();
-    sessionId = result.session_id;
-    hidePending();
-    appendUploadedImage(result.url, result.path);
-  } catch (e) {
-    hidePending();
-    if (e.name === "AbortError") {
-      chatScroll.appendChild(el("div", "msg-error", "Subida cancelada."));
-    } else {
-      chatScroll.appendChild(el("div", "msg-error", `Error subiendo imagen: ${e.message}`));
-    }
-  } finally {
-    imageUploadInput.value = ""; // permite volver a subir el mismo archivo
+  formData.append("session_id", sessionIdForUpload || "");
+  const res = await fetch(API + "/uploads", { method: "POST", body: formData, signal: controller.signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
   }
-});
+  return res.json();
+}
 
 chatInput.addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && !ev.shiftKey) {

@@ -313,6 +313,51 @@ button, input, textarea, select {
   max-width: 170px;
 }
 
+/* Envuelve el textarea para poder mostrarle arriba el chip de "imagen
+   adjunta, todavía sin subir" (ver frontend/app.js::setPendingUploadFile)
+   sin romper el flex de .chat-input-row — este wrapper es el que
+   ahora tiene flex:1, el textarea adentro solo necesita llenar el
+   ancho disponible. */
+.chat-input-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0; /* deja que el textarea se achique en vez de desbordar la fila */
+}
+
+.pending-attachment {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.pending-attachment span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-attachment button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 0;
+  line-height: 1;
+}
+.pending-attachment button:hover { color: var(--critical); }
+.pending-attachment[hidden] { display: none; }
+
 .chat-input {
   flex: 1;
   resize: none;

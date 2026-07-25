@@ -59,10 +59,19 @@
         <span class="model-select-label">Último modelo utilizado</span>
         <select id="model-select" class="model-select" title="Modelo"></select>
       </div>
-      <label class="upload-btn" title="Subir una imagen propia">
+      <label class="upload-btn" title="Adjuntar una imagen propia">
         📎<input type="file" id="image-upload-input" accept="image/png,image/jpeg,image/webp" hidden />
       </label>
-      <textarea id="chat-input" class="chat-input" placeholder="Escribí un objetivo para kal…" rows="1"></textarea>
+      <div class="chat-input-wrap">
+        <!-- Imagen elegida pero TODAVÍA no subida — recién se sube al
+             apretar Enter, junto con la instrucción de abajo (ver
+             frontend/app.js::setPendingUploadFile/uploadImage). -->
+        <div class="pending-attachment" id="pending-attachment" hidden>
+          📎 <span id="pending-attachment-name"></span>
+          <button type="button" id="pending-attachment-remove" title="Quitar imagen adjunta">✕</button>
+        </div>
+        <textarea id="chat-input" class="chat-input" placeholder="Escribí un objetivo para kal…" rows="1"></textarea>
+      </div>
       <button type="submit" class="send-btn" id="send-btn">Enviar</button>
     </form>
   </section>

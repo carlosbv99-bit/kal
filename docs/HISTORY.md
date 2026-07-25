@@ -5888,3 +5888,57 @@ tiene un "modelo principal" fijo, ver la aclaración del usuario del
 en el payload; `test_conversation_engine.py`: 1 sobre el temperature
 configurado). Suite (subconjunto rápido, sin los tests lentos de
 modelos reales): 912 tests, 0 regresiones.
+
+## Panel de recorrido: modelo por herramienta + adjuntar imagen con instrucción (2026-07-25)
+
+Dos pedidos del usuario tras la feature de "recorrido en vivo": (1)
+mostrar en el panel qué modelo hay detrás de cada herramienta (motivado
+por no poder ver nunca "llava:13b" en acción — el panel solo mostraba
+el nombre de la herramienta), y (2) al adjuntar una imagen, poder
+escribir una instrucción para ella ANTES de que se suba, en vez de que
+suba sola apenas se elige el archivo.
+
+**(1) `backend_model` por tool_call**: nuevo
+`agent_core/routers/chat.py::_backend_model_for_tool()` — mapeo chico
+tool_name -> modelo real que lo resuelve (`image_generation` ->
+`settings.multimodal.image.model`, `analyze_image` ->
+`settings.multimodal.vision.model`, etc.). Se agrega como campo
+`backend_model` en la entrada `tool_call` del recorrido SOLO cuando
+existe un mapeo (herramientas sin modelo de IA propio, como
+`qr_code`/`propose_project_files`, no lo llevan). Frontend
+(`frontend/app.js::_progressLineFor`) lo agrega entre paréntesis:
+`🔧 analyze_image (llava:13b)`.
+
+**(2) Adjuntar imagen sin subir todavía**: antes, elegir un archivo en
+el 📎 lo subía DE INMEDIATO (`change` event) — no había forma de
+escribir una instrucción para esa imagen antes de que se subiera.
+Ahora el archivo elegido queda "esperando"
+(`frontend/app.js::pendingUploadFile`), se muestra como un chip arriba
+del textarea (nuevo `.chat-input-wrap`/`.pending-attachment` en
+`frontend/index.html`/`style.css`, con botón para quitarlo), y el foco
+pasa al textarea. Recién se sube (`POST /uploads`) al apretar Enter,
+justo antes de mandar la instrucción — mismo envío, en vez de dos
+acciones separadas. Si la subida falla, el archivo queda esperando
+para reintentar (no se pierde ni hay que re-adjuntar).
+
+Verificado en vivo con Playwright real (sin mocks): adjuntar una
+imagen muestra el chip y enfoca el textarea; escribir una instrucción
+y apretar Enter esconde el chip, sube la imagen como mensaje del chat,
+y manda el pedido — de punta a punta.
+
+**Hallazgo real de paso, investigando por qué una prueba tardaba
+demasiado**: relancé el mismo test de navegador varias veces sin
+esperar a que terminara el anterior, apilando 5 pedidos reales
+concurrentes — todos compitiendo por cargar/descargar modelos grandes
+(memoria del sistema bajó a 252MB libres). Confirmado con `ollama ps`:
+el modelo de visión y el principal NO pueden estar cargados a la vez
+en esta máquina (GPU integrada sin VRAM propia, memoria compartida) —
+cada cambio de uno a otro fuerza una recarga completa desde disco. Un
+pedido limpio y aislado (sin superposición) tardó 143s; los apilados
+superaron los 5 minutos cada uno. No es un bug de kal — llevó
+directamente a la conversación sobre el Runtime Manager (ver más
+abajo).
+
+2 tests nuevos (`test_orchestrator_chat_progress.py`: backend_model
+presente/ausente según la herramienta). Suite (subconjunto rápido):
+914 tests, 0 regresiones.

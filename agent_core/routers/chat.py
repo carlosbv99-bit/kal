@@ -61,6 +61,30 @@ class ChatRequest(BaseModel):
     client: str | None = None
 
 
+def _backend_model_for_tool(tool_name: str) -> str | None:
+    """
+    El modelo ESPECIALIZADO que de verdad ejecuta una herramienta —
+    nunca el modelo de razonamiento/tool-calling (ese ya lo cubre la
+    entrada "main_model" del recorrido en vivo). Pedido explícito del
+    usuario tras preguntar por qué nunca veía "llava:13b" en el panel:
+    antes solo se mostraba el nombre de la herramienta, nunca qué
+    modelo hay detrás. None para herramientas sin un modelo de IA
+    propio (p.ej. qr_code, propose_project_files) — el frontend
+    entonces no agrega nada extra.
+    """
+    mapping = {
+        "image_generation": settings.multimodal.image.model,
+        "image_via_kernel": settings.multimodal.image.model,
+        "image_inpaint_via_kernel": settings.multimodal.image_editing.inpaint_model,
+        "analyze_image": settings.multimodal.vision.model,
+        "audio_generation": settings.multimodal.audio.voice_model,
+        "audio_via_kernel": settings.multimodal.audio.voice_model,
+        "voice_roundtrip_via_kernel": settings.multimodal.audio.voice_model,
+        "speech_to_text": f"whisper-{settings.multimodal.stt.model_size}",
+    }
+    return mapping.get(tool_name)
+
+
 @router.post("/chat")
 def chat(req: ChatRequest):
     # Correlation ID (ver utils/correlation.py): un identificador corto
@@ -139,9 +163,11 @@ def chat(req: ChatRequest):
         # Recorrido en vivo — se llama para CUALQUIER paso (exitoso, con
         # error real, o rechazado por el tope de repeticiones); el
         # frontend decide cómo mostrar cada caso (ver frontend/app.js).
-        orchestrator.sessions.append_progress(session, {
-            "stage": "tool_call", "tool": step.tool_name, "ok": not step.observation.startswith("ERROR"),
-        })
+        entry = {"stage": "tool_call", "tool": step.tool_name, "ok": not step.observation.startswith("ERROR")}
+        backend_model = _backend_model_for_tool(step.tool_name)
+        if backend_model is not None:
+            entry["backend_model"] = backend_model
+        orchestrator.sessions.append_progress(session, entry)
 
     try:
         result = orchestrator.planning_agent.run(
