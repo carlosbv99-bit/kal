@@ -84,6 +84,25 @@ class LLMConfig(BaseModel):
     max_tool_repeats: int = 3
 
 
+class RuntimeSlotConfig(BaseModel):
+    """
+    Un `max_parallel` por Runtime real (ver agent_core/runtime/) —
+    cuántas ejecuciones concurrentes tolera ANTES de que las
+    siguientes esperen su turno (ver RuntimeManager.execute()). Nunca
+    una cifra de memoria/VRAM: es una decisión de config que quien
+    instala kal ajusta según SU hardware — 1 en una máquina sin VRAM
+    dedicada (no puede tener 2 modelos grandes cargados a la vez, ver
+    docs/HISTORY.md "Runtime Manager" 2026-07-25), mucho más alto para
+    una API en la nube.
+    """
+    max_parallel: int = 1
+
+
+class RuntimesConfig(BaseModel):
+    ollama: RuntimeSlotConfig = RuntimeSlotConfig(max_parallel=1)
+    openai_compatible: RuntimeSlotConfig = RuntimeSlotConfig(max_parallel=20)
+
+
 class ShortTermConfig(BaseModel):
     max_tokens: int = 8000
     ttl_seconds: int | None = None
@@ -416,6 +435,7 @@ class Settings(BaseModel):
     schema_version: int
     agent: AgentConfig
     llm: LLMConfig = LLMConfig()
+    runtimes: RuntimesConfig = RuntimesConfig()
     memory: MemoryConfig
     error_handling: ErrorHandlingConfig
     multimodal: MultimodalConfig = MultimodalConfig()
