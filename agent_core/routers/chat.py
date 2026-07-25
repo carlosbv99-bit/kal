@@ -96,6 +96,12 @@ def chat(req: ChatRequest):
         )
     context_bundle = orchestrator.context_service.build(session, editor_context, client=req.client)
 
+    # Recorrido en vivo de ESTE turno (ver GET /chat/progress/{id} más
+    # abajo) — se reinicia acá, antes de arrancar cualquier trabajo
+    # real, para que el frontend nunca vea restos del turno anterior
+    # mientras hace polling.
+    orchestrator.sessions.clear_progress(session)
+
     # Conversation Engine (ver agent_core/conversation_engine.py): paso
     # PREVIO y opcional, "fail-open" — si detecta baja confianza (pedido
     # ambiguo), responde de inmediato con la aclaración sin correr el
@@ -103,6 +109,11 @@ def chat(req: ChatRequest):
     # confianza alcanza, el flujo sigue exactamente como antes de este
     # cambio.
     ce_result = orchestrator.conversation_engine.classify(req.goal)
+    if ce_result is not None:
+        orchestrator.sessions.append_progress(session, {
+            "stage": "conversation_engine", "model": settings.conversation_engine.model,
+            "intent": ce_result.intent, "confidence": ce_result.confidence,
+        })
     if ce_result is not None and ce_result.confidence < settings.conversation_engine.confidence_threshold:
         orchestrator.sessions.record_turn(session, req.goal, ce_result.user_reply)
         return {
@@ -121,6 +132,17 @@ def chat(req: ChatRequest):
             "model_used": settings.conversation_engine.model,
         }
 
+    main_model = req.model or settings.llm.default_model
+    orchestrator.sessions.append_progress(session, {"stage": "main_model", "model": main_model})
+
+    def _on_step(step) -> None:
+        # Recorrido en vivo — se llama para CUALQUIER paso (exitoso, con
+        # error real, o rechazado por el tope de repeticiones); el
+        # frontend decide cómo mostrar cada caso (ver frontend/app.js).
+        orchestrator.sessions.append_progress(session, {
+            "stage": "tool_call", "tool": step.tool_name, "ok": not step.observation.startswith("ERROR"),
+        })
+
     try:
         result = orchestrator.planning_agent.run(
             req.goal, model=req.model, use_planner=use_planner,
@@ -132,6 +154,7 @@ def chat(req: ChatRequest):
             # imagen) — None si el clasificador falló/está deshabilitado,
             # preservando el comportamiento actual sin cambios.
             required_capabilities=ce_result.required_capabilities if ce_result is not None else None,
+            on_step=_on_step,
         )
     except ProviderError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -219,7 +242,7 @@ def chat(req: ChatRequest):
         # que ya hace OllamaClient.chat() internamente (model or
         # settings.llm.default_model), expuesta acá para que el frontend
         # pueda mostrar "Último modelo utilizado" (ver frontend/app.js).
-        "model_used": req.model or settings.llm.default_model,
+        "model_used": main_model,
         "steps": [
             {
                 "tool": s.tool_name, "arguments": s.arguments, "observation": s.observation,
@@ -228,6 +251,22 @@ def chat(req: ChatRequest):
             for i, s in enumerate(all_steps)
         ],
     }
+
+
+@router.get("/chat/progress/{session_id}")
+def chat_progress(session_id: str):
+    """
+    Recorrido en vivo del turno EN CURSO de esta sesión (ver
+    Session.progress en agent_core/sessions.py) — pensado para que el
+    frontend haga polling (cada ~1s, ver frontend/app.js) MIENTRAS un
+    /chat todavía está procesando, y así mostrar qué modelo/herramienta
+    está actuando en cada momento, no solo el resultado final. Un
+    session_id desconocido devuelve una lista vacía (mismo criterio de
+    degradación con gracia que el resto de /chat: nunca un error duro
+    por un id que no existe todavía o ya no existe).
+    """
+    session = orchestrator.sessions.get_or_create(session_id)
+    return {"progress": session.progress}
 
 
 # --- Subida de imágenes propias ---

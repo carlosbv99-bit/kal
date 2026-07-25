@@ -211,3 +211,28 @@ def test_denied_permissions_reaches_each_subtask_step():
 
     assert "ERROR" in result.step_results[0].result.steps[0].observation
     assert "network" in result.step_results[0].result.steps[0].observation
+
+
+def test_on_step_is_forwarded_to_each_subtask(monkeypatch):
+    """Recorrido en vivo (2026-07-24, ver agent_core/routers/chat.py):
+    on_step debe reenviarse tal cual a cada AgentLoop.run() por
+    subtarea — mismo patrón que denied_permissions/history arriba."""
+    tool = AgentTool(
+        name="remember", description="d", parameters_schema={"type": "object", "properties": {}},
+        handler=lambda **kw: "recordado",
+    )
+    responses = [
+        ChatResponse(content='{"steps": ["paso uno", "paso dos"]}'),
+        ChatResponse(content="", tool_calls=[ToolCall(name="remember", arguments={"content": "x"})]),
+        ChatResponse(content="listo uno"),
+        ChatResponse(content="Resultado del paso dos."),
+        ChatResponse(content="Respuesta final integrando ambos pasos."),
+    ]
+    loop, llm = _make_loop(responses, tools=[tool])
+    planning_loop = PlanningAgentLoop(loop, planner=Planner(llm_client=llm))
+    seen_steps: list = []
+
+    planning_loop.run("objetivo compuesto", on_step=lambda step: seen_steps.append(step))
+
+    assert len(seen_steps) == 1  # el único tool_call real, del primer subtask
+    assert seen_steps[0].tool_name == "remember"

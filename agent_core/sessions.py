@@ -50,6 +50,16 @@ class Session:
     # deny_permissions) y queda "pegajoso" para el resto de la sesión hasta
     # que se reemplace explícitamente (ver agent_core/orchestrator.py).
     denied_permissions: frozenset[Permission] = field(default_factory=frozenset)
+    # Recorrido en vivo del turno EN CURSO (ver GET /chat/progress/{id}
+    # en agent_core/routers/chat.py) — se reinicia al empezar cada
+    # /chat, se va llenando durante el procesamiento (funciona porque
+    # uvicorn corre con un solo worker, ver scripts/run_kal.sh: sin
+    # --workers, este mismo diccionario en memoria es compartido entre
+    # la request que está procesando el pedido y la que lo consulta).
+    # Estado efímero, no es parte del historial real de la conversación
+    # (eso son `turns`) — no tiene sentido que sobreviva más allá del
+    # turno que lo generó.
+    progress: list[dict] = field(default_factory=list)
 
 
 class SessionManager:
@@ -77,6 +87,12 @@ class SessionManager:
         """Reemplaza el override de permisos de la sesión (no se acumula
         con el anterior — ver ChatRequest.deny_permissions en orchestrator.py)."""
         session.denied_permissions = permissions
+
+    def clear_progress(self, session: Session) -> None:
+        session.progress = []
+
+    def append_progress(self, session: Session, entry: dict) -> None:
+        session.progress.append(entry)
 
 
 session_manager = SessionManager()

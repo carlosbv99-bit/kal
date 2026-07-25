@@ -5774,3 +5774,53 @@ más allá de "image". 8 tests nuevos (`test_download_service.py`,
 `test_kernel_bus.py`, `test_kernel_bus_socket_server.py`,
 `test_kernel_bus_download_service_integration.py`). Suite completa:
 932 tests, 0 regresiones.
+
+## Recorrido en vivo: qué modelo está actuando ahora mismo (2026-07-25)
+
+El usuario preguntó cómo monitorear, desde la web, qué modelo está
+actuando en cada momento — y pidió explícitamente verlo EN VIVO
+mientras `/chat` todavía está procesando (no solo al final, que es lo
+que ya cubría "Último modelo utilizado"). Investigando la arquitectura
+antes de diseñar: `/chat` es un POST síncrono, sin WebSocket/SSE en
+ningún lado del proyecto, y uvicorn corre con un solo worker (ver
+`scripts/run_kal.sh`, sin `--workers`) — las sesiones ya son un dict en
+memoria de ESE mismo proceso. Esto hizo que polling simple (sin
+librerías nuevas) fuera la opción de menor riesgo, en vez de
+WebSockets/SSE.
+
+**Diseño**: `Session` (`agent_core/sessions.py`) gana un campo
+`progress: list[dict]`, efímero (se reinicia al empezar cada `/chat`,
+no sobrevive al turno). `agent_core/routers/chat.py` lo va llenando en
+vivo: una entrada cuando el Conversation Engine clasifica (modelo,
+intención, confianza), una cuando arranca el modelo principal, y una
+por cada `AgentStep` real (vía un callback nuevo `on_step`, reenviado
+`PlanningAgentLoop.run()` → `AgentLoop.run()`, invocado justo después
+de cada `steps.append()` — para CUALQUIER paso, exitoso o rechazado
+por el tope de repeticiones, sin filtrar nada del lado del backend).
+Nuevo `GET /chat/progress/{session_id}` expone ese estado; el
+frontend hace polling cada ~900ms mientras el indicador de "trabajando"
+está visible, mostrando un panel nuevo con líneas legibles ("🧠 modelo
+analizó tu pedido", "⚙️ Modelo principal: X", "🔧 herramienta").
+
+**Detalle real resuelto**: para el PRIMER mensaje de una sesión nueva,
+el `session_id` recién existe DESPUÉS de que `/chat` responde — pero el
+polling necesita uno DESDE ANTES. Se generó client-side
+(`crypto.randomUUID()`) cuando todavía no hay uno, aprovechando que
+`SessionManager.get_or_create()` ya acepta cualquier id desconocido y
+arranca una sesión nueva bajo ese mismo id (comportamiento pensado
+originalmente para un backend reiniciado, reusado tal cual acá).
+
+Verificado en vivo con un pedido real de imagen: el panel mostró,
+mientras kal todavía generaba, la clasificación del Conversation
+Engine, el modelo principal, y cada llamada real a
+`image_generation`/`analyze_image` a medida que ocurrían (incluido el
+ciclo de autochequeo completo) — sin romper el resultado final ya
+deduplicado (ver la entrada de "Último modelo utilizado" más arriba).
+
+Fuera de alcance: WebSockets/SSE reales (no se justifican con un solo
+worker); persistencia de `progress` más allá del turno; pasar a
+múltiples workers de uvicorn (si se hiciera en el futuro, este
+mecanismo dejaría de ser confiable, queda anotado en el código).
+8 tests nuevos (`test_sessions.py`, `test_agent_loop.py`,
+`test_planning_agent_loop.py`, `test_orchestrator_chat_progress.py`
+nuevo). Suite completa: 940 tests, 0 regresiones.

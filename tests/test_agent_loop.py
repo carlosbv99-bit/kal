@@ -399,6 +399,31 @@ def _counting_tool(calls: list):
     )
 
 
+def test_on_step_is_called_for_every_step_including_a_rejected_repeat():
+    """
+    Recorrido en vivo (2026-07-24, ver agent_core/routers/chat.py::
+    GET /chat/progress/{id}): on_step debe enterarse de CUALQUIER paso
+    — exitoso, o rechazado por el tope de repeticiones — para que el
+    panel en vivo del frontend pueda mostrar incluso un intento
+    bloqueado, no solo los que sí se ejecutaron.
+    """
+    calls: list = []
+    tools = [_counting_tool(calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={})])
+        for _ in range(2)
+    ] + [ChatResponse(content="listo")]
+    loop, _ = _loop(responses, tools=tools)
+    seen_steps: list = []
+
+    result = loop.run("generá una imagen", max_steps=10, max_tool_repeats=1, on_step=lambda step: seen_steps.append(step))
+
+    assert len(seen_steps) == 2  # el exitoso Y el rechazado
+    assert seen_steps[0].observation == "imagen generada"
+    assert "ERROR" in seen_steps[1].observation
+    assert result.status == "success"
+
+
 def test_tool_call_beyond_max_tool_repeats_is_rejected_without_executing():
     calls: list = []
     tools = [_counting_tool(calls)]

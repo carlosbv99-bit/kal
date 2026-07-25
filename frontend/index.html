@@ -48,6 +48,11 @@
       <span class="msg-pending-dot"></span>
       <button type="button" class="msg-cancel-btn" id="pending-cancel-btn">Cancelar</button>
     </div>
+    <!-- Recorrido en vivo (qué modelo/herramienta está actuando AHORA,
+         mientras pending-indicator está visible) — ver
+         frontend/app.js::startProgressPolling y
+         GET /chat/progress/{session_id} en agent_core/routers/chat.py -->
+    <div class="progress-trace" id="progress-trace" hidden></div>
 
     <form class="chat-input-row" id="chat-form">
       <div class="model-select-wrap">

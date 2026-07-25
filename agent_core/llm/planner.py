@@ -14,8 +14,9 @@ completo e independiente, compartiendo la misma memoria entre pasos.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
-from agent_core.llm.agent_loop import AgentLoop, AgentRunResult
+from agent_core.llm.agent_loop import AgentLoop, AgentRunResult, AgentStep
 from agent_core.llm.json_extraction import extract_json_object
 from agent_core.llm.ollama_client import OllamaClient
 from sdk.permissions import Permission
@@ -116,6 +117,7 @@ class PlanningAgentLoop:
         denied_permissions: frozenset[Permission] = frozenset(),
         client: str | None = None,
         required_capabilities: list[str] | None = None,
+        on_step: Callable[[AgentStep], None] | None = None,
     ) -> PlanRunResult:
         plan = self.planner.plan(goal, model=model) if use_planner else Planner._single_step_plan(goal)
 
@@ -125,7 +127,7 @@ class PlanningAgentLoop:
                 step.description, model=model, max_steps=max_steps,
                 history=history, session_context=session_context,
                 denied_permissions=denied_permissions, client=client,
-                required_capabilities=required_capabilities,
+                required_capabilities=required_capabilities, on_step=on_step,
             )
             step_results.append(PlanStepResult(step=step.description, result=run_result))
             if run_result.status == "llm_error":

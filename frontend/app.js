@@ -274,19 +274,76 @@ const pendingIndicator = document.getElementById("pending-indicator");
 const pendingCancelBtn = document.getElementById("pending-cancel-btn");
 let currentAbortController = null;
 
-function showPending(controller) {
+function showPending(controller, sessionIdForPolling) {
   currentAbortController = controller;
   pendingIndicator.hidden = false;
+  if (sessionIdForPolling) startProgressPolling(sessionIdForPolling);
 }
 
 function hidePending() {
   currentAbortController = null;
   pendingIndicator.hidden = true;
+  stopProgressPolling();
 }
 
 pendingCancelBtn.addEventListener("click", () => {
   if (currentAbortController) currentAbortController.abort();
 });
+
+// ---------- Recorrido en vivo (qué modelo/herramienta está actuando
+// AHORA MISMO, ver GET /chat/progress/{session_id} en
+// agent_core/routers/chat.py) — mientras /chat todavía está en curso
+// del lado del servidor. /chat es sincrónico (una sola llamada larga),
+// así que esto hace polling: pregunta cada ~900ms qué se acumuló hasta
+// el momento y agrega solo las líneas nuevas. ----------
+
+const progressTrace = document.getElementById("progress-trace");
+let progressPollTimer = null;
+
+function _progressLineFor(entry) {
+  let text;
+  if (entry.stage === "conversation_engine") {
+    text = `🧠 ${entry.model} analizó tu pedido (intención: ${entry.intent}, confianza: ${entry.confidence.toFixed(2)})`;
+  } else if (entry.stage === "main_model") {
+    text = `⚙️ Modelo principal: ${entry.model}`;
+  } else if (entry.stage === "tool_call") {
+    text = `🔧 ${entry.tool}`;
+  } else {
+    text = JSON.stringify(entry);
+  }
+  const line = el("div", "progress-trace-line", text);
+  if (entry.stage === "tool_call" && !entry.ok) line.classList.add("is-error");
+  return line;
+}
+
+function startProgressPolling(sessionIdForPolling) {
+  stopProgressPolling();
+  progressTrace.innerHTML = "";
+  progressTrace.hidden = false;
+  let shown = 0;
+  progressPollTimer = setInterval(async () => {
+    try {
+      const data = await api(`/chat/progress/${sessionIdForPolling}`);
+      const entries = data.progress || [];
+      for (; shown < entries.length; shown++) {
+        progressTrace.appendChild(_progressLineFor(entries[shown]));
+      }
+      progressTrace.scrollTop = progressTrace.scrollHeight;
+    } catch (e) {
+      // El polling es un plus informativo — un fallo puntual (red,
+      // backend reiniciando) nunca debe romper el chat en sí.
+    }
+  }, 900);
+}
+
+function stopProgressPolling() {
+  if (progressPollTimer) {
+    clearInterval(progressPollTimer);
+    progressPollTimer = null;
+  }
+  progressTrace.hidden = true;
+  progressTrace.innerHTML = "";
+}
 
 // ---------- Imágenes en el chat ----------
 // Toda imagen subida, generada, o editada/corregida aparece como un
@@ -376,7 +433,14 @@ chatForm.addEventListener("submit", async (ev) => {
   // no hay forma barata de interrumpir a mitad una llamada al modelo o
   // una generación de imagen ya en curso.
   const controller = new AbortController();
-  showPending(controller);
+  // El recorrido en vivo (ver startProgressPolling) necesita un
+  // session_id DESDE ANTES de que /chat responda — para el primer
+  // mensaje de una sesión, el backend recién lo genera DENTRO de esa
+  // misma llamada, así que se genera acá (el backend acepta cualquier
+  // session_id desconocido y arranca una sesión nueva bajo ese mismo
+  // id, ver agent_core/sessions.py::SessionManager.get_or_create).
+  if (!sessionId) sessionId = crypto.randomUUID();
+  showPending(controller, sessionId);
 
   const model = document.getElementById("model-select").value;
 

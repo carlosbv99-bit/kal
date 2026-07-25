@@ -408,6 +408,7 @@ class AgentLoop:
         denied_permissions: frozenset[Permission] = frozenset(),
         client: str | None = None,
         required_capabilities: list[str] | None = None,
+        on_step: Callable[[AgentStep], None] | None = None,
     ) -> AgentRunResult:
         """
         `history` (turnos previos de la misma sesión, ver
@@ -446,6 +447,13 @@ class AgentLoop:
         una imagen). None/vacío (Conversation Engine deshabilitado o
         sin señal) preserva el comportamiento actual sin cambios — la
         restricción por `client` sigue siendo la misma de siempre.
+        `on_step`: callback opcional, invocado con CADA `AgentStep` a
+        medida que ocurre (exitoso, con error real, o rechazado por el
+        tope de repeticiones) — pensado para que agent_core/routers/
+        chat.py arme un recorrido en vivo consultable vía polling
+        (GET /chat/progress/{id}) mientras este run() todavía está en
+        curso. None (default) preserva el comportamiento actual sin
+        cambios.
         """
         max_steps = max_steps or settings.llm.max_agent_steps
         max_tool_repeats = max_tool_repeats or settings.llm.max_tool_repeats
@@ -672,12 +680,13 @@ class AgentLoop:
                         origin_tool = artifact_paths_this_turn.get(tool_call.arguments.get("image_path"))
                         if origin_tool is not None:
                             self_checked_tools.add(origin_tool)
-                steps.append(
-                    AgentStep(
-                        tool_name=tool_call.name, arguments=tool_call.arguments,
-                        observation=observation, artifact=artifact,
-                    )
+                new_step = AgentStep(
+                    tool_name=tool_call.name, arguments=tool_call.arguments,
+                    observation=observation, artifact=artifact,
                 )
+                steps.append(new_step)
+                if on_step is not None:
+                    on_step(new_step)
                 messages.append({"role": "tool", "content": observation, "tool_call_id": tool_call.id})
 
         logger.warning(f"Agente agotó max_steps={max_steps} sin respuesta final para: {goal!r}")
