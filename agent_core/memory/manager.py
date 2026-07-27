@@ -8,6 +8,7 @@ flujo de consolidación y promoción entre niveles.
 from __future__ import annotations
 
 from agent_core.memory.base import MemoryConfidence, MemoryItem
+from agent_core.memory.events import MemoryEvent, MemoryObserver
 from agent_core.memory.long_term import LongTermMemory
 from agent_core.memory.mid_term import MidTermMemory
 from agent_core.memory.short_term import ShortTermMemory
@@ -27,16 +28,23 @@ class MemoryManager:
         short_term: ShortTermMemory | None = None,
         mid_term: MidTermMemory | None = None,
         long_term: LongTermMemory | None = None,
+        observers: list[MemoryObserver] | None = None,
     ):
         """
         Por defecto construye los tres backends reales (rutas de
         config.yaml). Permite inyectar instancias propias — usado en
         tests para evitar escribir en data/mid_term o
         data/long_term reales del proyecto durante la suite.
+
+        `observers`: infraestructura preparada para un futuro Knowledge
+        Miner (ver agent_core/memory/events.py y
+        agent_core/knowledge/) — vacío por defecto, cero cambio de
+        comportamiento si nadie se registra.
         """
         self.short_term = short_term or ShortTermMemory()
         self.mid_term = mid_term or MidTermMemory()
         self.long_term = long_term or LongTermMemory()
+        self._observers: list[MemoryObserver] = list(observers or [])
 
     def remember(
         self,
@@ -60,6 +68,28 @@ class MemoryManager:
             "long_term": self.long_term.retrieve(query, top_k),
         }
 
+    def register_observer(self, observer: MemoryObserver) -> None:
+        """
+        Infraestructura preparada para un futuro Knowledge Miner (ver
+        agent_core/memory/events.py, agent_core/knowledge/) — sin
+        ningún observer registrado (default), el comportamiento de
+        consolidate_short_to_mid()/promote_mid_to_long() es idéntico a
+        antes de que esto existiera.
+        """
+        self._observers.append(observer)
+
+    def _notify(self, event: MemoryEvent) -> None:
+        # Fail-safe a propósito (mismo criterio que
+        # ConversationEngine.classify()): un observer experimental
+        # (p.ej. un Knowledge Miner todavía sin madurar) nunca debe
+        # poder romper el ciclo real de consolidación/promoción de
+        # memoria.
+        for observer in self._observers:
+            try:
+                observer.on_memory_event(event)
+            except Exception as e:
+                logger.warning(f"Observer de memoria falló, se ignora: {e}")
+
     def consolidate_short_to_mid(self, summarizer=None) -> int:
         """
         Traslada el contenido de corto plazo a mediano plazo, resumiendo
@@ -71,6 +101,7 @@ class MemoryManager:
             if summarizer is not None:
                 item.content = summarizer(item.content)
             self.mid_term.store(item)
+            self._notify(MemoryEvent(kind="consolidated", item=item))
         logger.info(f"Consolidados {len(items)} items de corto a mediano plazo")
         return len(items)
 
@@ -91,6 +122,7 @@ class MemoryManager:
             if item.confidence not in _HUMAN_CONFIRMED:
                 item.confidence = MemoryConfidence.APRENDIDA
             self.long_term.store(item)
+            self._notify(MemoryEvent(kind="promoted", item=item))
         logger.info(f"Promovidos {len(candidates)} items de mediano a largo plazo")
         return len(candidates)
 

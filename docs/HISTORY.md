@@ -6095,3 +6095,63 @@ Ambos bugs vinieron del mismo pedido real, en el mismo turno fallido
 — se investigaron y corrigieron juntos. 2 tests nuevos en
 `test_agent_loop.py`. Suite (subconjunto rápido): 928 tests, 0
 regresiones.
+
+## Modelo de madurez de 4 estados + Knowledge Miner (infraestructura) (2026-07-25)
+
+El usuario propuso un "Knowledge Miner" que aprenda de TODO el sistema
+(no solo memoria conversacional) — logs del Kernel, errores de
+Skills, métricas del Runtime, eventos del Marketplace, auditorías —
+produciendo "Knowledge" (patrones con `confidence` + `recommendation`,
+no solo un resumen), en un componente independiente (`Memory →
+Knowledge Miner → Knowledge Base`, nunca dentro de `MemoryManager`).
+
+Después generalizó esto a un principio más amplio: kal es un Kernel,
+y los pilares arquitectónicos de un Kernel se preparan con
+anticipación (Linux no agregó el VFS cuando apareció el segundo
+sistema de archivos; Windows NT no agregó el HAL cuando apareció el
+segundo fabricante). Propuso un modelo de madurez de 4 estados —
+**Visión → Arquitectura → Infraestructura → Funcionalidad** — en vez
+del "Diseñado → Implementado" anterior, con un heurístico concreto:
+"si dentro de 2 años esto era necesario, ¿su ausencia rompería la
+arquitectura?" — si sí, prepararlo ya (mínimo Arquitectura, idealmente
+Infraestructura); si no, esperar. Clasificó varios componentes futuros
+con este criterio (Runtime Manager, Artifact Manager, Workspace Trust,
+Capability Broker, Conversation Engine, Knowledge Service, Knowledge
+Miner, Knowledge Graph — ver la memoria de proyecto para la tabla
+completa). Este modelo REFINA (no contradice) la disciplina de alcance
+ya establecida en este proyecto: sigue aplicando de lleno a la
+INTELIGENCIA/algoritmos (esperar datos reales), pero los
+CONTRATOS/eventos que esa inteligencia futura va a necesitar sí se
+preparan ahora — son lo más caro de cambiar después, no el código de
+implementación en sí.
+
+**Implementado hoy, explícitamente solo en estado "Infraestructura"**
+(cero lógica de minería real):
+- `agent_core/memory/events.py` (nuevo): `MemoryEvent` (`kind`:
+  `"consolidated"` | `"promoted"` — los DOS puntos de transición que
+  `MemoryManager` ya tenía, ninguno inventado) + `MemoryObserver`
+  (Protocol, un solo método `on_memory_event`, mismo criterio
+  estructural que `LLMProvider`/`Runtime` de este proyecto).
+- `MemoryManager` (`agent_core/memory/manager.py`) gana
+  `register_observer()`/`_notify()` — llamado DESPUÉS de guardar en el
+  backend correspondiente en `consolidate_short_to_mid()`/
+  `promote_mid_to_long()`. Fail-safe a propósito (mismo criterio que
+  `ConversationEngine.classify()`): un observer que lanza una
+  excepción nunca rompe el ciclo real de memoria. Sin observers
+  registrados (default), comportamiento IDÉNTICO a antes — los 6 tests
+  existentes de `test_memory_manager.py` sin ningún cambio.
+- `agent_core/knowledge/` (paquete nuevo): `Pattern` (la forma final
+  de un "Knowledge" — `id`/`members`/`confidence`/`summary`/
+  `recommendation`/`last_seen`, ya con su forma completa aunque nada
+  la produzca todavía), `KnowledgeBase` (`add()`/`query()` — `query()`
+  siempre devuelve `[]` hoy, sin similaridad real), `KnowledgeMiner`
+  (implementa `MemoryObserver`, `on_memory_event()` deliberadamente
+  vacío — el punto de enganche ya existe, la minería real queda para
+  cuando haya uso acumulado real).
+- Deliberadamente NO registrado por defecto en `agent_core/orchestrator.py`
+  — no hay razón real para que el proceso principal cargue un observer
+  que no hace nada todavía.
+
+11 tests nuevos (`test_memory_manager_observers.py`,
+`test_knowledge.py`) con backends falsos livianos (sin chromadb real).
+Suite (subconjunto rápido): 939 tests, 0 regresiones.
