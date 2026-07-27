@@ -6577,3 +6577,34 @@ temperature bajo. Mismo espíritu que `capability_broker.py` (desbloquea
 herramientas por capacidad detectada), aplicado a reforzar la
 instrucción en vez de solo el acceso. Pospuesto a una sesión futura con
 la máquina descansada — decisión explícita del usuario.
+
+## Bug real: deformidad sutil en imágenes generadas (SDXL-Turbo con 2 pasos)
+
+El usuario reportó, de forma general, que los pedidos de imagen salían
+"duplicados (deformados) pero lejos del pedido". Primera prueba en vivo
+("un gato naranja durmiendo sobre un sofá azul") pareció perfecta a
+primera vista — pero el usuario señaló algo que se me había pasado por
+alto: **el gato tenía tres orejas**, una deformidad sutil fácil de no
+notar en una revisión superficial.
+
+Causa real: `multimodal.image.num_inference_steps` estaba en **2**
+(`utils/config.py` y `config/config.yaml`) — un valor extremo incluso
+para SDXL-Turbo (que soporta hasta 4). Con tan pocos pasos, los
+detalles finos (orejas, patas) son justo donde más se nota la falta de
+precisión del modelo.
+
+**Fix**: subido a 4 (el máximo recomendado para este modelo, sin costo
+de tiempo relevante en CPU — sigue siendo "turbo"). Verificado en vivo,
+mismo prompt exacto: la segunda imagen tiene las dos orejas correctas,
+mucho más detalle de pelaje, sin deformidades — y el propio mecanismo
+de autochequeo (generar -> analyze_image -> comparar) detectó y avisó
+honestamente una diferencia real menor (el gato quedó despierto en vez
+de dormido), en vez de afirmar que coincidía sin serlo.
+
+**Fuera de alcance de esta fase, discutido con el usuario**: un
+Stable Diffusion completo (no destilado, ~30-50 pasos) daría mejor
+precisión anatómica todavía, a costa de minutos por imagen en CPU (en
+vez de segundos) y una descarga nueva de varios GB — el usuario eligió
+probar primero el cambio barato de pasos, que ya mostró una mejora
+real; el modelo completo queda como posible próximo paso si la calidad
+sigue sin convencer.
