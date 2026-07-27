@@ -18,8 +18,11 @@ class _FakeUnderlyingClient:
     def __init__(self):
         self.chat_calls: list = []
 
-    def chat(self, messages, model=None, tools=None):
-        self.chat_calls.append({"messages": messages, "model": model, "tools": tools})
+    def chat(self, messages, model=None, tools=None, response_format=None, temperature=None):
+        self.chat_calls.append({
+            "messages": messages, "model": model, "tools": tools,
+            "response_format": response_format, "temperature": temperature,
+        })
         return ChatResponse(content="respuesta real")
 
     def list_models(self):
@@ -66,7 +69,32 @@ def test_chat_delegates_to_the_registered_runtime_with_the_same_arguments():
     result = provider.chat(messages, model="algun-modelo", tools=[{"type": "function"}])
 
     assert result == ChatResponse(content="respuesta real")
-    assert client.chat_calls == [{"messages": messages, "model": "algun-modelo", "tools": [{"type": "function"}]}]
+    assert client.chat_calls == [{
+        "messages": messages, "model": "algun-modelo", "tools": [{"type": "function"}],
+        "response_format": None, "temperature": None,
+    }]
+
+
+def test_chat_passes_through_response_format_and_temperature_only_when_requested():
+    """
+    Agregado para el Conversation Engine (agent_core/conversation_engine.py),
+    que necesita forzar modo JSON y un temperature bajo — antes
+    RuntimeManagedLLMProvider.chat() solo conocía messages/model/tools,
+    así que conectar el Conversation Engine al Runtime Manager habría
+    perdido estos dos kwargs en silencio.
+    """
+    provider, client = _provider()
+    messages = [{"role": "user", "content": "hola"}]
+
+    provider.chat(messages, model="algun-modelo", response_format="json", temperature=0.1)
+
+    assert client.chat_calls[-1]["response_format"] == "json"
+    assert client.chat_calls[-1]["temperature"] == 0.1
+
+    provider.chat(messages, model="algun-modelo")
+
+    assert client.chat_calls[-1]["response_format"] is None
+    assert client.chat_calls[-1]["temperature"] is None
 
 
 def test_list_models_delegates_directly_to_the_underlying_client():
