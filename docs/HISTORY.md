@@ -6476,3 +6476,45 @@ backend OpenAI-compatible local de uno remoto (posible reuso de
 `test_core_tools.py`/`test_memory_short_term.py`/
 `test_memory_mid_term.py`/`test_memory_long_term.py`), suite completa
 sin regresiones.
+
+## Bug real: negación falsa de audio_generation en la interfaz web (2026-07-27)
+
+Reportado por el usuario con la transcripción real: pedido "lee y
+entregame el audio de todo tu ultimo comentario con voz femenina"
+(convertir a audio la propia respuesta anterior de kal, ya presente en
+el HISTORIAL) respondió "no tengo la capacidad de leer textos o
+generar audio directamente en esta conversación" — falso,
+`audio_generation` estaba disponible y funciona para exactamente ese
+caso.
+
+**Investigación con evidencia real, no supuesta**: el correlation ID
+del log real (`f3d2649fa0d4`) mostró una sola línea, sin ningún intento
+de tool call — descartó que el Conversation Engine haya interceptado
+esto con baja confianza (ese camino deja otro rastro). Reproduciendo
+con el modelo real (`qwen2.5-coder:14b`) y el historial exacto: el
+Conversation Engine clasificó correctamente (`text-to-speech`,
+confidence 0.95, 5 corridas seguidas) y el AgentLoop completo llamó a
+`audio_generation` correctamente y generó el audio real — **no se pudo
+reproducir el fallo de forma determinística**, consistente con
+variabilidad de muestreo real del modelo (no con un bug de código
+aislable en la clasificación en sí).
+
+**Causa raíz real, encontrada al comparar con un fix anterior**: este
+es el MISMO patrón ya corregido una vez
+(`technical_vague_request_triggers_false_no_internet_claim`, "no tengo
+acceso a internet" inventado) — pero ese fix se aplicó SOLO a
+`agent_core/client_provider.py::_VSCODE_CLIENT_INSTRUCTION` (client=
+"vscode"), nunca al `SYSTEM_PROMPT` general de
+`agent_core/llm/agent_loop.py` que usa TAMBIÉN la interfaz web (el
+cliente real de este bug, confirmado con el usuario). El guard nunca
+se generalizó al camino que de verdad falló.
+
+**Fix**: nuevo párrafo en `SYSTEM_PROMPT` (mismo criterio que el de VS
+Code): antes de decir que no se puede hacer algo, revisar la lista
+real de herramientas disponibles — casi siempre kal SÍ tiene la
+capacidad y la herramienta correspondiente está ahí; ante un pedido
+ambiguo, pedir aclaración concreta en vez de inventar una incapacidad;
+mencionar una limitación real solo DESPUÉS de haber intentado la
+herramienta y recibido un rechazo concreto. 1 test nuevo
+(`test_agent_loop.py::test_system_prompt_tells_the_model_to_check_its_tools_before_denying_a_capability`),
+verificado también en vivo contra el modelo real tras el fix.
