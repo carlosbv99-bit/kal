@@ -5,7 +5,6 @@ Este script recopila todos los archivos clave necesarios para que un especialist
 tenga una visión completa del proyecto.
 """
 
-import os
 import zipfile
 from datetime import datetime
 from pathlib import Path

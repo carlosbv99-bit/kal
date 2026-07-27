@@ -6155,3 +6155,67 @@ implementación en sí.
 11 tests nuevos (`test_memory_manager_observers.py`,
 `test_knowledge.py`) con backends falsos livianos (sin chromadb real).
 Suite (subconjunto rápido): 939 tests, 0 regresiones.
+
+## CI general: tests + lint en cada push/PR (2026-07-25)
+
+El usuario pidió una segunda opinión sobre un análisis externo del
+código de kal (validación AST, dependencia de Docker, densidad de
+`agent_loop.py`, ausencia de CI, dependencias pesadas, fallo silencioso
+del Conversation Engine). La mayoría de los puntos ya estaban
+documentados/aceptados por diseño (AST como filtro barato, Docker como
+frontera real, eBPF Linux-only) — pero uno era **factualmente
+incorrecto tal como estaba planteado**: el análisis decía "no existe
+GitHub Actions" — sí existe (`.github/workflows/validate-skills.yml`),
+solo que angosto (corre `scripts/validate_skills.py` únicamente
+cuando cambia `skills/**`, nunca la suite completa de tests). Prioridad
+acordada: CI general primero, protege todo lo demás.
+
+**Antes de agregar el gate de lint**: corrí `ruff check --select=E9,F`
+(errores reales — sintaxis/pyflakes, no estilo, para no bloquear en
+cientos de preferencias de formato sobre código ya escrito) contra
+todo el repo — 15 issues reales, todos menores pero legítimos: imports
+sin usar, variables locales sin usar, un f-string sin placeholders, y
+un caso real (no solo cosmético) — `error_handling/detector.py`
+referenciaba `RepairStrategy` en una anotación de tipo sin importarlo
+(nunca explota en runtime gracias a `from __future__ import
+annotations`, pero rompía cualquier chequeo de tipos/autocompletado
+real). Los 11 auto-fixeables se corrigieron con `ruff --fix`; los 4
+restantes (el import faltante + 3 variables de test sin usar) a mano.
+Suite completa re-confirmada sin regresiones tras la limpieza.
+
+**Diseño de `.github/workflows/ci.yml`**: corre en cada push a `main`
+y en cada PR (a diferencia de `validate-skills.yml`, sin filtro de
+path). Instala un set de dependencias LIVIANO — sin
+diffusers/accelerate/piper-tts/faster-whisper/rembg/playwright/
+sentence-transformers/moviepy (el stack multimodal pesado, varios GB)
+— los tests que los necesitan usan `pytest.importorskip(...)` y se
+saltan solos.
+
+**Verificado de verdad, no asumido**: antes de confiar en el diseño,
+armé un venv nuevo desde cero e instalé SOLO el set liviano propuesto
+para ver qué pasaba de verdad. Encontré 2 correcciones reales al plan
+original: `chromadb` resultó indispensable para que la suite ENTERA
+colecte (no solo los tests de memoria de largo plazo) — `LongTermMemory.__init__()`
+(`agent_core/memory/long_term.py`) llama a `_build_client()` (que
+importa chromadb) de forma NO perezosa, y `MemoryManager()` se
+construye como singleton al importar `agent_core/orchestrator.py` —
+así que hace falta para que `tests/conftest.py` mismo importe sin
+explotar. `Pillow` también hizo falta (algunos tests la importan
+directo, sin `importorskip`). Con esas dos correcciones: **921 passed,
+14 skipped correctamente (sentence-transformers/diffusers/etc., vía
+`pytest.importorskip`), 0 fallos, ~3 minutos** en un venv limpio de
+verdad — no una suposición.
+
+Docker no necesita configuración especial: los runners `ubuntu-latest`
+ya lo traen — los tests marcados `requires_docker` (ver
+`tests/conftest.py`) corren de verdad, no se saltan. Se instala
+`clamav` (el binario `clamscan`, no un daemon) vía `apt-get` para que
+los tests reales de escaneo de artefactos de skills (fail-closed por
+diseño) pasen en vez de rechazar.
+
+**Fuera de alcance de esta fase**: `nightly.yml` (cobertura real
+end-to-end del stack multimodal pesado) y `release.yml` (verificación
+de firmas + release) — mencionados en el análisis original, quedan
+para cuando haga falta. Tampoco se tocó `requirements.txt` (separarlo
+en core/multimodal/dev es una mejora real pero distinta, de menor
+prioridad, discutida aparte).

@@ -56,7 +56,7 @@ def test_keypair_persists_across_instances(tmp_path):
 
 
 def test_private_key_file_has_restrictive_permissions(tmp_path):
-    signer = ToolSigner(key_dir=tmp_path)
+    ToolSigner(key_dir=tmp_path)
     key_path = tmp_path / "tool_signing_key"
 
     assert key_path.exists()

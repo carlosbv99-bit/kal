@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 
 from error_handling.circuit_breaker import circuit_breaker, error_signature
-from error_handling.strategies import STRATEGY_REGISTRY, RepairContext, RepairResult
+from error_handling.strategies import STRATEGY_REGISTRY, RepairContext, RepairResult, RepairStrategy
 from audit.audit_log import AuditEvent, audit_log
 from utils.logger import get_logger
 
