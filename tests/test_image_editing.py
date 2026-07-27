@@ -137,7 +137,6 @@ def test_add_text_actually_changes_pixels_near_the_requested_position(tool, sour
 
 
 def test_add_text_default_position_is_top():
-    from PIL import Image
 
     from tool_integration.adapters.image_editing import ImageEditingTool
 

@@ -775,7 +775,7 @@ def test_default_max_tool_repeats_comes_from_settings(monkeypatch):
     ] + [ChatResponse(content="listo")]
     loop, _ = _loop(responses, tools=tools)
 
-    result = loop.run("generá una imagen", max_steps=10)  # sin max_tool_repeats explícito
+    loop.run("generá una imagen", max_steps=10)  # sin max_tool_repeats explícito
 
     assert len(calls) == 1
 
@@ -1230,7 +1230,7 @@ def test_native_tool_calls_still_take_priority_over_fallback_parsing():
     ]
     loop, _ = _loop(responses, task_executor=task_executor)
 
-    result = loop.run("algo")
+    loop.run("algo")
 
     assert task_executor.run_calls == ["print('nativo')"]
 

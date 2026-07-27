@@ -65,7 +65,6 @@ def test_purge_expired_never_removes_permanente_items(mid_term):
 pytest.importorskip("chromadb")
 pytest.importorskip("sentence_transformers")
 
-from agent_core.memory.long_term import LongTermMemory  # noqa: E402
 from agent_core.memory.manager import MemoryManager  # noqa: E402
 from agent_core.memory.short_term import ShortTermMemory  # noqa: E402
 from utils.config import settings  # noqa: E402

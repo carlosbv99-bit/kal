@@ -15,7 +15,6 @@ pytest.importorskip("chromadb")
 pytest.importorskip("sentence_transformers")
 
 from agent_core.memory.base import MemoryItem  # noqa: E402
-from agent_core.memory.long_term import LongTermMemory  # noqa: E402
 from agent_core.memory.manager import MemoryManager  # noqa: E402
 from agent_core.memory.mid_term import MidTermMemory  # noqa: E402
 from agent_core.memory.short_term import ShortTermMemory  # noqa: E402

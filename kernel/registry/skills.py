@@ -209,8 +209,8 @@ def load_skills(
         signature_status = verify_skill_signature(skill_dir)
         if signature_status == "tampered":
             detail = (
-                f"skill.sig no verifica contra el contenido actual de la carpeta — el paquete "
-                f"fue alterado desde que se firmó (o skill.sig está corrupto)."
+                "skill.sig no verifica contra el contenido actual de la carpeta — el paquete "
+                "fue alterado desde que se firmó (o skill.sig está corrupto)."
             )
             logger.warning(f"Skill '{manifest.name}': {detail}")
             results.append(

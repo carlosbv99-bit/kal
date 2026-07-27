@@ -19,7 +19,6 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from tests.conftest import requires_docker
