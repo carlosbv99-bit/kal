@@ -82,6 +82,19 @@ class LLMConfig(BaseModel):
     # rechaza sin ejecutar (cada llamada de generación real cuesta
     # minutos de cómputo en esta máquina, no es gratis dejarlo correr).
     max_tool_repeats: int = 3
+    # BUG REAL ENCONTRADO EN USO (2026-07-27): agent_loop.py nunca fijaba
+    # temperature en su llamada principal — heredaba el default alto de
+    # Ollama (~0.8, pensado para charla creativa, no para decidir de forma
+    # confiable si hay que llamar una herramienta). Mismo prompt exacto
+    # ("lee este poema y entregame el audio", con audio_generation
+    # disponible) probado dos veces seguidas: una vez el modelo respondió
+    # con una negación falsa de capacidad en texto plano, sin ningún
+    # intento de tool call; la otra, llamó a audio_generation
+    # correctamente y generó el audio real. Mismo patrón que
+    # ConversationEngineConfig.temperature (ver más abajo), aplicado acá
+    # al loop principal de razonamiento/herramientas, no solo al
+    # clasificador chico.
+    temperature: float = 0.3
 
 
 class RuntimeSlotConfig(BaseModel):

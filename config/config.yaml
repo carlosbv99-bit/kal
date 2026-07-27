@@ -78,6 +78,17 @@ llm:
   # herramienta en un turno, se rechaza sin ejecutar (cada generación
   # real cuesta minutos de cómputo acá, no es gratis dejarlo correr).
   max_tool_repeats: 3
+  # BUG REAL ENCONTRADO EN USO (2026-07-27): agent_loop.py nunca fijaba
+  # temperature — heredaba el default alto de Ollama (~0.8, pensado para
+  # charla creativa, no para decidir de forma confiable si hay que llamar
+  # una herramienta). Mismo prompt exacto probado dos veces seguidas ("lee
+  # este poema y entregame el audio", con audio_generation disponible):
+  # una vez el modelo respondió con una negación falsa de capacidad, sin
+  # ningún intento de tool call; la otra, llamó a audio_generation
+  # correctamente. Bajo pero no cero: prioriza confiabilidad en la
+  # decisión de usar herramientas sin volver la prosa de la respuesta
+  # final completamente robótica.
+  temperature: 0.3
 
 # Runtime Manager (2026-07-25, ver agent_core/runtime/ y docs/HISTORY.md):
 # cuántas ejecuciones concurrentes tolera cada runtime real ANTES de que
