@@ -50,6 +50,9 @@ INCLUDE_FILES=(
     "CONTRIBUTING.md"
     "LICENSE"
     "requirements.txt"
+    "requirements-core.txt"
+    "requirements-multimodal.txt"
+    "requirements-dev.txt"
     ".env.example"
 )
 

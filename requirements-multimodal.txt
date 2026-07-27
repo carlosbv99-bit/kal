@@ -1,0 +1,38 @@
+# Capacidades multimodales de kal: generación/edición de imágenes, texto a
+# voz, voz a texto, video, navegador. Todo 100% local salvo lo que su
+# propio módulo documente lo contrario. Los tests que dependen de estos
+# paquetes usan pytest.importorskip(...) y se saltan solos si no están
+# instalados — por eso CI no los instala (ver .github/workflows/ci.yml).
+
+-r requirements-core.txt
+
+# --- Embeddings locales para memoria de largo plazo ---
+sentence-transformers>=3.0    # embeddings locales, sin API externa
+
+# --- Generación de imágenes/video ---
+diffusers>=0.27          # generación de imágenes (sd-turbo)
+accelerate>=0.30         # carga eficiente de modelos de diffusers
+huggingface_hub>=0.23    # descarga de modelos (embeddings, sd-turbo, voces de piper)
+moviepy>=1.0.3           # composición de video (ver NOTA en video_gen.py sobre v1 vs v2)
+# NOTA: video_gen.py también requiere el binario `ffmpeg` del sistema,
+# no instalable vía pip: `sudo apt install ffmpeg`
+
+# --- Texto a voz ---
+piper-tts>=1.2           # texto a voz local vía ONNX, eficiente en CPU
+
+# --- Voz a texto ---
+faster-whisper>=1.0     # Whisper vía CTranslate2, más liviano/rápido en CPU que openai-whisper
+
+# --- Edición de imágenes ---
+rembg>=2.0               # eliminar fondo (modelo u2net, se descarga la 1a vez)
+# NOTA: se evaluó `realesrgan` para upscale con IA real — su dependencia
+# núcleo `basicsr` no instala en este entorno (incompatible con
+# torchvision recientes). Por eso el upscale de image_editing.py usa un
+# resize Lanczos (Pillow), no super-resolución con IA — ver docstring
+# de ese adaptador.
+
+# --- Navegador (browser agent) ---
+playwright>=1.40
+# NOTA: además del paquete pip, hace falta instalar el binario de Chromium
+# una vez: `playwright install chromium` (mismo patrón que ffmpeg en
+# video_gen.py — no es instalable solo con pip).

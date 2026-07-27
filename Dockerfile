@@ -5,7 +5,7 @@ RUN groupadd -r agent && useradd -r -g agent agent
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.txt requirements-core.txt requirements-multimodal.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .

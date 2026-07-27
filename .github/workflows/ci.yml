@@ -2,20 +2,19 @@ name: CI
 
 # Pipeline general (tests + lint) en cada push/PR — a diferencia de
 # validate-skills.yml (que solo corre cuando cambia skills/**), este
-# corre siempre. Instala un set de dependencias LIVIANO a propósito
-# (sin diffusers/accelerate/piper-tts/faster-whisper/rembg/playwright/
-# sentence-transformers/moviepy/huggingface_hub — la parte
-# multimodal/ML pesada de requirements.txt, varios GB): los tests que
-# las necesitan usan `pytest.importorskip(...)` y se saltan solos en
+# corre siempre. Instala requirements-core.txt + requirements-dev.txt a
+# propósito, SIN requirements-multimodal.txt (diffusers/accelerate/
+# piper-tts/faster-whisper/rembg/playwright/sentence-transformers/
+# moviepy/huggingface_hub — la parte ML pesada, varios GB): los tests
+# que las necesitan usan `pytest.importorskip(...)` y se saltan solos en
 # vez de fallar (ver tests/test_memory_manager.py, tests/test_image_gen.py,
 # etc.) — así el feedback rápido no depende de descargar modelos
-# pesados en cada corrida. `chromadb` y `Pillow` SÍ se instalan pese a
-# ser "multimodal" en espíritu — ver el comentario del paso de
-# instalación más abajo, son necesarios para que la suite entera
-# colecte, no solo para memoria de largo plazo. La cobertura real
-# end-to-end de la parte pesada (SDXL-Turbo, whisper, piper, etc.)
-# queda para un job nocturno separado (nightly.yml, todavía no
-# implementado).
+# pesados en cada corrida. chromadb y Pillow SÍ están en
+# requirements-core.txt pese a ser "multimodal" en espíritu — son
+# necesarios para que la suite entera colecte, no solo para memoria de
+# largo plazo (ver docs/HISTORY.md). La cobertura real end-to-end de la
+# parte pesada (SDXL-Turbo, whisper, piper, etc.) queda para un job
+# nocturno separado (nightly.yml, todavía no implementado).
 #
 # Docker SÍ está disponible por defecto en runners ubuntu-latest (sin
 # necesidad de servicios extra ni de construir una imagen) — los tests
@@ -47,27 +46,8 @@ jobs:
       - name: Instalar ClamAV
         run: sudo apt-get update && sudo apt-get install -y clamav
 
-      - name: Instalar dependencias (set liviano, sin el stack multimodal)
-        # BUG REAL ENCONTRADO PROBANDO ESTE WORKFLOW EN UN VENV NUEVO:
-        # LongTermMemory (agent_core/memory/long_term.py) importa
-        # chromadb DENTRO del __init__ (no perezoso de verdad — solo
-        # sentence-transformers lo es), y MemoryManager() se construye
-        # como singleton al importar agent_core/orchestrator.py — así
-        # que chromadb hace falta para que CUALQUIER test colecte, no
-        # solo los de memoria de largo plazo. Pillow también resultó
-        # necesario (tests/test_download_manager.py y similares la
-        # importan directo, sin importorskip). Validado localmente en
-        # un venv nuevo: 921 passed, 14 skipped (sentence-transformers/
-        # diffusers/etc., correctamente vía pytest.importorskip), 0
-        # fallos, ~3 minutos.
-        run: |
-          pip install \
-            pydantic pydantic-settings PyYAML python-dotenv requests \
-            fastapi "uvicorn[standard]" python-multipart \
-            sqlalchemy docker cryptography \
-            tenacity structlog psutil \
-            chromadb Pillow \
-            pytest pytest-asyncio ruff
+      - name: Instalar dependencias (core + dev, sin el stack multimodal)
+        run: pip install -r requirements-core.txt -r requirements-dev.txt
 
       - name: Lint (solo errores reales — sintaxis/pyflakes, no estilo)
         run: python -m ruff check --select=E9,F .
