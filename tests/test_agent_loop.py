@@ -24,8 +24,10 @@ class FakeOllamaClient:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def chat(self, messages, model=None, tools=None):
-        self.calls.append({"messages": [dict(m) for m in messages], "model": model, "tools": tools})
+    def chat(self, messages, model=None, tools=None, temperature=None):
+        self.calls.append({
+            "messages": [dict(m) for m in messages], "model": model, "tools": tools, "temperature": temperature,
+        })
         if not self.responses:
             raise AssertionError("FakeOllamaClient se quedó sin respuestas guionadas")
         return self.responses.pop(0)
@@ -782,7 +784,7 @@ def test_default_max_tool_repeats_comes_from_settings(monkeypatch):
 
 def test_ollama_error_stops_loop_cleanly():
     class FailingClient:
-        def chat(self, messages, model=None, tools=None):
+        def chat(self, messages, model=None, tools=None, temperature=None):
             raise OllamaError("no se pudo conectar")
 
     loop = AgentLoop(llm_client=FailingClient(), task_executor=FakeTaskExecutor(), memory=FakeMemoryManager())
@@ -1382,3 +1384,23 @@ def test_system_prompt_tells_the_model_to_check_its_tools_before_denying_a_capab
     assert "FIJATE primero en tu lista real de herramientas disponibles" in SYSTEM_PROMPT
     assert "en vez de inventar una incapacidad" in SYSTEM_PROMPT
     assert "audio_generation" in SYSTEM_PROMPT
+
+
+def test_run_passes_the_configured_temperature_to_the_llm():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-27): run() nunca pasaba
+    temperature — heredaba el default alto de Ollama (pensado para charla
+    creativa, no para decidir de forma confiable si hay que llamar una
+    herramienta). Mismo prompt exacto, probado dos veces seguidas contra
+    el modelo real: una vez negó falsamente tener audio_generation
+    disponible (sin ningún intento de tool call), la otra lo llamó
+    correctamente — variabilidad de muestreo real causada por la falta
+    de un temperature bajo. Corregido con settings.llm.temperature.
+    """
+    from utils.config import settings
+
+    loop, fake_llm = _loop([ChatResponse(content="listo")])
+
+    loop.run("algo")
+
+    assert fake_llm.calls[0]["temperature"] == settings.llm.temperature

@@ -6518,3 +6518,62 @@ mencionar una limitación real solo DESPUÉS de haber intentado la
 herramienta y recibido un rechazo concreto. 1 test nuevo
 (`test_agent_loop.py::test_system_prompt_tells_the_model_to_check_its_tools_before_denying_a_capability`),
 verificado también en vivo contra el modelo real tras el fix.
+
+## Causa raíz real del mismo bug: agent_loop.py nunca fijaba temperature
+
+El usuario reportó el MISMO bug ocurriendo de nuevo, esta vez con la
+transcripción real de una conversación completa: "escribe un poema" (ok)
+-> "ahora lee el poema" (negación falsa) -> "lee este poema: <texto
+exacto pegado>" (negación falsa DE NUEVO, pese a no haber ninguna
+ambigüedad sobre qué texto convertir) -> "lee este poema y solo
+entregame el archivo de audio" (negación falsa una tercera vez). El
+fix de `SYSTEM_PROMPT` de más arriba no lo evitó.
+
+**Investigación reproducida en proceso, con instrumentación real**:
+armando el mismo `messages`/`tools` exactos que construye `/chat` de
+verdad (vía `context_service.build()` + `orchestrator.planning_agent.run()`,
+interceptando `self.llm.chat()` para ver la llamada cruda) — el MISMO
+prompt exacto, probado dos veces seguidas, dio resultados DISTINTOS:
+una vez el modelo respondió con la negación falsa en texto plano, sin
+ningún intento de tool call (ni nativo ni el fallback de JSON
+simulado); la otra, generó un bloque \`\`\`json\`\`\` simulando la
+llamada a `audio_generation`, que el fallback existente
+(`_extract_fallback_tool_call`) capturó y ejecutó correctamente,
+generando el audio real.
+
+**Causa raíz real**: `agent_core/llm/agent_loop.py::run()` nunca pasaba
+`temperature` en su llamada principal (`self.llm.chat(messages,
+model=model, tools=tool_schemas)`) — heredaba el default alto de
+Ollama (~0.8, pensado para charla creativa). Es la MISMA clase de bug
+que `technical_conversation_engine_temperature_nondeterminism`, pero
+nunca aplicada al loop principal de razonamiento/herramientas, solo al
+clasificador chico.
+
+**Fix**: nuevo `settings.llm.temperature` (default `0.3`, tanto en
+`utils/config.py` como en `config/config.yaml`), pasado a la llamada
+principal de `agent_loop.py`. 1 test nuevo verificando el passthrough.
+
+**Verificación honesta, no exagerada**: con el servidor reiniciado
+(código y config garantizados actuales) y `temperature=0.3` activo, el
+MISMO escenario se probó de nuevo en vivo — **falló una vez más**. Esto
+NO invalida el fix (temperature más bajo sigue siendo la corrección
+correcta para una decisión estructurada como "¿llamo una herramienta o
+no?"), pero confirma que **ningún temperature finito elimina la
+variabilidad de muestreo por completo** — es una mejora real de
+probabilidad, no una garantía. No se pudieron correr suficientes
+repeticiones limpias para cuantificar la mejora real: las pruebas en
+vivo repetidas ya estaban generando contención real de recursos en
+esta máquina (dos procesos de Ollama corriendo a la vez, confirmado
+con `ps`) — se cortaron las pruebas en vivo para no seguir degradando
+el entorno del usuario.
+
+**Propuesta discutida, no implementada todavía**: un fix más
+estructural — usar la clasificación YA confiable del Conversation
+Engine (`text-to-speech`, confidence 0.95 consistente en las pruebas)
+para reforzar explícitamente la instrucción al modelo principal
+("el usuario quiere convertir esto a audio, llamá audio_generation
+ahora"), en vez de depender de que el modelo grande lo decida solo con
+temperature bajo. Mismo espíritu que `capability_broker.py` (desbloquea
+herramientas por capacidad detectada), aplicado a reforzar la
+instrucción en vez de solo el acceso. Pospuesto a una sesión futura con
+la máquina descansada — decisión explícita del usuario.

@@ -521,7 +521,7 @@ class AgentLoop:
 
         for _ in range(max_steps):
             try:
-                response = self.llm.chat(messages, model=model, tools=tool_schemas)
+                response = self.llm.chat(messages, model=model, tools=tool_schemas, temperature=settings.llm.temperature)
             except ProviderError as e:
                 logger.error(f"Error llamando al proveedor de LLM: {e}")
                 return AgentRunResult(

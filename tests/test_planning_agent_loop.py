@@ -21,8 +21,8 @@ class FakeOllamaClient:
         self.responses = list(responses)
         self.calls = []
 
-    def chat(self, messages, model=None, tools=None):
-        self.calls.append({"messages": messages, "model": model, "tools": tools})
+    def chat(self, messages, model=None, tools=None, temperature=None):
+        self.calls.append({"messages": messages, "model": model, "tools": tools, "temperature": temperature})
         if not self.responses:
             raise AssertionError("FakeOllamaClient se quedó sin respuestas guionadas")
         response = self.responses.pop(0)
