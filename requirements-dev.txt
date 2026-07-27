@@ -1,0 +1,8 @@
+# Solo para desarrollo/CI: correr la suite de tests y el lint. Nunca hace
+# falta en una instalación de uso normal de kal.
+
+-r requirements-core.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+ruff>=0.6
