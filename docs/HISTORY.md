@@ -6219,3 +6219,107 @@ de firmas + release) — mencionados en el análisis original, quedan
 para cuando haga falta. Tampoco se tocó `requirements.txt` (separarlo
 en core/multimodal/dev es una mejora real pero distinta, de menor
 prioridad, discutida aparte).
+
+## Tres mejoras pendientes, implementadas juntas (2026-07-27)
+
+Tres tareas marcadas como "sugeridas, no urgentes" en la conversación
+anterior, implementadas en la misma sesión a pedido explícito del
+usuario.
+
+### `requirements.txt` separado en core/multimodal/dev
+
+Tres archivos nuevos (`requirements-core.txt`/`requirements-multimodal.txt`/
+`requirements-dev.txt`), usando la lista YA validada empíricamente en
+el trabajo de CI de arriba (no una suposición nueva). `requirements.txt`
+queda como un archivo "paraguas" (`-r requirements-core.txt` + `-r
+requirements-multimodal.txt` + `-r requirements-dev.txt`) — cualquier
+`pip install -r requirements.txt` existente (Dockerfile,
+`scripts/setup_all.sh`, docs) sigue funcionando idéntico, cero cambio
+de comportamiento para quien no pida el set liviano explícitamente.
+`.github/workflows/ci.yml` se simplificó para instalar
+`requirements-core.txt` + `requirements-dev.txt` en vez de mantener a
+mano una lista de paquetes duplicada.
+
+Dos archivos necesitaron un ajuste que no era obvio a primera vista:
+el `Dockerfile` copiaba solo `requirements.txt` al contenedor (`COPY
+requirements.txt .`) — con el paraguas apuntando a los otros tres
+archivos vía `-r`, el build hubiera fallado por no encontrarlos en el
+contexto de build; y `scripts/package_distribution.sh` (arma el
+paquete de distribución) listaba `requirements.txt` como el único
+archivo a incluir — ambos corregidos para incluir los cuatro archivos.
+
+### Conversation Engine conectado al Runtime Manager
+
+`ConversationEngine.__init__()` instanciaba `OllamaClient` directo,
+asumiendo que el backend local del modelo chico/residente SIEMPRE
+habla el formato nativo de Ollama — la misma clase de suposición de
+hardware/backend concreto que motivó el Runtime Manager original (ver
+arriba, "Runtime Manager: el Kernel deja de asumir hardware
+concreto"), pero sin conectar todavía a este segundo consumidor real.
+
+Ahora `ConversationEngineConfig` gana un campo `provider` (mismo
+mecanismo que `LLMConfig.provider`, pero NUNCA pensado para apuntar a
+un proveedor en la nube real — sirve para que el backend LOCAL hable
+el wire format OpenAI en vez del nativo de Ollama, p.ej. LM Studio o
+vLLM). `ConversationEngine._build_default_client()` arma el cliente
+según ese campo y lo registra en `runtime_manager` bajo un slot
+PROPIO (`"conversation_engine"`, separado de `_ACTIVE_RUNTIME_NAME` en
+`agent_core/orchestrator.py`) — necesario porque el runtime del chat
+principal puede terminar apuntando a un proveedor en la nube si el
+usuario lo elige para el trabajo pesado, pero este modelo tiene que
+seguir siendo local siempre.
+
+**Descubrimiento real al conectar esto**: `RuntimeManagedLLMProvider.chat()`
+solo conocía `messages`/`model`/`tools` — nadie lo había notado porque
+`AgentLoop`/`Planner`/`SelfDiagnosisAgent` (los únicos consumidores
+hasta ahora) nunca pasan `response_format`/`temperature`. El
+Conversation Engine SÍ los necesita (JSON forzado + temperature bajo,
+ver el bug de no-determinismo de más arriba) — sin extender el
+passthrough, conectar esto habría roto la clasificación en silencio
+con un `TypeError`. Corregido en dos capas: `RuntimeManagedLLMProvider.chat()`
+ahora acepta ambos kwargs (opcionales, se omiten del payload si no se
+piden — cero cambio para los consumidores existentes) y
+`OpenAICompatibleClient.chat()` ahora los traduce al formato OpenAI
+real (`response_format="json"` -> `{"type": "json_object"}`,
+`temperature` tal cual) — antes ni siquiera existían ahí.
+
+**Límite conocido, documentado a propósito, no corregido**: si el
+proveedor principal del chat Y el Conversation Engine terminan siendo
+ambos Ollama apuntando al mismo daemon local, hoy tienen semáforos de
+concurrencia INDEPENDIENTES (dos registros separados en
+`runtime_manager`) — en el peor caso, 2 llamadas concurrentes al mismo
+Ollama en vez de 1. Sigue siendo estrictamente mejor que antes (cero
+protección de concurrencia para el Conversation Engine), pero no es un
+semáforo compartido por backend físico — eso queda pendiente hasta
+tener evidencia real de contención entre estos dos slots específicos
+(mismo criterio de "esperar evidencia real" que el resto de esta
+sesión).
+
+### Refactor de `agent_loop.py`: `ToolRepeatLimiter` + `SelfCheckTracker`
+
+`agent_loop.py` había acumulado, en una sola sesión, 3-4 mecanismos de
+tope/autochequeo distintos (cada uno resolviendo un bug real en uso
+distinto) mezclados como variables locales sueltas dentro de `run()` —
+el punto más denso señalado por el análisis externo de más arriba.
+Extraídos a dos clases nuevas, SIN cambiar ningún comportamiento (los
+61 tests existentes de `test_agent_loop.py` pasan sin ninguna
+modificación — la refactorización es puramente interna):
+
+- `agent_core/llm/tool_repeat_limiter.py::ToolRepeatLimiter`: cuenta
+  llamadas por herramienta y decide `over_limit`/`effective_limit`
+  (tope normal, tope estricto por autochequeo, o la excepción de
+  herramientas VS Code-only que ya tuvieron éxito una vez).
+- `agent_core/llm/self_check_tracker.py::SelfCheckTracker`: rastrea qué
+  artefactos se generaron en el turno, qué herramientas se
+  autochequearon con `analyze_image` sobre su propio resultado, cuántas
+  veces se rechazó una ya autochequeada, y arma la respuesta
+  sintetizada cuando el modelo ignora el rechazo 2 veces.
+
+Ambas clases llevan la historia completa de "BUG REAL ENCONTRADO EN
+USO" que las motivó (portada tal cual desde los comentarios que vivían
+en `agent_loop.py`) — nada de ese contexto se perdió en la mudanza.
+`agent_loop.py` bajó de 806 a ~712 líneas, y lo más importante: la
+lógica de `run()` en sí volvió a ser legible sin tener que sostener 5
+variables de estado con nombres parecidos en la cabeza a la vez. Tests
+unitarios nuevos y aislados para cada clase
+(`tests/test_tool_repeat_limiter.py`, `tests/test_self_check_tracker.py`).

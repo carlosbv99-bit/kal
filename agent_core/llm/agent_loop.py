@@ -48,6 +48,8 @@ from agent_core.client_provider import _MULTIMEDIA_TOOL_NAMES, _VSCODE_ONLY_TOOL
 from agent_core.llm.json_extraction import extract_json_array, extract_json_object
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.provider import LLMProvider, ProviderError, ToolCall
+from agent_core.llm.self_check_tracker import SelfCheckTracker
+from agent_core.llm.tool_repeat_limiter import ToolRepeatLimiter
 from agent_core.memory.manager import MemoryManager
 from audit.audit_log import AuditEvent, audit_log
 from task_execution.executor import TaskExecutor
@@ -498,55 +500,12 @@ class AgentLoop:
         messages.append({"role": "user", "content": goal})
         tool_schemas = [t.to_ollama_schema() for t in tools.values()]
         steps: list[AgentStep] = []
-        tool_call_counts: dict[str, int] = {}
-        # BUG REAL ENCONTRADO EN USO: "crea una naranja (solo una)" generó
-        # bien la primera vez, pero analyze_image sobre esa MISMA imagen
-        # detectó que en realidad mostraba un grupo (SDXL-turbo, a solo 2
-        # pasos, no respeta de forma confiable cantidades exactas de
-        # objetos — una limitación real del modelo de imágenes, no del
-        # razonamiento) y el modelo intentó corregirlo regenerando una y
-        # otra vez, sin límite, hasta agotar max_steps sin responder
-        # nunca. `artifact_paths_this_turn` (uri -> nombre de la
-        # herramienta que lo generó) permite detectar cuándo
-        # analyze_image se llama sobre un artefacto generado EN ESTE
-        # MISMO turno (autochequeo) — `self_checked_tools` marca esa
-        # herramienta de origen para aplicarle un tope MÁS ESTRICTO (como
-        # mucho 2 generaciones totales: la original + un solo reintento)
-        # en vez del `max_tool_repeats` general. Estructural, no depende
-        # de que el modelo se autolimite solo — mismo criterio que el
-        # resto de este mecanismo.
-        artifact_paths_this_turn: dict[str, str] = {}
-        self_checked_tools: set[str] = set()
-        # BUG REAL ENCONTRADO EN USO (2026-07-24, VS Code): "logo con un
-        # tomate y una hoja de albahaca" llamó a import_resource con una
-        # ruta ABSOLUTA (mal formada) — el primer intento falló
-        # (ProjectFilesRejectedError) sin proponer nada al usuario. El
-        # tope estricto de 1 llamada para herramientas de
-        # _VSCODE_ONLY_TOOL_NAMES (pensado para bloquear una SEGUNDA
-        # propuesta después de una YA exitosa, ver test de
-        # propose_project_files) bloqueó también ese segundo intento —
-        # la única chance real del modelo de corregir su propio error —
-        # y, sin poder reintentar, terminó llamando a una herramienta
-        # totalmente distinta y equivocada (qr_code) en vez de la
-        # correcta (image_generation). `succeeded_vscode_only_tools`
-        # distingue "ya propuso algo con éxito" (bloquear más llamadas)
-        # de "todavía no logró proponer nada" (dejar reintentar, hasta
-        # el tope general max_tool_repeats, igual que cualquier otra
-        # herramienta).
-        succeeded_vscode_only_tools: set[str] = set()
-        # BUG REAL ENCONTRADO EN USO (2026-07-25): "crea una calle concurrida
-        # de moscú" — tras el ciclo normal de autochequeo (generar -> revisar
-        # -> regenerar UNA vez), el modelo volvió a intentar 'image_generation'
-        # una TERCERA vez pese al rechazo explícito ("da tu respuesta final
-        # AHORA") — y siguió intentando 3 veces MÁS, agotando max_steps SIN
-        # llegar nunca a una respuesta (el usuario se quedó sin texto Y sin
-        # confirmación de la imagen que YA se había generado dos veces).
-        # `rejection_counts_for_self_checked` cuenta cuántas veces se rechazó
-        # cada herramienta autochequeada — si el modelo ignora el rechazo una
-        # SEGUNDA vez (sigue intentando la misma herramienta ya tapada), se
-        # corta el turno con una respuesta sintetizada honesta en vez de
-        # seguir gastando pasos reales de cómputo esperando que reaccione.
-        rejection_counts_for_self_checked: dict[str, int] = {}
+        # Ver agent_core/llm/tool_repeat_limiter.py y
+        # agent_core/llm/self_check_tracker.py para la historia completa
+        # (con los bugs reales en uso que motivaron cada mecanismo) de
+        # estos dos rastreadores por turno.
+        limiter = ToolRepeatLimiter(max_tool_repeats)
+        self_check = SelfCheckTracker()
 
         for _ in range(max_steps):
             try:
@@ -555,7 +514,7 @@ class AgentLoop:
                 logger.error(f"Error llamando al proveedor de LLM: {e}")
                 return AgentRunResult(
                     goal=goal, final_answer=str(e), steps=steps, status="llm_error",
-                    self_checked_tools=frozenset(self_checked_tools),
+                    self_checked_tools=self_check.as_frozenset(),
                 )
 
             effective_tool_calls = list(response.tool_calls)
@@ -587,7 +546,7 @@ class AgentLoop:
                     continue
                 return AgentRunResult(
                     goal=goal, final_answer=response.content, steps=steps, status="success",
-                    self_checked_tools=frozenset(self_checked_tools),
+                    self_checked_tools=self_check.as_frozenset(),
                 )
 
             # BUG REAL ENCONTRADO EN USO: el formato OpenAI (que Groq valida
@@ -629,44 +588,16 @@ class AgentLoop:
             )
 
             for tool_call in effective_tool_calls:
-                tool_call_counts[tool_call.name] = tool_call_counts.get(tool_call.name, 0) + 1
                 artifact = None
-                # Tope más estricto si esta herramienta ya se autochequeó
-                # con analyze_image en este turno (2: la original + un
-                # solo reintento), o si es una propuesta asincrónica tipo
-                # propose_project_files/import_resource (1 SOLA vez
-                # exitosa por turno — la revisión del usuario pasa FUERA
-                # de este turno, así que una segunda propuesta ya exitosa
-                # nunca tiene información nueva que la justifique; un
-                # intento que falló sin proponer nada todavía puede
-                # reintentarse, ver BUG REAL más abajo). Nunca más
-                # permisivo que max_tool_repeats.
-                if tool_call.name in self_checked_tools:
-                    effective_limit = min(2, max_tool_repeats)
-                    over_limit = tool_call_counts[tool_call.name] > effective_limit
-                elif tool_call.name in _VSCODE_ONLY_TOOL_NAMES:
-                    # Ver BUG REAL de arriba: el tope de 1 solo se aplica
-                    # una vez que la herramienta YA tuvo éxito — un
-                    # intento fallido (sin artefacto real propuesto) no
-                    # cuenta contra ese tope, pero sigue acotado por
-                    # max_tool_repeats como cualquier otra herramienta.
-                    effective_limit = max_tool_repeats
-                    over_limit = (
-                        tool_call.name in succeeded_vscode_only_tools
-                        or tool_call_counts[tool_call.name] > effective_limit
-                    )
-                else:
-                    effective_limit = max_tool_repeats
-                    over_limit = tool_call_counts[tool_call.name] > effective_limit
+                is_self_checked = self_check.is_checked(tool_call.name)
+                over_limit, effective_limit = limiter.evaluate(tool_call.name, is_self_checked)
                 if over_limit:
                     # Rechazado ANTES de ejecutar — cada llamada real a una
                     # herramienta de generación cuesta minutos de cómputo acá,
                     # no tiene sentido gastarlos en una repetición que ya
                     # sabemos que vamos a cortar.
-                    if tool_call.name in self_checked_tools:
-                        rejection_counts_for_self_checked[tool_call.name] = (
-                            rejection_counts_for_self_checked.get(tool_call.name, 0) + 1
-                        )
+                    if is_self_checked:
+                        self_check.record_rejection(tool_call.name)
                         observation = (
                             f"ERROR: ya generaste con '{tool_call.name}' {effective_limit} veces en este turno "
                             "(incluido un reintento después de revisarlo con analyze_image) — no lo intentes de "
@@ -676,7 +607,7 @@ class AgentLoop:
                             "respetan cantidades exactas, reintentar más no lo garantiza."
                         )
                     elif tool_call.name in _VSCODE_ONLY_TOOL_NAMES:
-                        if tool_call.name in succeeded_vscode_only_tools:
+                        if limiter.already_succeeded(tool_call.name):
                             # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): el
                             # modelo llamó a propose_project_files 3 veces en el
                             # mismo turno (revisando su propio intento anterior,
@@ -707,17 +638,9 @@ class AgentLoop:
                     observation = self._dispatch_tool(tool_call.name, tool_call.arguments, tools, denied_permissions)
                     dispatched_tool = tools.get(tool_call.name)
                     artifact = dispatched_tool.last_artifact if dispatched_tool is not None else None
-                    if artifact is not None and artifact.uri:
-                        artifact_paths_this_turn[artifact.uri] = tool_call.name
-                    if (
-                        tool_call.name in _VSCODE_ONLY_TOOL_NAMES
-                        and not observation.startswith("ERROR")
-                    ):
-                        succeeded_vscode_only_tools.add(tool_call.name)
-                    if tool_call.name == "analyze_image":
-                        origin_tool = artifact_paths_this_turn.get(tool_call.arguments.get("image_path"))
-                        if origin_tool is not None:
-                            self_checked_tools.add(origin_tool)
+                    self_check.record_artifact(artifact, tool_call.name)
+                    limiter.record_outcome(tool_call.name, observation)
+                    self_check.note_check_if_applicable(tool_call.name, tool_call.arguments)
                 new_step = AgentStep(
                     tool_name=tool_call.name, arguments=tool_call.arguments,
                     observation=observation, artifact=artifact,
@@ -727,31 +650,15 @@ class AgentLoop:
                     on_step(new_step)
                 messages.append({"role": "tool", "content": observation, "tool_call_id": tool_call.id})
 
-                if rejection_counts_for_self_checked.get(tool_call.name, 0) >= 2:
+                if self_check.should_cut_turn(tool_call.name):
                     logger.warning(
                         f"'{tool_call.name}' fue rechazada 2 veces por el tope de autochequeo y el modelo "
                         "insistió igual — se corta el turno con una respuesta sintetizada en vez de seguir "
                         "gastando pasos reales."
                     )
-                    last_uri = next(
-                        (uri for uri, name in reversed(list(artifact_paths_this_turn.items())) if name == tool_call.name),
-                        None,
-                    )
-                    if last_uri is not None:
-                        final_answer = (
-                            f"Generé el resultado con '{tool_call.name}', pero no logré confirmar que coincida "
-                            "exactamente con lo pedido (los modelos de generación no siempre son exactos) — "
-                            "intenté corregirlo pero seguí insistiendo de más, así que corté acá. Podés ver el "
-                            "resultado arriba."
-                        )
-                    else:
-                        final_answer = (
-                            f"No logré completar el pedido con '{tool_call.name}' — insistí de más sin éxito, "
-                            "así que corté acá en vez de seguir gastando tiempo."
-                        )
                     return AgentRunResult(
-                        goal=goal, final_answer=final_answer, steps=steps, status="success",
-                        self_checked_tools=frozenset(self_checked_tools),
+                        goal=goal, final_answer=self_check.build_cut_short_final_answer(tool_call.name),
+                        steps=steps, status="success", self_checked_tools=self_check.as_frozenset(),
                     )
 
         logger.warning(f"Agente agotó max_steps={max_steps} sin respuesta final para: {goal!r}")
@@ -760,7 +667,7 @@ class AgentLoop:
             final_answer="No llegué a una respuesta final dentro del límite de pasos permitido.",
             steps=steps,
             status="max_steps_exceeded",
-            self_checked_tools=frozenset(self_checked_tools),
+            self_checked_tools=self_check.as_frozenset(),
         )
 
     def _dispatch_tool(
