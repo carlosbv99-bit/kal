@@ -140,12 +140,22 @@ class OpenAICompatibleClient:
         messages: list[dict[str, Any]],
         model: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        response_format: str | None = None,
+        temperature: float | None = None,
     ) -> ChatResponse:
         """
         POST {base_url}/chat/completions. Misma forma de `tools` que ya
         usa AgentTool.to_ollama_schema() (function-calling estilo
         OpenAI) — eso ya era compatible; lo que cambia de verdad acá es
         cómo se PARSEA la respuesta.
+
+        `response_format`/`temperature`: agregados para que el
+        Conversation Engine (agent_core/conversation_engine.py) pueda
+        usar este cliente también, sin perder el modo JSON forzado ni
+        el temperature bajo que necesita una tarea de clasificación
+        (ver ConversationEngineConfig.temperature). Mismo significado
+        que en OllamaClient.chat(), traducido al formato OpenAI:
+        "json" -> {"type": "json_object"}.
         """
         payload: dict[str, Any] = {
             "model": model or settings.llm.default_model,
@@ -153,6 +163,10 @@ class OpenAICompatibleClient:
         }
         if tools:
             payload["tools"] = tools
+        if response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         try:
             response = self._post(

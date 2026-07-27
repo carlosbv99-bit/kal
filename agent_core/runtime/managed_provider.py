@@ -29,8 +29,22 @@ class RuntimeManagedLLMProvider:
         messages: list[dict[str, Any]],
         model: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        response_format: str | None = None,
+        temperature: float | None = None,
     ) -> ChatResponse:
-        request = ExecutionRequest(payload={"messages": messages, "model": model, "tools": tools})
+        # response_format/temperature solo se agregan al payload si el
+        # llamador los pidió — así un Runtime cuyo cliente no los soporta
+        # (p.ej. OllamaClient sin pedir ninguno de los dos) nunca recibe
+        # un kwarg de más. Mismo criterio que OllamaClient.chat(): ambos
+        # son opcionales, pensados para el Conversation Engine (ver
+        # agent_core/conversation_engine.py), no usados por
+        # AgentLoop/Planner/SelfDiagnosisAgent.
+        payload: dict[str, Any] = {"messages": messages, "model": model, "tools": tools}
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if temperature is not None:
+            payload["temperature"] = temperature
+        request = ExecutionRequest(payload=payload)
         return self._rm.execute(self._runtime_name, request)
 
     def list_models(self) -> list[str]:

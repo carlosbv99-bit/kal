@@ -128,6 +128,42 @@ def test_chat_stringifies_outgoing_tool_call_arguments_before_sending():
     assert isinstance(messages[1]["tool_calls"][0]["function"]["arguments"], dict)
 
 
+def test_chat_translates_json_response_format_and_temperature_to_openai_wire_format():
+    """
+    Agregado para que agent_core/conversation_engine.py pueda usar este
+    cliente (ver ConversationEngineConfig.provider="openai_compatible")
+    sin perder el modo JSON forzado ni el temperature bajo que necesita
+    una tarea de clasificación — antes ninguno de los dos existía acá.
+    """
+    payloads = []
+
+    def post_fn(url, json=None, **kw):
+        payloads.append(json)
+        return FakeResponse({"choices": [{"message": {"role": "assistant", "content": "{}"}}]})
+
+    client = _client(post_fn=post_fn)
+
+    client.chat([{"role": "user", "content": "hola"}], response_format="json", temperature=0.1)
+
+    assert payloads[0]["response_format"] == {"type": "json_object"}
+    assert payloads[0]["temperature"] == 0.1
+
+
+def test_chat_omits_response_format_and_temperature_when_not_requested():
+    payloads = []
+
+    def post_fn(url, json=None, **kw):
+        payloads.append(json)
+        return FakeResponse({"choices": [{"message": {"role": "assistant", "content": "hola"}}]})
+
+    client = _client(post_fn=post_fn)
+
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert "response_format" not in payloads[0]
+    assert "temperature" not in payloads[0]
+
+
 def test_chat_raises_provider_error_on_connection_failure():
     import requests
 

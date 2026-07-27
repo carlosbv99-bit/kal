@@ -34,11 +34,23 @@ import json
 from dataclasses import dataclass
 
 from agent_core.llm.ollama_client import OllamaClient
-from agent_core.llm.provider import ProviderError
+from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
+from agent_core.llm.provider import LLMProvider, ProviderError
+from agent_core.runtime.llm_runtimes import OllamaRuntime, OpenAICompatibleRuntime
+from agent_core.runtime.managed_provider import RuntimeManagedLLMProvider
+from agent_core.runtime.manager import runtime_manager
 from utils.config import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Nombre fijo bajo el que se registra el runtime local del Conversation
+# Engine en runtime_manager (agent_core/runtime/manager.py) — un slot
+# PROPIO, separado de _ACTIVE_RUNTIME_NAME en agent_core/orchestrator.py:
+# ese otro puede terminar apuntando a un proveedor en la nube si el
+# usuario lo elige para el chat principal, pero este modelo tiene que
+# seguir siendo chico y local siempre (ver docstring del módulo).
+_RUNTIME_NAME = "conversation_engine"
 
 _SYSTEM_PROMPT = """Sos el "Conversation Engine" de kal, un asistente de IA. Tu único trabajo es \
 entender la intención del usuario y decidir qué capacidades del sistema hacen falta para \
@@ -98,13 +110,36 @@ class ConversationEngineResult:
 
 
 class ConversationEngine:
-    def __init__(self, llm_client: OllamaClient | None = None, cfg=None):
+    def __init__(self, llm_client: LLMProvider | None = None, cfg=None):
         self.cfg = cfg or settings.conversation_engine
-        # base_url explícito, mismo motivo que ImageAnalysisTool/VisionConfig
-        # (tool_integration/adapters/image_analysis.py): NUNCA el default de
-        # OllamaClient, que cae al proveedor en la nube si ese perfil está
-        # activo — este modelo tiene que seguir siendo local siempre.
-        self.llm_client = llm_client or OllamaClient(base_url=self.cfg.base_url)
+        self.llm_client = llm_client or self._build_default_client()
+
+    def _build_default_client(self) -> LLMProvider:
+        """
+        Arma el cliente real según self.cfg.provider y lo registra en
+        runtime_manager bajo `_RUNTIME_NAME` — mismo mecanismo que
+        agent_core.orchestrator.build_llm_client(), pero en un slot
+        propio (ver comentario de `_RUNTIME_NAME`). base_url explícito
+        en ambos casos, mismo motivo que ImageAnalysisTool/VisionConfig
+        (tool_integration/adapters/image_analysis.py): NUNCA el default
+        de cada cliente, que cae al proveedor en la nube si ese perfil
+        está activo — este modelo tiene que seguir siendo local siempre.
+
+        Antes esto instanciaba OllamaClient directo, asumiendo que el
+        backend local SIEMPRE habla el formato nativo de Ollama — ahora
+        pasa por el Runtime Manager como el chat principal, ganando
+        control de concurrencia (settings.runtimes) y la posibilidad de
+        apuntar a otro backend local vía provider="openai_compatible"
+        (ver ConversationEngineConfig.provider).
+        """
+        if self.cfg.provider == "openai_compatible":
+            client = OpenAICompatibleClient(base_url=self.cfg.base_url, api_key=self.cfg.api_key)
+            runtime = OpenAICompatibleRuntime(client, max_parallel=settings.runtimes.openai_compatible.max_parallel)
+        else:
+            client = OllamaClient(base_url=self.cfg.base_url)
+            runtime = OllamaRuntime(client, max_parallel=settings.runtimes.ollama.max_parallel)
+        runtime_manager.register(_RUNTIME_NAME, runtime)
+        return RuntimeManagedLLMProvider(runtime_manager, _RUNTIME_NAME)
 
     def classify(self, goal: str) -> ConversationEngineResult | None:
         """

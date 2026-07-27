@@ -269,10 +269,21 @@ class ConversationEngineConfig(BaseModel):
     confiable (formato + semántica) de los tres.
     """
     enabled: bool = True
+    # Mismo mecanismo que LLMConfig.provider, pero un slot de Runtime
+    # Manager PROPIO y separado del chat principal (ver
+    # agent_core/conversation_engine.py) — nunca pensado para apuntar a
+    # un proveedor en la nube real, sino para no asumir que el backend
+    # local hable específicamente el formato nativo de Ollama.
+    # "openai_compatible" acá sirve para un backend local alternativo
+    # que hable ese wire format (LM Studio, vLLM, llama.cpp server).
+    provider: Literal["ollama", "openai_compatible"] = "ollama"
     # NUNCA reusar llm.base_url — mismo motivo que VisionConfig.base_url:
     # ese campo cambia si el usuario activa un proveedor en la nube, y
     # este modelo tiene que seguir siendo local siempre.
     base_url: str = "http://localhost:11434"
+    # Solo aplica con provider="openai_compatible" y si ese backend local
+    # exige autenticación (poco común) — casi siempre queda sin usar.
+    api_key: str | None = None
     model: str = "qwen2.5:3b"
     # Por debajo de esto, se trata la respuesta como "necesita
     # aclaración" y NUNCA se corre el agente completo.
