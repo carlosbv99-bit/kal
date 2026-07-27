@@ -10,7 +10,7 @@ Ollama corriendo de verdad.
 """
 from __future__ import annotations
 
-from agent_core.llm.agent_loop import AgentLoop, AgentTool, _agent_tool_from_tool
+from agent_core.llm.agent_loop import SYSTEM_PROMPT, AgentLoop, AgentTool, _agent_tool_from_tool
 from agent_core.llm.ollama_client import OllamaError
 from agent_core.llm.provider import ChatResponse, ToolCall
 from sdk.artifacts import Artifact
@@ -1364,3 +1364,21 @@ def test_agent_step_artifact_is_none_for_tools_that_never_set_it():
     result = loop.run("algo")
 
     assert result.steps[0].artifact is None
+
+
+def test_system_prompt_tells_the_model_to_check_its_tools_before_denying_a_capability():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-27, interfaz web): pedido "lee y
+    entregame el audio de todo tu ultimo comentario con voz femenina"
+    (texto ya presente en el HISTORIAL, como respuesta propia anterior)
+    respondió "no tengo la capacidad de leer textos o generar audio" —
+    FALSO, audio_generation estaba disponible y funciona para
+    exactamente ese caso. El fix equivalente ya existía para
+    client="vscode" (ver
+    test_context_service.py::test_vscode_client_instruction_tells_the_model_to_ask_for_clarification_instead_of_inventing_a_limitation)
+    pero nunca se había agregado al SYSTEM_PROMPT general que usa
+    también la interfaz web — este test confirma que ahora sí.
+    """
+    assert "FIJATE primero en tu lista real de herramientas disponibles" in SYSTEM_PROMPT
+    assert "en vez de inventar una incapacidad" in SYSTEM_PROMPT
+    assert "audio_generation" in SYSTEM_PROMPT
