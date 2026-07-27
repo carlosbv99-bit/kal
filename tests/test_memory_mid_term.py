@@ -102,3 +102,15 @@ def test_metadata_round_trips_correctly(mem):
 
     results = mem.retrieve("metadata")
     assert results[0].metadata == {"origen": "test", "n": 42}
+
+
+def test_list_all_returns_every_item_unlike_retrieve_which_filters_by_text(mem):
+    mem.store(MemoryItem(content="uno"))
+    mem.store(MemoryItem(content="dos"))
+    mem.store(MemoryItem(content="tres, sin relación con los otros"))
+
+    assert len(mem.list_all()) == 3
+
+
+def test_list_all_on_empty_db_returns_empty_list(mem):
+    assert mem.list_all() == []
