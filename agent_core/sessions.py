@@ -25,6 +25,7 @@ kal (ver README: nota sobre --reload).
 """
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -39,6 +40,21 @@ class Turn:
 
 
 @dataclass
+class ArtifactRecord:
+    """
+    Entrada del historial de artefactos de una sesión (ver
+    Session.artifacts más abajo) — a diferencia de `active_artifact`
+    (solo el ÚLTIMO), esto permite responder "qué generé en esta
+    sesión" de verdad. `tool_name` y `created_at` son metadata de
+    ORQUESTACIÓN (no del Artifact en sí, que es un tipo del SDK
+    público) — por eso viven acá, no en sdk/artifacts.py.
+    """
+    artifact: Artifact
+    tool_name: str
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
 class Session:
     id: str
     turns: list[Turn] = field(default_factory=list)
@@ -50,6 +66,12 @@ class Session:
     # deny_permissions) y queda "pegajoso" para el resto de la sesión hasta
     # que se reemplace explícitamente (ver agent_core/orchestrator.py).
     denied_permissions: frozenset[Permission] = field(default_factory=frozenset)
+    # Historial completo de artefactos generados/subidos EN ESTA sesión
+    # (ver ArtifactRecord arriba) — `active_artifact` sigue existiendo
+    # tal cual para no romper nada (context_service.py lo usa para "el
+    # artefacto activo"), esto es un registro ADITIVO, consultable, para
+    # responder preguntas sobre el historial completo, no solo el último.
+    artifacts: list[ArtifactRecord] = field(default_factory=list)
     # Recorrido en vivo del turno EN CURSO (ver GET /chat/progress/{id}
     # en agent_core/routers/chat.py) — se reinicia al empezar cada
     # /chat, se va llenando durante el procesamiento (funciona porque
@@ -82,6 +104,9 @@ class SessionManager:
 
     def update_active_artifact(self, session: Session, artifact: Artifact) -> None:
         session.active_artifact = artifact
+
+    def record_artifact(self, session: Session, artifact: Artifact, tool_name: str) -> None:
+        session.artifacts.append(ArtifactRecord(artifact=artifact, tool_name=tool_name))
 
     def update_denied_permissions(self, session: Session, permissions: frozenset[Permission]) -> None:
         """Reemplaza el override de permisos de la sesión (no se acumula

@@ -6323,3 +6323,58 @@ lógica de `run()` en sí volvió a ser legible sin tener que sostener 5
 variables de estado con nombres parecidos en la cabeza a la vez. Tests
 unitarios nuevos y aislados para cada clase
 (`tests/test_tool_repeat_limiter.py`, `tests/test_self_check_tracker.py`).
+
+## Punto de vista sobre "kal como sistema operativo de agentes" — y qué de eso se implementó (2026-07-27)
+
+El usuario pidió opinión sobre un análisis externo de 12 puntos que
+reencuadraba kal como un OS completo (AgentProcess/multi-agente,
+scheduler, HAL de LLMs, VFS por proceso, IPC entre agentes,
+capabilities granulares, runtimes WASM/gVisor, Service Manager, package
+manager distribuido, observabilidad Prometheus/OpenTelemetry, config
+como API, RamFS). El diagnóstico de fondo (Kernel Bus/Permission
+Cascade/sandbox Docker/SDK ya tienen forma de OS) es correcto, pero el
+análisis asume un disparador real (múltiples agentes concurrentes,
+marketplace con terceros, despliegue multi-nodo) que kal no tiene
+evidencia de necesitar — mismo criterio que
+[[project_kernel_maturity_model_and_foundational_infra]]: la mayoría
+de los 12 puntos resuelven problemas de OTRO proyecto, no de kal.
+
+**Veredicto aplicado, punto por punto, contra el heurístico ya
+establecido** ("¿su ausencia rompería la arquitectura en 2 años?"):
+solo 3 pasaban el filtro a priori (HAL de LLMs, capabilities
+granulares, observabilidad) — el resto depende de `AgentProcess`
+(multi-agente), que no tiene ningún caso de uso real reportado en este
+proyecto (`agent_core/sessions.py::SessionManager` ya aísla
+conversaciones concurrentes por `session_id`, que es el caso real que
+kal SÍ tiene).
+
+**Al intentar implementar los 3 "justificados", 2 no se sostuvieron
+contra el código real** (verificar antes de construir, no solo antes
+de opinar):
+- HAL de LLMs (agregar `embed()`/`unload()` al `Runtime` Protocol):
+  `agent_core/memory/long_term.py::LongTermMemory` usa
+  sentence-transformers local por una razón de privacidad DELIBERADA
+  (nunca mandar contenido potencialmente sensible a una API externa
+  solo para embeber) — un `embed()` intercambiable violaría esa
+  decisión, no la completaría. `unload()` no tiene consumidor real:
+  Ollama gestiona su propia descarga, y los pipelines locales ya
+  tienen su propio `ResourceBroker` (kernel/broker/resource_broker.py).
+- Capabilities granulares: `sdk/permissions.py::Permission` YA es
+  efectivamente esto (`FILESYSTEM_READ`/`NETWORK`/`GPU`/etc.) —
+  renombrar a `fs:read`/`net:outbound` sería cambio cosmético puro, sin
+  ninguna ganancia funcional, tocando cada skill.yaml/test existente
+  para nada real.
+
+**Lo que sí se implementó, con motivación real y ya documentada
+antes**: `agent_core/sessions.py::Session.active_artifact` solo
+recordaba el ÚLTIMO artefacto de la sesión — sin forma de responder
+"qué generé en esta sesión" (gap ya anotado como pendiente en la
+sección de Artifact Service de este mismo documento). Agregado
+`ArtifactRecord` (artifact + tool_name + created_at) y
+`Session.artifacts: list[ArtifactRecord]`, aditivo — `active_artifact`
+sigue funcionando idéntico. Poblado en los dos puntos donde ya se
+actualizaba `active_artifact` (el loop de pasos de `/chat` y
+`/uploads`), y expuesto vía `GET /chat/sessions/{session_id}/artifacts`
+(nuevo). Reusa `_artifact_url()` existente para resolver la URL
+servible de cada entrada. 12 tests nuevos (`tests/test_sessions.py`
+extendido + `tests/test_orchestrator_chat_artifacts.py` nuevo).

@@ -190,6 +190,7 @@ def chat(req: ChatRequest):
     for step in all_steps:
         if step.artifact is not None and step.artifact.modality != "text":
             orchestrator.sessions.update_active_artifact(session, step.artifact)
+            orchestrator.sessions.record_artifact(session, step.artifact, step.tool_name)
 
     # BUG REAL ENCONTRADO EN USO (2026-07-24): el autochequeo de
     # image_generation (generar -> analyze_image -> regenerar UNA vez si
@@ -295,6 +296,31 @@ def chat_progress(session_id: str):
     return {"progress": session.progress}
 
 
+@router.get("/chat/sessions/{session_id}/artifacts")
+def chat_session_artifacts(session_id: str):
+    """
+    Historial completo de artefactos (generados o subidos) de esta
+    sesión — a diferencia de `active_artifact` (solo el último, ver
+    Session en agent_core/sessions.py), permite responder "qué generé
+    en esta sesión" más allá del artefacto más reciente. Artefactos sin
+    `uri` servible (p.ej. project_files, que no vive bajo data/artifacts/)
+    quedan con `url: None` — el llamador decide si mostrarlos igual.
+    """
+    session = orchestrator.sessions.get_or_create(session_id)
+    return {
+        "artifacts": [
+            {
+                "modality": record.artifact.modality,
+                "tool_name": record.tool_name,
+                "created_at": record.created_at,
+                "path": record.artifact.uri,
+                "url": _artifact_url(record.artifact.uri),
+            }
+            for record in session.artifacts
+        ]
+    }
+
+
 # --- Subida de imágenes propias ---
 
 _ALLOWED_UPLOAD_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
@@ -343,6 +369,7 @@ async def upload_image(file: UploadFile = File(...), session_id: str | None = Fo
         metadata={"uploaded_by_user": True, "original_filename": file.filename},
     )
     orchestrator.sessions.update_active_artifact(session, artifact)
+    orchestrator.sessions.record_artifact(session, artifact, tool_name="upload")
 
     return {
         "session_id": session.id,

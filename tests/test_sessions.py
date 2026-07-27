@@ -58,15 +58,50 @@ def test_update_active_artifact_replaces_the_previous_one():
     assert session.active_artifact.uri == "dos.png"
 
 
+def test_new_session_has_no_artifact_history_by_default():
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+
+    assert session.artifacts == []
+
+
+def test_record_artifact_accumulates_unlike_active_artifact_which_only_keeps_the_last_one():
+    """
+    Gap real que motivó esto: `active_artifact` solo recuerda el ÚLTIMO
+    artefacto (uri="dos.png" pisa a "uno.png") — sin esto no había forma
+    de responder "qué generé en esta sesión" más allá de eso.
+    """
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+
+    manager.record_artifact(session, Artifact(modality="image", uri="uno.png"), tool_name="image_generation")
+    manager.record_artifact(session, Artifact(modality="image", uri="dos.png"), tool_name="image_editing")
+
+    assert [r.artifact.uri for r in session.artifacts] == ["uno.png", "dos.png"]
+    assert [r.tool_name for r in session.artifacts] == ["image_generation", "image_editing"]
+
+
+def test_record_artifact_never_touches_active_artifact():
+    manager = SessionManager()
+    session = manager.get_or_create(None)
+
+    manager.record_artifact(session, Artifact(modality="image", uri="uno.png"), tool_name="image_generation")
+
+    assert session.active_artifact is None
+
+
 def test_different_sessions_are_isolated_from_each_other():
     manager = SessionManager()
     session_a = manager.get_or_create("sesion-a")
     session_b = manager.get_or_create("sesion-b")
 
     manager.record_turn(session_a, goal="a", final_answer="respuesta a")
+    manager.record_artifact(session_a, Artifact(modality="image", uri="a.png"), tool_name="image_generation")
 
     assert session_a.turns != []
     assert session_b.turns == []
+    assert session_a.artifacts != []
+    assert session_b.artifacts == []
 
 
 def test_new_session_has_no_denied_permissions_by_default():
