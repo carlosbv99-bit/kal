@@ -45,6 +45,12 @@ class ShortTermMemory(MemoryBackend):
     def forget(self, item_id: str) -> None:
         self._buffer = deque(i for i in self._buffer if i.id != item_id)
 
+    def list_all(self) -> list[MemoryItem]:
+        """Para el borrado masivo con filtros (ver
+        MemoryManager.forget_matching()) — a diferencia de retrieve(),
+        que solo devuelve los top_k más recientes."""
+        return list(self._buffer)
+
     def consolidate(self) -> list[MemoryItem]:
         """
         Devuelve los items actuales para que el orquestador los resuma

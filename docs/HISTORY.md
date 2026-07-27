@@ -6378,3 +6378,101 @@ actualizaba `active_artifact` (el loop de pasos de `/chat` y
 (nuevo). Reusa `_artifact_url()` existente para resolver la URL
 servible de cada entrada. 12 tests nuevos (`tests/test_sessions.py`
 extendido + `tests/test_orchestrator_chat_artifacts.py` nuevo).
+
+## Memory Security Policy Engine, Fase 1 (2026-07-27)
+
+El usuario identificó un vacío arquitectónico real en la memoria
+persistente: el flujo `remember() -> corto -> mediano -> largo ->
+recall() -> LLM` no tenía, en ningún punto, el concepto de "¿es
+apropiado que esta información sea persistente/compartible?". Dos
+riesgos concretos: (1) una credencial pegada por el usuario para
+depurar algo podía promoverse a largo plazo (Chroma) PARA SIEMPRE, sin
+filtro ni forma de borrarla (`LongTermMemory.forget()` existía en
+código pero sin ningún endpoint que lo expusiera); (2) algo guardado
+con un LLM 100% local podía terminar inyectado como contexto a un
+proveedor en la NUBE si el usuario cambiaba `llm.provider` más
+adelante, sin darse cuenta.
+
+Propuesta del usuario, adoptada: tratar esto como una política
+transversal de nivel Kernel (mismo peso que el Permission Manager), no
+un filtro suelto repartido en `remember()`/`long_term.py`/`recall()`.
+Roadmap de 4 fases acordado; esta es la Fase 1, más la pieza más aguda
+de la Fase 3 original (el gate de salida hacia la nube) porque no
+depende de nada más y es igual de barata.
+
+**`agent_core/memory/security_policy.py`** (nuevo): `MemoryClassification`
+(PUBLIC/SENSITIVE/SECRET — SENSITIVE reservado, Fase 1 nunca lo asigna,
+sin un clasificador real no hay forma determinística de poblarlo
+distinto de PUBLIC/SECRET) y `MemorySharing` (LOCAL_ONLY/CLOUD_OK/ASK
+— ASK reservado). `classify()` detecta patrones de formato CONOCIDO
+(OpenAI, AWS, GitHub, JWT, bloques PEM — nunca heurísticas genéricas
+tipo "string largo parece un token", alto riesgo de falsos positivos).
+`redact()` enmascara SOLO el span detectado (`[REDACTED:<label>]`),
+preservando el resto del texto — decisión explícita: nunca resumir con
+un motivo inventado ("para depuración") que un regex no puede
+confirmar de verdad.
+
+**Clasificación + redactado — solo en la promoción a largo plazo**:
+`MemoryManager.promote_mid_to_long()` (mismo chokepoint donde ya vive
+`_notify()` del Knowledge Miner) clasifica y, si es SECRET, redacta
+ANTES de `long_term.store()`. `remember()`/`consolidate_short_to_mid()`
+nunca se tocan — decisión explícita: corto/mediano plazo necesitan
+poder contener una credencial pegada para que el agente la use en la
+tarea inmediata (depurar un error real), solo lo PERMANENTE se filtra.
+
+**Campo `sharing` — asignado en `remember()`, default fail-closed**:
+nuevo parámetro `sharing: str = "local_only"` en
+`MemoryManager.remember()`. Sin ningún mecanismo en Fase 1 para marcar
+algo `cloud_ok` explícitamente, así que en la práctica TODO lo
+guardado queda `local_only` por ahora — comportamiento correcto y
+deliberado (fail-closed), no un bug.
+
+**El gate de salida — en `MemoryRecallTool`, sobre las 3 capas**:
+`tool_integration/adapters/core_tools.py::MemoryRecallTool.execute()`
+es el único punto donde `recall()` se convierte en texto para el LLM
+activo — si `settings.llm.provider` es en la nube
+(`security_policy.is_cloud_provider()`), filtra cualquier item sin
+`sharing: "cloud_ok"` explícito, en las TRES tiers (corto/mediano/
+largo, el riesgo de fuga existe en cualquiera, no solo en lo
+promovido). **Consecuencia real y deliberada**: mientras no exista
+ningún mecanismo para marcar algo `cloud_ok`, usar un proveedor en la
+nube hace que `recall()` no traiga nada — fail-closed correcto,
+documentado, no oculto. Limitación conocida de `is_cloud_provider()`:
+un backend LOCAL que hable el wire format OpenAI (LM Studio/vLLM, ver
+`ConversationEngineConfig.provider` de la sesión anterior) también
+cuenta como "nube" — sobre-bloquea ese caso puntual, nunca deja pasar
+de más (seguro, no una fuga).
+
+**Derecho al olvido**: `LongTermMemory`/`MidTermMemory`/`ShortTermMemory`
+ya implementaban `forget(item_id)` (parte del contrato `MemoryBackend`)
+pero ningún endpoint lo exponía. `MemoryManager.forget(item_id, tier)`
+conecta lo que ya existía. `MemoryManager.forget_matching(keyword=,
+tier=, classification=, before=, after=)` agrega borrado masivo — exige
+AL MENOS un filtro (nunca un "borrar todo" accidental de un único
+llamado, mismo criterio de "seguro por sí solo" que
+`orchestrator.py::_artifact_url()`), y a diferencia de `forget()`/
+`verify()`/`pin()` (que solo cubren mid_term/long_term), SÍ cubre corto
+plazo. Nuevo método `list_all()` en los tres backends (a diferencia de
+`retrieve()`, que filtra por texto/similitud y limita a top_k). Nuevos
+endpoints: `DELETE /memory/{tier}/{item_id}` y `DELETE /memory` (con
+filtros) — sin token de administrador, mismo criterio que
+`GET /memory/search`/`verify`/`pin` ya existentes (es el usuario
+borrando SU propia memoria, no una acción administrativa).
+
+**Fuera de alcance de esta fase, documentado**: el clasificador chico
+tipo Conversation Engine (Fase 4) y el nivel `SENSITIVE` que depende de
+él; `sharing: "ask"` (necesitaría una UX de aprobación que no existe);
+`origin` con `session_id`/`skill` (requeriría pasar `session_id` hasta
+`MemoryRememberTool`, plomería nueva que hoy no existe en
+`AgentLoop.run()`); heurísticas de secretos genéricas (alto riesgo de
+falsos positivos); refinar `is_cloud_provider()` para distinguir un
+backend OpenAI-compatible local de uno remoto (posible reuso de
+`tool_integration/network_safety.py::is_unsafe_ip()` sobre el
+`base_url`, cuando haga falta de verdad).
+
+29 tests nuevos/extendidos (`test_memory_security_policy.py` nuevo,
+`test_memory_manager_security_policy.py` nuevo,
+`test_orchestrator_memory.py` nuevo, más extensiones a
+`test_core_tools.py`/`test_memory_short_term.py`/
+`test_memory_mid_term.py`/`test_memory_long_term.py`), suite completa
+sin regresiones.

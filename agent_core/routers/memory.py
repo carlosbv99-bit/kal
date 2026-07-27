@@ -48,3 +48,36 @@ def pin_memory(tier: str, item_id: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"id": item.id, "confidence": item.confidence.value}
+
+
+@router.delete("/{tier}/{item_id}")
+def forget_memory(tier: str, item_id: str):
+    """Derecho al olvido, un item puntual (mid_term/long_term, mismo
+    alcance que verify()/pin() — corto plazo no tiene identidad estable
+    fuera de la tarea activa). Idempotente: borrar un id que ya no
+    existe no es un error."""
+    try:
+        orchestrator.memory.forget(item_id, tier)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"deleted": item_id, "tier": tier}
+
+
+@router.delete("")
+def forget_matching_memory(
+    keyword: str | None = None,
+    tier: str | None = None,
+    classification: str | None = None,
+    before: float | None = None,
+    after: float | None = None,
+):
+    """Derecho al olvido, masivo con filtros — exige al menos uno
+    (ver MemoryManager.forget_matching()), nunca borra todo sin
+    condición. Sin `tier`, aplica a los tres niveles."""
+    try:
+        deleted = orchestrator.memory.forget_matching(
+            keyword=keyword, tier=tier, classification=classification, before=before, after=after,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"deleted_count": deleted}

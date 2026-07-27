@@ -126,6 +126,16 @@ class LongTermMemory(MemoryBackend):
     def forget(self, item_id: str) -> None:
         self.collection.delete(ids=[item_id])
 
+    def list_all(self) -> list[MemoryItem]:
+        """Para el borrado masivo con filtros (ver
+        MemoryManager.forget_matching()) — a diferencia de retrieve()
+        (búsqueda semántica top_k), esto devuelve TODO lo persistido."""
+        result = self.collection.get()
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        return [self._to_item(item_id, content, metadata) for item_id, content, metadata in zip(ids, documents, metadatas)]
+
     @staticmethod
     def _to_item(item_id: str, content: str, metadata: dict) -> MemoryItem:
         metadata = dict(metadata)

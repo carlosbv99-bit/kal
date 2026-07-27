@@ -11,6 +11,7 @@ from __future__ import annotations
 from agent_core.memory.base import MemoryConfidence, MemoryItem
 from task_execution.task import TaskStatus
 from tool_integration.adapters.core_tools import CodeExecutionTool, MemoryRecallTool, MemoryRememberTool
+from utils.config import settings
 
 
 class FakeTask:
@@ -143,6 +144,61 @@ def test_recall_marks_confidence_level_so_llm_can_distinguish_trust():
     artifact = tool.execute(query="algo")
 
     assert "[aprendida]" in artifact.metadata["summary"]
+
+
+def test_recall_never_filters_local_only_items_when_provider_is_local():
+    class MemoryWithResults(FakeMemoryManager):
+        def recall(self, query, top_k=3):
+            return {
+                "short_term": [MemoryItem(content="secreto local", metadata={"sharing": "local_only"})],
+                "mid_term": [], "long_term": [],
+            }
+
+    tool = MemoryRecallTool(MemoryWithResults())
+    artifact = tool.execute(query="algo")
+
+    assert "secreto local" in artifact.metadata["summary"]
+
+
+def test_recall_filters_out_local_only_items_when_a_cloud_provider_is_active(monkeypatch):
+    """
+    Memory Security Policy Engine (Fase 1): algo guardado 100% local
+    puede terminar inyectado como contexto a un proveedor en la nube si
+    el usuario cambia llm.provider más adelante — este filtro corta esa
+    fuga en el único punto donde recall() se convierte en texto para el
+    LLM activo.
+    """
+    class MemoryWithResults(FakeMemoryManager):
+        def recall(self, query, top_k=3):
+            return {
+                "short_term": [MemoryItem(content="secreto local", metadata={"sharing": "local_only"})],
+                "mid_term": [],
+                "long_term": [MemoryItem(content="dato compartible", metadata={"sharing": "cloud_ok"})],
+            }
+
+    monkeypatch.setattr(settings.llm, "provider", "openai_compatible")
+    tool = MemoryRecallTool(MemoryWithResults())
+
+    artifact = tool.execute(query="algo")
+
+    assert "secreto local" not in artifact.metadata["summary"]
+    assert "dato compartible" in artifact.metadata["summary"]
+
+
+def test_recall_treats_missing_sharing_metadata_as_local_only_by_default(monkeypatch):
+    """Fail-closed: un item guardado antes de que este campo existiera
+    (o por cualquier otro motivo sin `sharing` en su metadata) se trata
+    como local_only, nunca como compartible por omisión."""
+    class MemoryWithResults(FakeMemoryManager):
+        def recall(self, query, top_k=3):
+            return {"short_term": [MemoryItem(content="sin metadata de sharing")], "mid_term": [], "long_term": []}
+
+    monkeypatch.setattr(settings.llm, "provider", "openai_compatible")
+    tool = MemoryRecallTool(MemoryWithResults())
+
+    artifact = tool.execute(query="algo")
+
+    assert artifact.metadata["summary"] == "Sin resultados en memoria."
 
 
 def test_manifest_names_match_agent_loop_tool_call_names():

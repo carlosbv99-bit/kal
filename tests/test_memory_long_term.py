@@ -105,3 +105,14 @@ def test_upsert_same_id_replaces_not_duplicates(mem):
     matching = [r for r in results if r.id == "fixed-id"]
     assert len(matching) == 1
     assert matching[0].content == "versión actualizada"
+
+
+def test_list_all_returns_every_item_unlike_retrieve_which_is_semantic_top_k(mem):
+    mem.store(MemoryItem(content="un tema totalmente distinto sobre cocina"))
+    mem.store(MemoryItem(content="otro tema, esta vez sobre astronomía"))
+
+    assert len(mem.list_all()) == 2
+
+
+def test_list_all_on_empty_collection_returns_empty_list(mem):
+    assert mem.list_all() == []

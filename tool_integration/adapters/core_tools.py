@@ -14,8 +14,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent_core.memory.security_policy import is_cloud_provider
 from sdk.skill import Tool, ToolManifest
 from sdk.artifacts import Artifact
+from utils.config import settings
 
 
 class CodeExecutionTool(Tool):
@@ -99,6 +101,20 @@ class MemoryRecallTool(Tool):
 
     def execute(self, query: str, top_k: int = 3, **kwargs: Any) -> Artifact:
         results = self.memory.recall(query, top_k=top_k)
+        # Memory Security Policy Engine (Fase 1, ver
+        # agent_core/memory/security_policy.py): si el proveedor de LLM
+        # ACTIVO ahora mismo es en la nube, filtra cualquier item que no
+        # esté marcado explícitamente "cloud_ok" — sin importar el tier
+        # (corto/mediano/largo, el riesgo de fuga existe en los tres).
+        # Consecuencia real y deliberada: sin ningún mecanismo hoy para
+        # marcar algo "cloud_ok", esto puede dejar recall() sin
+        # resultados con un proveedor en la nube activo — fail-closed
+        # correcto, no un bug.
+        if is_cloud_provider(settings.llm.provider):
+            results = {
+                tier: [item for item in items if item.metadata.get("sharing", "local_only") != "local_only"]
+                for tier, items in results.items()
+            }
         # El nivel de confianza va entre corchetes por cada item — sin esto,
         # el LLM no tenía forma de distinguir un dato TEMPORAL (sin
         # confirmar, p.ej. algo que el propio agente dijo en otro turno) de

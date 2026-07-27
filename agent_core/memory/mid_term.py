@@ -109,6 +109,15 @@ class MidTermMemory(MemoryBackend):
         self.conn.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
         self.conn.commit()
 
+    def list_all(self) -> list[MemoryItem]:
+        """Para el borrado masivo con filtros (ver
+        MemoryManager.forget_matching()) — a diferencia de retrieve(),
+        que filtra por texto y limita a top_k, esto devuelve TODO."""
+        cursor = self.conn.execute(
+            "SELECT id, content, metadata, created_at, relevance_score, repetitions, confidence FROM memory_items"
+        )
+        return [self._row_to_item(row) for row in cursor.fetchall()]
+
     def purge_expired(self) -> int:
         """
         Job periódico: elimina items que superaron el TTL configurado.

@@ -11,6 +11,7 @@ from agent_core.memory.base import MemoryConfidence, MemoryItem
 from agent_core.memory.events import MemoryEvent, MemoryObserver
 from agent_core.memory.long_term import LongTermMemory
 from agent_core.memory.mid_term import MidTermMemory
+from agent_core.memory.security_policy import MemoryClassification, classify, redact
 from agent_core.memory.short_term import ShortTermMemory
 from utils.logger import get_logger
 
@@ -51,9 +52,19 @@ class MemoryManager:
         content: str,
         metadata: dict | None = None,
         confidence: MemoryConfidence = MemoryConfidence.TEMPORAL,
+        sharing: str = "local_only",
     ) -> MemoryItem:
-        """Punto de entrada por defecto: todo lo nuevo entra por corto plazo."""
-        item = MemoryItem(content=content, metadata=metadata or {}, confidence=confidence)
+        """
+        Punto de entrada por defecto: todo lo nuevo entra por corto plazo.
+
+        `sharing`: ver agent_core/memory/security_policy.py::MemorySharing
+        — default fail-closed ("local_only"). Sin ningún mecanismo hoy
+        para marcar algo "cloud_ok" explícitamente, así que en la
+        práctica todo lo guardado queda local_only por ahora — recall()
+        (ver tool_integration/adapters/core_tools.py::MemoryRecallTool)
+        filtra esto si el proveedor de LLM activo es en la nube.
+        """
+        item = MemoryItem(content=content, metadata={**(metadata or {}), "sharing": sharing}, confidence=confidence)
         self.short_term.store(item)
         return item
 
@@ -121,6 +132,17 @@ class MemoryManager:
         for item in candidates:
             if item.confidence not in _HUMAN_CONFIRMED:
                 item.confidence = MemoryConfidence.APRENDIDA
+            # Memory Security Policy Engine (Fase 1, ver
+            # agent_core/memory/security_policy.py): lo PERMANENTE se
+            # clasifica y, si contiene una credencial de formato
+            # conocido, se redacta ANTES de persistir para siempre —
+            # remember()/consolidate_short_to_mid() nunca se tocan (el
+            # agente necesita poder usar una credencial pegada en la
+            # tarea inmediata, solo lo que se vuelve permanente se filtra).
+            classification = classify(item.content)
+            item.metadata["classification"] = classification.value
+            if classification == MemoryClassification.SECRET:
+                item.content = redact(item.content)
             self.long_term.store(item)
             self._notify(MemoryEvent(kind="promoted", item=item))
         logger.info(f"Promovidos {len(candidates)} items de mediano a largo plazo")
@@ -159,9 +181,65 @@ class MemoryManager:
         logger.info(f"Item {item_id} ({tier}) fijado como PERMANENTE")
         return item
 
+    def forget(self, item_id: str, tier: str) -> None:
+        """
+        Derecho al olvido — conecta el `forget()` que cada backend YA
+        implementaba (parte del contrato MemoryBackend) pero que hasta
+        ahora ningún endpoint exponía. Igual que verify()/pin(), aplica
+        a mid_term/long_term (corto plazo vive solo en RAM de la tarea
+        activa, sin identidad estable fuera de ese turno).
+        """
+        self._backend_for_tier(tier).forget(item_id)
+
+    def forget_matching(
+        self,
+        keyword: str | None = None,
+        tier: str | None = None,
+        classification: str | None = None,
+        before: float | None = None,
+        after: float | None = None,
+    ) -> int:
+        """
+        Borrado masivo del derecho al olvido. Exige AL MENOS un filtro —
+        seguro por sí solo (mismo criterio que
+        agent_core/orchestrator.py::_artifact_url(): la función nunca
+        confía en que el llamador ya validó, se protege ella misma),
+        nunca un "borrar todo" accidental de un único llamado sin
+        parámetros. `tier` restringe a un nivel puntual; sin él, se
+        aplica a los tres (a diferencia de forget()/verify()/pin(), acá
+        SÍ cubre corto plazo — no tiene la limitación de identidad
+        estable de esos otros, list_all() alcanza).
+        """
+        if keyword is None and classification is None and before is None and after is None:
+            raise ValueError(
+                "forget_matching() requiere al menos un filtro (keyword/classification/before/after)"
+            )
+
+        backends = {"short_term": self.short_term, "mid_term": self.mid_term, "long_term": self.long_term}
+        if tier is not None:
+            if tier not in backends:
+                raise ValueError(f"Nivel de memoria inválido: '{tier}' (usar 'short_term', 'mid_term' o 'long_term')")
+            backends = {tier: backends[tier]}
+
+        deleted = 0
+        for backend in backends.values():
+            for item in backend.list_all():
+                if keyword is not None and keyword.lower() not in item.content.lower():
+                    continue
+                if classification is not None and item.metadata.get("classification") != classification:
+                    continue
+                if before is not None and item.created_at >= before:
+                    continue
+                if after is not None and item.created_at <= after:
+                    continue
+                backend.forget(item.id)
+                deleted += 1
+        logger.info(f"forget_matching(): {deleted} item(s) borrados")
+        return deleted
+
     def _backend_for_tier(self, tier: str):
         if tier == "mid_term":
             return self.mid_term
         if tier == "long_term":
             return self.long_term
-        raise ValueError(f"Nivel de memoria inválido para verify()/pin(): '{tier}' (usar 'mid_term' o 'long_term')")
+        raise ValueError(f"Nivel de memoria inválido: '{tier}' (usar 'mid_term' o 'long_term')")

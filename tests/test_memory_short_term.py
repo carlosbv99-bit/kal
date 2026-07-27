@@ -90,3 +90,16 @@ def test_consolidate_on_empty_buffer_returns_empty_list():
 def test_retrieve_on_empty_memory_returns_empty_list():
     mem = ShortTermMemory(max_tokens=1000)
     assert mem.retrieve("cualquier cosa") == []
+
+
+def test_list_all_returns_everything_unlike_retrieve_which_limits_to_top_k():
+    mem = ShortTermMemory(max_tokens=10_000)
+    for i in range(10):
+        mem.store(MemoryItem(content=f"item {i}"))
+
+    assert len(mem.list_all()) == 10
+
+
+def test_list_all_on_empty_memory_returns_empty_list():
+    mem = ShortTermMemory(max_tokens=1000)
+    assert mem.list_all() == []
