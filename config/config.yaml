@@ -143,7 +143,11 @@ multimodal:
     # sd-turbo. Para volver al modelo liviano/rápido anterior: cambiar
     # model a "stabilityai/sd-turbo" y height/width a 512.
     model: "stabilityai/sdxl-turbo"
-    num_inference_steps: 2
+    # BUG REAL ENCONTRADO EN USO (2026-07-27): con 2 pasos, un pedido
+    # simple generó una imagen que a primera vista parecía correcta,
+    # pero tenía una deformidad sutil (una tercera oreja). 4 es el
+    # máximo recomendado para SDXL-Turbo, sin costo de tiempo relevante.
+    num_inference_steps: 4
     guidance_scale: 0.0                   # sdxl-turbo tampoco usa CFG, debe ir en 0
     height: 1024
     width: 1024

@@ -171,7 +171,14 @@ class ImageGenConfig(BaseModel):
     # (fp32 — float16 no es fiable en CPU, mismo motivo que ya regía para
     # sd-turbo) y bastante más lento por imagen en CPU.
     model: str = "stabilityai/sdxl-turbo"
-    num_inference_steps: int = 2
+    # BUG REAL ENCONTRADO EN USO (2026-07-27): con 2 pasos, un pedido
+    # simple ("un gato naranja durmiendo sobre un sofá azul") generó una
+    # imagen que a primera vista parecía correcta, pero el gato tenía
+    # una TERCERA oreja (deformidad sutil, fácil de pasar por alto). 4
+    # es el máximo recomendado para SDXL-Turbo — mejora la precisión de
+    # detalles finos (orejas/patas/etc.) sin costo de tiempo relevante
+    # en CPU (sigue siendo "turbo", no el modelo completo de ~50 pasos).
+    num_inference_steps: int = 4
     guidance_scale: float = 0.0
     height: int = 1024
     width: int = 1024
