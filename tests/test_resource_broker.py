@@ -22,6 +22,19 @@ def _broker(idle_timeout_seconds=300, min_available_ram_mb=2048, available_ram_m
     return broker
 
 
+def test_is_registered_true_after_register(monkeypatch):
+    broker = _broker(monkeypatch=monkeypatch)
+    broker.register("x", is_loaded=lambda: True, unload=lambda: None)
+
+    assert broker.is_registered("x") is True
+
+
+def test_is_registered_false_for_an_unknown_resource(monkeypatch):
+    broker = _broker(monkeypatch=monkeypatch)
+
+    assert broker.is_registered("no-existe") is False
+
+
 def test_mark_used_on_unknown_resource_is_a_no_op(monkeypatch):
     broker = _broker(monkeypatch=monkeypatch)
     broker.mark_used("no-existe")  # no debe lanzar

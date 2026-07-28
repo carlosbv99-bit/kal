@@ -11,11 +11,13 @@ from __future__ import annotations
 import pytest
 
 import agent_core.llm_settings as llm_settings
+import agent_core.orchestrator as orchestrator_module
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
 from agent_core.orchestrator import _ACTIVE_RUNTIME_NAME, build_llm_client
 from agent_core.runtime.manager import runtime_manager
 from agent_core.runtime.managed_provider import RuntimeManagedLLMProvider
+from kernel.broker.resource_broker import ResourceBroker
 from utils.config import settings
 
 
@@ -65,3 +67,32 @@ def test_openai_compatible_provider_with_api_key_builds_client_pointed_at_config
     assert isinstance(real_client, OpenAICompatibleClient)
     assert real_client.base_url == "https://api.x.ai/v1"
     assert real_client.api_key == "test-key-123"
+
+
+def test_ollama_provider_registers_the_client_with_the_resource_broker(monkeypatch):
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-27): un pedido de imagen congeló
+    la máquina — SDXL-Turbo intentó cargar con el modelo de chat de
+    Ollama todavía residente en RAM. Sin este registro, resource_broker
+    nunca sabría que puede liberar el modelo de Ollama antes de que un
+    pipeline local pesado (imagen/audio/STT) intente cargar.
+    """
+    fresh_broker = ResourceBroker(idle_timeout_seconds=300, min_available_ram_mb=2048)
+    monkeypatch.setattr(orchestrator_module, "resource_broker", fresh_broker)
+    monkeypatch.setattr(settings.llm, "provider", "ollama")
+
+    build_llm_client()
+
+    assert fresh_broker.is_registered("ollama.chat_model")
+
+
+def test_openai_compatible_provider_never_registers_with_the_resource_broker(monkeypatch):
+    """Un proveedor en la nube no usa RAM local — nada que liberar."""
+    fresh_broker = ResourceBroker(idle_timeout_seconds=300, min_available_ram_mb=2048)
+    monkeypatch.setattr(orchestrator_module, "resource_broker", fresh_broker)
+    monkeypatch.setattr(settings.llm, "provider", "openai_compatible")
+    monkeypatch.setenv("LLM_API_KEY", "test-key-123")
+
+    build_llm_client()
+
+    assert not fresh_broker.is_registered("ollama.chat_model")
