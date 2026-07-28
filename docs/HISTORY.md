@@ -6608,3 +6608,61 @@ vez de segundos) y una descarga nueva de varios GB — el usuario eligió
 probar primero el cambio barato de pasos, que ya mostró una mejora
 real; el modelo completo queda como posible próximo paso si la calidad
 sigue sin convencer.
+
+## Bug real, grave: freeze completo del sistema al generar una imagen (2026-07-27/28)
+
+El usuario reportó que su computadora se congeló por completo (forzó
+el reinicio) al pedirle a kal una imagen desde la interfaz web. No un
+bug de calidad esta vez — un problema real de estabilidad del sistema.
+
+**Investigación con números reales**: el modelo de imagen
+(`stabilityai/sdxl-turbo`, fp32) pesa **13GB en disco**
+(`du -sh ~/.cache/huggingface/hub/models--stabilityai--sdxl-turbo`).
+La máquina tiene **14GB de RAM total** (`free -h`). Sin GPU dedicada
+(ver `project_gpu_memory_architecture_hawkpoint`), TODO — el modelo de
+chat de Ollama y el pipeline de imagen — comparte la misma RAM física.
+
+`kernel/broker/resource_broker.py` ya existía justo para este tipo de
+contención, pero **solo funcionaba en una dirección**:
+`evict_idle_and_pressured()` se llamaba ÚNICAMENTE desde
+`OllamaClient.chat()` (liberaba imagen/audio/STT antes de una llamada a
+Ollama). Nunca al revés — nada liberaba el modelo de Ollama antes de
+que `ImageService._get_pipeline()` intentara cargar sus 13GB. Ese fue
+el hueco real: el pedido de imagen intentó cargar el pipeline completo
+con el modelo de chat todavía residente, superando la RAM física total
+y congelando el sistema entero (probablemente por trashing de swap
+extremo, no necesariamente un OOM-kill limpio).
+
+**Fix — evicción simétrica**: `OllamaClient` gana `is_model_loaded()`
+(GET `/api/ps`) y `unload_model()` (POST `/api/generate` con
+`keep_alive: 0` por cada modelo cargado, formato documentado de Ollama
+para forzar descarga inmediata) — verificados EN VIVO contra el Ollama
+real del usuario, no solo con mocks: cargué `qwen2.5:3b` con una
+llamada real, confirmé `is_model_loaded()` en `True`, llamé
+`unload_model()`, y `/api/ps` mostró la lista vacía después.
+`build_llm_client()` (`agent_core/orchestrator.py`) registra el cliente
+principal en `resource_broker` bajo `"ollama.chat_model"` (solo para
+`provider: ollama` — un proveedor en la nube no usa RAM local).
+`ImageService._get_pipeline()`/`_get_inpaint_pipeline()`,
+`AudioService._get_voice()`, `STTService._get_model()` ahora llaman
+`evict_idle_and_pressured()` ANTES de cargar (antes solo marcaban uso),
+cerrando el hueco simétrico.
+
+**Verificación final en vivo, con cuidado** (confirmado con el usuario
+antes de intentarlo, dado el riesgo real de reproducir el freeze):
+servidor reiniciado con el fix, modelo de chat cargado, pedido real de
+imagen ("una montaña nevada al atardecer") con `free -h` monitoreado
+cada 5s durante los ~5 minutos completos del pedido — RAM usada osciló
+entre 2-7GB, **disponible nunca bajó de 7.9GB** de 14GB totales. Sin
+freeze. Comparado con el escenario original (13GB de imagen + varios
+GB de Ollama simultáneos), la diferencia es clara.
+
+**Honestidad sobre el alcance real**: esto reduce el riesgo de forma
+significativa, pero no es una garantía absoluta — el SO y otras apps
+abiertas (navegador, VS Code) ya usan varios GB por sí solos, así que
+en el peor caso (poca RAM libre por otras causas) todavía podría
+quedar ajustado.
+
+9 tests nuevos (`test_ollama_client.py`, `test_llm_client_factory.py`,
+`test_resource_broker.py`, `test_kernel_services_resource_broker.py`
+nuevo), suite completa sin regresiones.

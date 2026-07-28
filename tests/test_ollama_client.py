@@ -283,3 +283,85 @@ def test_chat_with_images_does_not_mutate_caller_messages():
     client.chat(original_messages, images=["abc"])
 
     assert "images" not in original_messages[0]
+
+
+# --- is_model_loaded()/unload_model() ---
+# BUG REAL ENCONTRADO EN USO (2026-07-27): un pedido de imagen congeló
+# la máquina del usuario — SDXL-Turbo (13GB fp32) intentó cargar con el
+# modelo de chat de Ollama todavía residente en RAM, superando la RAM
+# física total. Estos dos métodos permiten que resource_broker libere
+# el modelo de Ollama ANTES de que un pipeline local pesado cargue.
+
+
+def test_is_model_loaded_true_when_ps_lists_a_model():
+    client = _client(get_fn=lambda *a, **kw: FakeResponse({"models": [{"name": "qwen2.5-coder:14b"}]}))
+    assert client.is_model_loaded() is True
+
+
+def test_is_model_loaded_false_when_ps_is_empty():
+    client = _client(get_fn=lambda *a, **kw: FakeResponse({"models": []}))
+    assert client.is_model_loaded() is False
+
+
+def test_is_model_loaded_false_on_connection_error():
+    def broken_get(*a, **kw):
+        raise requests.exceptions.ConnectionError("no conecta")
+
+    client = _client(get_fn=broken_get)
+    assert client.is_model_loaded() is False
+
+
+def test_unload_model_requests_keep_alive_zero_for_each_loaded_model():
+    posted = []
+
+    def post_fn(url, json=None, **kw):
+        posted.append((url, json))
+        return FakeResponse({})
+
+    client = _client(
+        get_fn=lambda *a, **kw: FakeResponse(
+            {"models": [{"name": "qwen2.5-coder:14b"}, {"name": "qwen2.5:3b"}]}
+        ),
+        post_fn=post_fn,
+    )
+
+    client.unload_model()
+
+    assert len(posted) == 2
+    urls = {url for url, _ in posted}
+    assert urls == {"http://localhost:11434/api/generate"}
+    payloads = {p["model"]: p["keep_alive"] for _, p in posted}
+    assert payloads == {"qwen2.5-coder:14b": 0, "qwen2.5:3b": 0}
+
+
+def test_unload_model_is_a_no_op_when_nothing_is_loaded():
+    posted = []
+    client = _client(
+        get_fn=lambda *a, **kw: FakeResponse({"models": []}),
+        post_fn=lambda *a, **kw: posted.append(1),
+    )
+
+    client.unload_model()
+
+    assert posted == []
+
+
+def test_unload_model_never_raises_when_ollama_is_unreachable():
+    def broken_get(*a, **kw):
+        raise requests.exceptions.ConnectionError("no conecta")
+
+    client = _client(get_fn=broken_get)
+
+    client.unload_model()  # no debe lanzar
+
+
+def test_unload_model_never_raises_if_one_unload_request_fails():
+    def broken_post(*a, **kw):
+        raise requests.exceptions.ConnectionError("no conecta")
+
+    client = _client(
+        get_fn=lambda *a, **kw: FakeResponse({"models": [{"name": "qwen2.5-coder:14b"}]}),
+        post_fn=broken_post,
+    )
+
+    client.unload_model()  # no debe lanzar, solo loguea

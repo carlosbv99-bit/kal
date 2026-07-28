@@ -44,6 +44,7 @@ from agent_core.memory.manager import MemoryManager
 from agent_core.self_diagnosis import SelfDiagnosisAgent
 from agent_core.self_modification import self_modification_manager
 from agent_core.sessions import session_manager
+from kernel.broker.resource_broker import resource_broker
 from kernel.registry.registry import tool_registry
 from task_execution.executor import TaskExecutor
 from utils.admin_token import get_or_create_admin_token
@@ -97,6 +98,17 @@ def build_llm_client() -> LLMProvider:
         runtime = OpenAICompatibleRuntime(client, max_parallel=settings.runtimes.openai_compatible.max_parallel)
     else:
         client = OllamaClient()
+        # BUG REAL ENCONTRADO EN USO (2026-07-27): un pedido de imagen
+        # congeló la máquina del usuario por completo — SDXL-Turbo
+        # (13GB fp32) intentó cargar con el modelo de chat de Ollama
+        # todavía residente en RAM, superando la RAM física total
+        # (14GB). resource_broker YA liberaba imagen/audio/STT antes de
+        # llamar a Ollama (ver OllamaClient.chat()), pero nunca al
+        # revés — nada liberaba el modelo de Ollama antes de que un
+        # pipeline local pesado intentara cargar. Registrarlo acá cierra
+        # ese hueco: kernel/services/services.py ahora llama
+        # evict_idle_and_pressured() (que incluye esto) ANTES de cargar.
+        resource_broker.register("ollama.chat_model", is_loaded=client.is_model_loaded, unload=client.unload_model)
         runtime = OllamaRuntime(client, max_parallel=settings.runtimes.ollama.max_parallel)
     runtime_manager.register(_ACTIVE_RUNTIME_NAME, runtime)
     return RuntimeManagedLLMProvider(runtime_manager, _ACTIVE_RUNTIME_NAME)

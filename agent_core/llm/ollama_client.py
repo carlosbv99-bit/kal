@@ -186,6 +186,48 @@ class OllamaClient:
             except requests.exceptions.HTTPError as e:
                 raise OllamaError(f"Ollama devolvió un error HTTP: {e}") from e
 
+    def is_model_loaded(self) -> bool:
+        """
+        GET /api/ps — True si Ollama tiene AL MENOS un modelo cargado en
+        RAM ahora mismo. Fail-safe: si no se puede consultar, devuelve
+        False (nunca debe bloquear la eviction de otros recursos por
+        esto, ver kernel/broker/resource_broker.py).
+        """
+        try:
+            response = self._get(f"{self.base_url}/api/ps", timeout=5)
+            response.raise_for_status()
+        except requests.exceptions.RequestException:
+            return False
+        return bool(response.json().get("models"))
+
+    def unload_model(self) -> None:
+        """
+        Descarga TODOS los modelos actualmente cargados en Ollama (POST
+        /api/generate con keep_alive=0, sin prompt — formato documentado
+        de Ollama para forzar la descarga inmediata). Usado por
+        resource_broker.evict_idle_and_pressured() bajo presión real de
+        RAM, ANTES de que un pipeline local pesado (imagen/audio/STT)
+        intente cargar — BUG REAL ENCONTRADO EN USO (2026-07-27): sin
+        esto, un pedido de imagen podía intentar cargar SDXL-Turbo
+        (13GB) con el modelo de chat de Ollama todavía residente,
+        superando la RAM física total de la máquina y congelando el
+        sistema entero. Nunca lanza — best-effort, mismo criterio
+        fail-safe que el resto de este mecanismo.
+        """
+        try:
+            response = self._get(f"{self.base_url}/api/ps", timeout=5)
+            response.raise_for_status()
+        except requests.exceptions.RequestException:
+            return
+        for model in response.json().get("models", []):
+            name = model.get("name")
+            if not name:
+                continue
+            try:
+                self._post(f"{self.base_url}/api/generate", json={"model": name, "keep_alive": 0}, timeout=self.timeout)
+            except requests.exceptions.RequestException:
+                logger.warning(f"No se pudo descargar el modelo '{name}' de Ollama")
+
     def list_models(self) -> list[str]:
         """Consulta GET /api/tags para listar modelos disponibles localmente."""
         try:

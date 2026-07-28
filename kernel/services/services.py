@@ -117,6 +117,15 @@ class ImageService:
         self._inpaint_pipeline = None
 
     def _get_pipeline(self):
+        # BUG REAL ENCONTRADO EN USO (2026-07-27): este pipeline (13GB
+        # fp32) podía intentar cargar con el modelo de chat de Ollama
+        # todavía residente en RAM, superando la RAM física total de la
+        # máquina y congelando el sistema entero. evict_idle_and_pressured()
+        # ahora también sabe liberar el modelo de Ollama (ver
+        # agent_core/orchestrator.py::build_llm_client()) — llamarlo ACÁ,
+        # antes de cargar, cierra el hueco simétrico al que ya existía
+        # del lado de OllamaClient.chat().
+        resource_broker.evict_idle_and_pressured()
         resource_broker.mark_used("image.generate")
         if self._pipeline is None:
             import torch
@@ -168,6 +177,8 @@ class ImageService:
         }
 
     def _get_inpaint_pipeline(self):
+        # Ver el mismo comentario en _get_pipeline() más arriba.
+        resource_broker.evict_idle_and_pressured()
         resource_broker.mark_used("image.inpaint")
         if self._inpaint_pipeline is None:
             import torch
@@ -296,6 +307,8 @@ class AudioService:
         return Path(downloaded_model), Path(downloaded_config)
 
     def _get_voice(self):
+        # Ver el comentario en ImageService._get_pipeline() más arriba.
+        resource_broker.evict_idle_and_pressured()
         resource_broker.mark_used("audio.synthesize")
         if self._voice is None:
             from piper.voice import PiperVoice
@@ -386,6 +399,8 @@ class STTService:
         self._model = None
 
     def _get_model(self):
+        # Ver el comentario en ImageService._get_pipeline() más arriba.
+        resource_broker.evict_idle_and_pressured()
         resource_broker.mark_used("stt.transcribe")
         if self._model is None:
             from faster_whisper import WhisperModel

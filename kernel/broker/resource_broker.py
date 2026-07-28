@@ -52,6 +52,11 @@ class ResourceBroker:
     def register(self, name: str, is_loaded: Callable[[], bool], unload: Callable[[], None]) -> None:
         self._resources[name] = _ManagedResource(name=name, is_loaded=is_loaded, unload=unload)
 
+    def is_registered(self, name: str) -> bool:
+        """Para tests que verifican que un llamador registró el recurso
+        esperado, sin exponer `_resources` directo."""
+        return name in self._resources
+
     def mark_used(self, name: str) -> None:
         resource = self._resources.get(name)
         if resource is not None:
