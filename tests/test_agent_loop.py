@@ -165,6 +165,40 @@ def test_a_malformed_pseudo_tool_call_with_a_real_tool_name_is_never_shown_as_th
     assert "ERROR" in fake_llm.calls[1]["messages"][-1]["content"]
 
 
+def test_a_completely_empty_response_is_never_shown_as_the_final_answer():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-28, probando qwen3.5:9b-q4_K_M):
+    tras un run_code exitoso, la siguiente llamada del modelo devolvió
+    content='' y tool_calls=[] — algunos modelos separan su razonamiento
+    en un campo "thinking" aparte y a veces no llegan a producir ningún
+    content real. Sin este fix, esa respuesta vacía se aceptaba tal cual
+    como "respuesta final", dejando al usuario sin absolutamente nada
+    pese a que la tarea ya se había completado.
+    """
+    responses = [
+        ChatResponse(content=""),
+        ChatResponse(content="El resultado es 55."),
+    ]
+    loop, fake_llm = _loop(responses)
+
+    result = loop.run("ejecutá esto: print(sum(range(1,11)))")
+
+    assert result.status == "success"
+    assert result.final_answer == "El resultado es 55."
+    assert len(fake_llm.calls) == 2
+    assert "ERROR" in fake_llm.calls[1]["messages"][-1]["content"]
+
+
+def test_an_empty_response_that_never_recovers_exhausts_max_steps_instead_of_looping_forever():
+    responses = [ChatResponse(content="")] * 3
+    loop, fake_llm = _loop(responses)
+
+    result = loop.run("algo", max_steps=3)
+
+    assert result.status == "max_steps_exceeded"
+    assert len(fake_llm.calls) == 3
+
+
 def test_a_normal_plain_text_answer_is_not_mistaken_for_a_failed_tool_call():
     loop, fake_llm = _loop([ChatResponse(content="La respuesta es 4.")])
 

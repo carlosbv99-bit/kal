@@ -556,6 +556,30 @@ class AgentLoop:
                         }
                     )
                     continue
+                if not response.content.strip():
+                    # BUG REAL ENCONTRADO EN USO (2026-07-28, probando qwen3.5):
+                    # algunos modelos separan su razonamiento en un campo
+                    # "thinking" (fuera de ChatResponse, ver ollama_client.py)
+                    # y a veces dejan `content` vacío Y sin tool_calls tras un
+                    # paso exitoso (confirmado con qwen3.5:9b-q4_K_M tras un
+                    # run_code exitoso: content='', tool_calls=[]) — sin este
+                    # chequeo, esa respuesta vacía se aceptaba tal cual como
+                    # "respuesta final", dejando al usuario sin absolutamente
+                    # nada pese a que la tarea real ya se había completado.
+                    # Mismo patrón de retry-con-corrección que el resto de
+                    # este loop, nunca aceptar en silencio una respuesta vacía.
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "ERROR: tu respuesta llegó vacía, sin texto ni ninguna llamada a herramienta. "
+                                "Da tu respuesta final ahora, con texto real explicando lo que ya se hizo o "
+                                "respondiendo el pedido."
+                            ),
+                        }
+                    )
+                    continue
                 return AgentRunResult(
                     goal=goal, final_answer=response.content, steps=steps, status="success",
                     self_checked_tools=self_check.as_frozenset(),

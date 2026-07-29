@@ -6666,3 +6666,49 @@ quedar ajustado.
 9 tests nuevos (`test_ollama_client.py`, `test_llm_client_factory.py`,
 `test_resource_broker.py`, `test_kernel_services_resource_broker.py`
 nuevo), suite completa sin regresiones.
+
+## Evaluación de Qwen 3.5 (9B y 4B) como reemplazo del modelo de chat, y un bug real encontrado en el proceso
+
+El usuario preguntó si un modelo de la familia Qwen 3.5 (lanzada por
+Alibaba el 16/02/2026) mejoraría el comportamiento del loop principal,
+dado los bugs de negación falsa/llamadas innecesarias encontrados hoy
+con `qwen2.5-coder:14b`. Verificado contra el catálogo real de Ollama
+(no supuesto): el candidato "-coding" más chico (`27b-coding`) pesa
+**17GB cuantizado — más que la RAM total de la máquina (14GB)**,
+descartado de inmediato. Los candidatos viables por tamaño:
+`qwen3.5:9b-q4_K_M` (6.6GB) y `qwen3.5:4b-q4_K_M` (3.4GB), ambos
+descargados y probados en vivo contra el toolset real de kal.
+
+**Bug real encontrado durante las pruebas**: `qwen3.5:9b` a veces
+devuelve `content=''` Y `tool_calls=[]` tras un paso exitoso (usa un
+campo separado de "razonamiento" que Ollama expone junto al mensaje —
+cuando el modelo no logra "aterrizar" en un content real, ese campo
+queda vacío). `agent_core/llm/agent_loop.py::run()` no tenía ningún
+chequeo para esto — aceptaba la respuesta vacía tal cual como
+"respuesta final", dejando al usuario sin absolutamente nada pese a
+que la tarea (confirmado con `run_code`) ya se había completado con
+éxito. **Fix**: mismo patrón de retry-con-corrección que ya usa el
+loop para intentos de tool-call fallidos — si `content` está vacío Y
+no hay tool_calls, se le pide al modelo una respuesta real en vez de
+aceptar el vacío, acotado por `max_steps` como el resto del mecanismo.
+2 tests nuevos. Verificado en vivo tras el fix: el mismo caso que
+falló ahora responde correctamente.
+
+**Resultados de la batería ampliada (6 escenarios: adivinanza,
+audio×3, identidad, pedido vago, generación de imagen), con el fix ya
+activo**:
+- `qwen3.5:9b`: 5/6 perfectos, 1/6 (audio) usó una herramienta
+  inesperada (`run_code`) pero igual dio una respuesta razonable
+  (repitió el poema en texto) — sin negación falsa, sin llamadas
+  innecesarias repetidas.
+- `qwen3.5:4b`: 6/6 correctos — cero negaciones falsas, cero llamadas
+  innecesarias, generó imagen/audio correctamente en cada intento.
+
+Ambos superan claramente el comportamiento de `qwen2.5-coder:14b` de
+hoy (negación falsa de audio + 3 llamadas idénticas a audio_generation
+para una adivinanza). El 4B, más liviano (3.4GB vs 6.6GB), tuvo
+resultados igual de buenos o mejores en esta batería — sin garantía
+de que se mantenga así en un uso más extenso, pero es la evidencia
+real disponible hoy, no una suposición de benchmarks de marketing.
+
+Decisión de adopción: pendiente, a confirmar con el usuario.
