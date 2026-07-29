@@ -28,20 +28,27 @@ llm:
   #     default_model: "gpt-4o-mini"
   provider: "ollama"
   base_url: "http://localhost:11434"
-  # qwen3-coder:30b (MoE: 30B totales pero activa pocos por token, por eso
-  # no es más lento que un modelo denso más chico en CPU). Reemplazó a
-  # qwen2.5-coder:14b tras comparación empírica en vivo (misma pregunta,
-  # misma máquina):
-  #   - "explicame este código" (con código ya en el mensaje): 96s,
-  #     0 llamadas a herramientas, explicación correcta (antes: ~97-150s
-  #     con qwen2.5-coder:14b, y a veces 1 llamada de herramienta de más).
-  #   - código que sí necesita ejecutarse ("ejecutá esto: print(sum(range(1,11)))"):
-  #     7.4s, llamó a run_code correctamente, resultado correcto (55).
-  #   - "hola": 1s, 0 llamadas a herramientas, respuesta directa.
-  # Sigue las instrucciones del SYSTEM_PROMPT sobre cuándo NO usar
-  # herramientas notablemente mejor que qwen2.5-coder:14b, sin sacrificar
-  # el uso correcto de herramientas cuando sí hacen falta.
-  default_model: "qwen2.5-coder:14b"
+  # qwen3.5:4b-q4_K_M (Alibaba, MoE liviano, 3.4GB cuantizado) reemplazó a
+  # qwen2.5-coder:14b (2026-07-30) tras comparación empírica en vivo, no
+  # supuesta — batería de 6 escenarios reales contra el toolset real de
+  # kal (adivinanza, leer un poema en voz alta ×3, "¿quién sos?", pedido
+  # vago, generación de imagen):
+  #   - qwen2.5-coder:14b: negó falsamente tener audio_generation
+  #     disponible, y llamó audio_generation 3 veces IDÉNTICAS para una
+  #     simple adivinanza sin necesitarlo (ver docs/HISTORY.md).
+  #   - qwen3.5:4b-q4_K_M: 6/6 escenarios correctos — cero negaciones
+  #     falsas, cero llamadas innecesarias, generó audio/imagen
+  #     correctamente en cada intento. Además MÁS LIVIANO que el modelo
+  #     que reemplaza (3.4GB vs ~9GB) — menos presión de RAM en una
+  #     máquina sin GPU dedicada (ver
+  #     project_resource_broker_ollama_eviction en la memoria del
+  #     proyecto sobre por qué esto importa acá).
+  # qwen3.5:9b-q4_K_M (6.6GB) también se probó y superó ampliamente al
+  # modelo anterior (5/6), pero el 4B tuvo mejor resultado en esta
+  # batería concreta pese a ser más chico — no asumir que "más grande
+  # es mejor" sin evidencia real para ESTA tarea (tool-calling
+  # confiable, no benchmarks de código en general).
+  default_model: "qwen3.5:4b-q4_K_M"
   # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): un pedido de varios
   # pasos (propose_project_files + browser, con resultados de navegación
   # ya en el contexto) hizo que qwen2.5-coder:14b en CPU tardara más de
