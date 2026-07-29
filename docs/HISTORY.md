@@ -6711,4 +6711,14 @@ resultados igual de buenos o mejores en esta batería — sin garantía
 de que se mantenga así en un uso más extenso, pero es la evidencia
 real disponible hoy, no una suposición de benchmarks de marketing.
 
-Decisión de adopción: pendiente, a confirmar con el usuario.
+**Adoptado (2026-07-30)**: `qwen3.5:4b-q4_K_M` es ahora
+`llm.default_model` en `config/config.yaml`, reemplazando a
+`qwen2.5-coder:14b`. Verificado end-to-end contra el servidor real tras
+el cambio: "dime una adivinanza" respondió con
+`model_used=qwen3.5:4b-q4_K_M`, directo en texto, sin llamadas
+innecesarias. `qwen2.5-coder:14b` y `qwen2.5-coder:7b` (este último sin
+referencias en ninguna configuración) borrados de Ollama.
+`qwen2.5:3b` (modelo separado del Conversation Engine, ver
+`ConversationEngineConfig`) se deja intacto a propósito — no se evaluó
+ni reemplazó en esta sesión, y borrarlo hubiera roto esa función sin
+un reemplazo probado.
