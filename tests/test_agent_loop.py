@@ -1438,3 +1438,27 @@ def test_run_passes_the_configured_temperature_to_the_llm():
     loop.run("algo")
 
     assert fake_llm.calls[0]["temperature"] == settings.llm.temperature
+
+
+def test_system_prompt_triggers_the_exact_quantity_self_check_without_requiring_the_word_solo():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-30): pedido simple "crea una
+    orca" (sin la palabra "solo") generó DOS orcas completas — como el
+    autochequeo antes solo se disparaba con "solo una/un X", esa
+    duplicación nunca se detectó, y se le entregó al usuario una imagen
+    con el doble de lo pedido sin ningún aviso.
+    """
+    assert 'NO hace falta que diga "SOLO una/un X"' in SYSTEM_PROMPT
+    assert "pedir \"una orca\" ya" in SYSTEM_PROMPT
+
+
+def test_system_prompt_tells_the_model_to_locate_an_existing_defect_with_vision_before_inpainting():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-30): "hay dos orcas en la
+    imagen, borra una de ellas" fue directo a inpaint con un 'box'
+    adivinado sin haber llamado nunca a analyze_image — el resultado
+    terminó siendo una composición completamente distinta a la
+    original, sin ninguna orca borrada de verdad.
+    """
+    assert "llamá primero a analyze_image" in SYSTEM_PROMPT
+    assert "imagen YA EXISTENTE" in SYSTEM_PROMPT

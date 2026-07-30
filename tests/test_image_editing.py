@@ -266,3 +266,15 @@ def test_inpaint_leaves_area_outside_mask_largely_unchanged(inpaint_tool, inpain
     # no debería tocarla de forma perceptible (se admite algo de variación
     # por el VAE, no un cambio de color completo a otra tonalidad).
     assert corner_pixel[1] > corner_pixel[0] and corner_pixel[1] > corner_pixel[2]
+
+
+def test_manifest_tells_the_model_to_locate_the_object_with_vision_before_a_positional_inpaint():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-30): "hay dos orcas en la imagen,
+    borra una de ellas" fue directo a un 'box' adivinado a ciegas, sin
+    llamar nunca a analyze_image — el resultado terminó siendo una
+    composición totalmente distinta, sin ninguna orca borrada de verdad.
+    """
+    description = ImageEditingTool.manifest.description
+    assert "analyze_image" in description
+    assert "ubicación aproximada" in description

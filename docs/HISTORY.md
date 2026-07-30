@@ -6722,3 +6722,54 @@ referencias en ninguna configuración) borrados de Ollama.
 `ConversationEngineConfig`) se deja intacto a propósito — no se evaluó
 ni reemplazó en esta sesión, y borrarlo hubiera roto esa función sin
 un reemplazo probado.
+
+## Bug real: "crea una orca" generó DOS orcas, y la edición posterior adivinó a ciegas sin usar visión
+
+El usuario reportó, con la transcripción real: "crea una orca" generó
+una imagen con dos orcas completas (SDXL-Turbo, ya a 4 pasos, sigue sin
+respetar cantidades exactas de forma confiable — limitación conocida
+del generador). El pedido de arreglo ("hay dos orcas en la imagen,
+borra una de ellas") fue directo a `image_inpaint_via_kernel` con un
+`box` adivinado, SIN llamar nunca a `analyze_image` — la respuesta
+final fue honesta sobre la estimación a ciegas (cumplió su propia
+regla, no mintió), pero el resultado terminó siendo una composición
+completamente distinta a la original, sin ninguna orca borrada de
+verdad. Verificado visualmente comparando ambas imágenes.
+
+**Dos causas reales distintas, dos fixes**:
+
+1. El autochequeo de cantidad exacta (`SYSTEM_PROMPT`) solo se
+   disparaba con la palabra "solo" ("solo una/un X") — "crea una orca"
+   (sin "solo") nunca calificaba, así que la duplicación nunca se
+   detectaba antes de mostrarle la imagen al usuario. **Fix**: la regla
+   ahora dice explícitamente que "una/un X" ya alcanza, sin necesitar
+   "solo".
+2. `image_editing`/inpaint nunca tenía instrucción de usar
+   `analyze_image` para ubicar un objeto específico en una imagen YA
+   EXISTENTE antes de adivinar el `box` — solo se le pedía ser honesto
+   sobre la adivinanza después del hecho. **Fix**: nueva instrucción
+   (en `SYSTEM_PROMPT` y en el manifest de `image_editing`) — antes de
+   un inpaint posicional sobre una imagen existente, llamar primero a
+   `analyze_image` preguntando la ubicación aproximada del objeto, y
+   usar esa descripción para un `box` informado en vez de ciego. Sigue
+   siendo una estimación (ahora informada), y sigue habiendo que
+   aclararlo en la respuesta final.
+
+**Verificación en vivo, con cuidado** (se evitó correr pruebas pesadas
+mientras el propio servidor del usuario estaba activo, por el riesgo
+de contención de RAM entre procesos separados — ver
+`project_resource_broker_ollama_eviction`; se esperó a que lo cerrara):
+3 corridas de "crea una orca" con el fix activo — el autochequeo se
+disparó en 2/3 (antes se disparaba en 0/3 para este tipo de pedido sin
+"solo"), y en ambos casos detectó correctamente la duplicación (llegó
+a 3 orcas en ambos casos) y fue honesto en la respuesta final. En la
+corrida donde NO se disparó, el modelo afirmó falsamente "una sola
+orca completa" cuando la imagen real mostraba una segunda orca parcial
+— mejora real (0→2/3), no una garantía completa, mismo patrón de
+variabilidad de muestreo ya documentado para otros ajustes de prompt
+esta sesión. El flujo completo de edición (analyze_image antes de
+inpaint) no se volvió a reproducir en vivo por decisión explícita del
+usuario — el diseño quedó implementado y testeado (mocks), a validar
+con uso real.
+
+2 tests nuevos (`test_agent_loop.py`, `test_image_editing.py`).

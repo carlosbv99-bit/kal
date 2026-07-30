@@ -67,14 +67,20 @@ class ImageEditingTool(Tool):
             "image_generation) para cualquier pedido de escribir texto/título/letras SOBRE "
             "una imagen — ni la generación por difusión ni 'overlay' de image_composition "
             "pueden escribir texto de forma confiable o legible. "
-            "IMPORTANTE sobre 'inpaint': NO podés ver la imagen — no hay forma de saber "
-            "las coordenadas reales de un objeto específico dentro de ella. El 'box' que "
-            "pases es una estimación a ciegas, nunca una medición confirmada. Si el pedido "
-            "depende de acertar la posición exacta de algo (p.ej. 'borrá la paloma de la "
-            "izquierda', 'sacá el segundo perro'), decilo en tu respuesta final: aclará que "
-            "hiciste una estimación y que el resultado puede no haber acertado la región "
-            "correcta. NUNCA afirmes que la edición salió bien como si hubieras confirmado "
-            "el resultado viéndolo — no podés."
+            "IMPORTANTE sobre 'inpaint': vos mismo NO podés ver la imagen — el 'box' que pases "
+            "siempre es una estimación, nunca una medición directa tuya. Si el pedido depende de "
+            "acertar la posición de un objeto específico en una imagen YA EXISTENTE (no una que "
+            "generaste en este mismo turno — p.ej. 'borrá la paloma de la izquierda', 'sacá el "
+            "segundo perro', 'hay dos X, borrá una'), llamá primero a analyze_image preguntando "
+            "por la ubicación aproximada de ese objeto (arriba/abajo/izquierda/derecha/centro) y "
+            "usá esa descripción para elegir un 'box' informado — NUNCA adivines a ciegas sin "
+            "haber consultado analyze_image antes cuando la posición importa. BUG REAL ENCONTRADO "
+            "EN USO: 'hay dos orcas en la imagen, borra una de ellas' fue directo a un 'box' "
+            "adivinado sin llamar a analyze_image — el resultado terminó siendo una composición "
+            "totalmente distinta, sin ninguna orca borrada de verdad. Aun con esa consulta previa, "
+            "la posición sigue siendo una estimación (ahora informada, no una medición exacta) — "
+            "aclaralo en tu respuesta final. NUNCA afirmes que la edición salió bien como si "
+            "hubieras confirmado el resultado viéndolo vos mismo — no podés."
         ),
         created_by="system",
         parameters_schema={
@@ -90,9 +96,12 @@ class ImageEditingTool(Tool):
                     "type": "array",
                     "description": (
                         "Para 'crop' e 'inpaint': [izquierda, arriba, derecha, abajo] en píxeles — "
-                        "en 'inpaint', la región que se va a rellenar/reemplazar. Para 'inpaint' es "
-                        "una ESTIMACIÓN A CIEGAS (no viste la imagen) — avisale al usuario en tu "
-                        "respuesta si el pedido dependía de acertar la posición exacta de algo."
+                        "en 'inpaint', la región que se va a rellenar/reemplazar. Para 'inpaint', si "
+                        "la posición de un objeto específico importa, consultá antes a analyze_image "
+                        "para ubicarlo aproximadamente (ver descripción de la herramienta) — el 'box' "
+                        "sigue siendo una ESTIMACIÓN, ahora informada en vez de completamente a "
+                        "ciegas. Avisale igual al usuario en tu respuesta si el pedido dependía de "
+                        "acertar la posición exacta de algo."
                     ),
                     "items": {"type": "integer"},
                     "minItems": 4,
