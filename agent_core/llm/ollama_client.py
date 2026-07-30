@@ -131,6 +131,17 @@ class OllamaClient:
             "model": model or settings.llm.default_model,
             "messages": messages,
             "stream": False,
+            # BUG REAL ENCONTRADO EN USO (2026-07-30): modelos "híbridos"
+            # con modo de razonamiento (qwen3.5, etc.) a veces gastan TODA
+            # la generación en un campo "reasoning"/"thinking" separado y
+            # dejan `message.content` completamente vacío, incluso para
+            # pedidos triviales ("respondé solo con la palabra: listo") —
+            # confirmado en vivo: con think=false, el mismo pedido responde
+            # de inmediato con content="listo" (3 tokens en vez de 250+).
+            # Ollama ignora este campo sin error en modelos que no lo
+            # soportan (confirmado con qwen2.5:3b) — seguro de mandar
+            # siempre, no solo para modelos "thinking" conocidos.
+            "think": False,
         }
         if tools:
             payload["tools"] = tools

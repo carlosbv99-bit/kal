@@ -6773,3 +6773,55 @@ usuario — el diseño quedó implementado y testeado (mocks), a validar
 con uso real.
 
 2 tests nuevos (`test_agent_loop.py`, `test_image_editing.py`).
+
+## Bug real: qwen3.5 devolvía `content` completamente vacío por su modo de "razonamiento"
+
+Descubierto como efecto colateral de correr la suite completa antes de
+commitear el fix de la orca: `test_openai_compatible_integration.py::
+test_real_chat_round_trip_against_running_ollama` falló con
+`content=''` pese a `usage.completion_tokens: 1533` (es decir, el
+modelo SÍ generó — pero nada de eso terminó en `content`).
+
+Investigado con `curl` directo contra Ollama real (no solo mocks):
+qwen3.5 es una familia "híbrida" con modo de razonamiento — Ollama
+expone el trace de razonamiento en un campo separado de `content`
+(`message.thinking` en `/api/chat` nativo, `message.reasoning` en
+`/v1/chat/completions` OpenAI-compatible). En ambos endpoints, a veces
+el modelo gasta TODO su presupuesto de generación en ese campo y deja
+`content` genuinamente vacío — no es un bug de parseo, el modelo nunca
+llegó a emitir contenido final.
+
+**Fix de raíz** (más limpio que aceptar la respuesta vacía con
+reintento, que ya existía como red de seguridad):
+- `OllamaClient.chat()`: agrega `"think": False` al payload siempre.
+  Verificado en vivo: el mismo pedido pasó de 249+ tokens de
+  razonamiento con `content` vacío, a 3 tokens con `content="listo"`
+  inmediato. Confirmado que Ollama ignora este campo sin error en
+  modelos que no lo soportan (`qwen2.5:3b`), seguro de mandar siempre.
+- `OpenAICompatibleClient.chat()`: `"think": false` a nivel raíz NO
+  tiene efecto en este endpoint (confirmado con curl) — lo que sí
+  funciona es `"chat_template_kwargs": {"enable_thinking": False}`.
+  Esto no elimina el costo de tokens del razonamiento (el campo
+  "reasoning" sigue apareciendo), pero sí asegura que `content` se
+  popule correctamente.
+
+**Hallazgo adicional al reejecutar la suite completa**: el mismo test
+volvió a fallar en una segunda corrida completa, pese al fix — repetido
+con curl directo, confirmó que `chat_template_kwargs` en el endpoint
+OpenAI-compatible es una MITIGACIÓN, no una garantía (a veces sigue
+gastando todo el presupuesto en "reasoning" y deja `content` vacío,
+mismo patrón de variabilidad de muestreo documentado para otros ajustes
+de prompt esta sesión). El endpoint nativo de Ollama con `think:false`
+sí resultó 100% confiable en 5/5 corridas repetidas. Causa real del
+fallo intermitente: el test usaba implícitamente `settings.llm.
+default_model` (ahora qwen3.5:4b, un modelo con razonamiento) para
+validar el PARSEO del wire format — un propósito que nada tiene que
+ver con el comportamiento de razonamiento de ese modelo en particular.
+**Fix real**: el test ahora fija explícitamente `model="qwen2.5:3b"`
+(sin modo de razonamiento, ya usado por el Conversation Engine) en vez
+de heredar el default_model actual — desacopla la prueba de parseo del
+modelo de chat configurado. Verificado estable en 3/3 corridas
+consecutivas, y mucho más rápido (0.2s vs. 13-180s con qwen3.5).
+
+2 tests nuevos (`test_ollama_client.py`, `test_openai_compatible_client.py`),
+1 test existente corregido (`test_openai_compatible_integration.py`).

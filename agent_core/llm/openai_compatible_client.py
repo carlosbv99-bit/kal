@@ -160,6 +160,14 @@ class OpenAICompatibleClient:
         payload: dict[str, Any] = {
             "model": model or settings.llm.default_model,
             "messages": _with_stringified_tool_call_arguments(messages),
+            # BUG REAL ENCONTRADO EN USO (2026-07-30): modelos "híbridos"
+            # con modo de razonamiento (qwen3.5, etc.) vía este endpoint
+            # devuelven el razonamiento en un campo "reasoning" separado
+            # de "content" — sin esto, a veces "content" queda vacío
+            # incluso para pedidos triviales. chat_template_kwargs es la
+            # forma documentada (no estándar de OpenAI, pero soportada acá)
+            # de pedirle al backend que no piense antes de responder.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         if tools:
             payload["tools"] = tools
