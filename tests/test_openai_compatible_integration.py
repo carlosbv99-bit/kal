@@ -31,9 +31,27 @@ requires_ollama_openai_endpoint = pytest.mark.skipif(
 
 @requires_ollama_openai_endpoint
 def test_real_chat_round_trip_against_running_ollama():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-30): este test usaba
+    `settings.llm.default_model` implícitamente — cuando ese default
+    pasó a ser qwen3.5:4b (un modelo "híbrido" con modo de razonamiento,
+    ver ollama_client.py/openai_compatible_client.py), el test se volvió
+    intermitente: a veces el modelo gasta TODO su presupuesto de
+    generación en el campo "reasoning" y deja `content` vacío, pese al
+    fix de `chat_template_kwargs` (mitiga, no garantiza — confirmado con
+    curl real, mismo pedido: a veces populaba `content`, a veces no).
+    El propósito real de este test es validar el PARSEO del wire format
+    OpenAI-compatible contra un servidor real, no el comportamiento de
+    razonamiento de qwen3.5 — por eso fija un modelo sin modo de
+    razonamiento (qwen2.5:3b, ya usado por el Conversation Engine, ver
+    ConversationEngineConfig) en vez de heredar el default_model actual.
+    """
     client = OpenAICompatibleClient()
 
-    result = client.chat([{"role": "user", "content": "Respondé solo con la palabra: listo"}])
+    result = client.chat(
+        [{"role": "user", "content": "Respondé solo con la palabra: listo"}],
+        model="qwen2.5:3b",
+    )
 
     assert result.content.strip() != ""
 

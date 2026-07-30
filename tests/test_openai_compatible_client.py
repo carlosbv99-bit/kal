@@ -164,6 +164,28 @@ def test_chat_omits_response_format_and_temperature_when_not_requested():
     assert "temperature" not in payloads[0]
 
 
+def test_chat_always_disables_thinking_via_chat_template_kwargs():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-30): modelos "híbridos" con modo
+    de razonamiento (qwen3.5, etc.) vía este endpoint devuelven el
+    razonamiento en un campo "reasoning" separado de "content" — sin
+    esto, "content" quedaba vacío incluso para pedidos triviales,
+    confirmado en vivo contra Ollama real. chat_template_kwargs es la
+    forma que el backend sí respeta acá (a diferencia de "think" a
+    nivel raíz del payload, que no tiene efecto en este endpoint).
+    """
+    payloads = []
+
+    def post_fn(url, json=None, **kw):
+        payloads.append(json)
+        return FakeResponse({"choices": [{"message": {"role": "assistant", "content": "hola"}}]})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert payloads[0]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
 def test_chat_raises_provider_error_on_connection_failure():
     import requests
 

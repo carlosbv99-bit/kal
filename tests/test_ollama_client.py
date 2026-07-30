@@ -276,6 +276,28 @@ def test_chat_without_images_does_not_add_the_key():
     assert "images" not in payloads[0]["messages"][-1]
 
 
+def test_chat_always_disables_ollama_thinking_mode():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-07-30): modelos "híbridos" con modo
+    de razonamiento (qwen3.5, etc.) a veces gastan TODA la generación en
+    un campo "thinking" separado y dejan message.content completamente
+    vacío, incluso para pedidos triviales — confirmado en vivo contra
+    Ollama real: con think=false, el mismo pedido responde de inmediato
+    con contenido real. Ollama ignora este campo sin error en modelos
+    que no lo soportan (confirmado con qwen2.5:3b).
+    """
+    payloads = []
+
+    def post_fn(url, json=None, **kw):
+        payloads.append(json)
+        return FakeResponse({"message": {"content": "hola"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert payloads[0]["think"] is False
+
+
 def test_chat_with_images_does_not_mutate_caller_messages():
     original_messages = [{"role": "user", "content": "hola"}]
     client = _client(post_fn=lambda *a, **kw: FakeResponse({"message": {"content": "ok"}}))
