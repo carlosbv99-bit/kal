@@ -6825,3 +6825,82 @@ consecutivas, y mucho más rápido (0.2s vs. 13-180s con qwen3.5).
 
 2 tests nuevos (`test_ollama_client.py`, `test_openai_compatible_client.py`),
 1 test existente corregido (`test_openai_compatible_integration.py`).
+
+## Propuesta del usuario: allow-list dinámica de herramientas por capacidad — evaluación y gap real encontrado (2026-07-30)
+
+El usuario planteó una propuesta detallada: convertir el toolset que
+recibe el LLM en una allow-list construida por el Capability Broker a
+partir de `required_capabilities` del Conversation Engine, en vez de
+la lista de exclusión reactiva actual — con la idea de que "el prompt
+es una barrera de honor, el toolset es una barrera física". Antes de
+opinar, se verificaron las afirmaciones de la propuesta sobre "cómo
+funciona hoy" contra el código real (no se aceptaron por descontado):
+
+- `CapabilityBroker` (`agent_core/capability_broker.py`) existe, pero
+  es mucho más chico que lo que describía la propuesta: solo
+  DESBLOQUEA herramientas multimedia normalmente excluidas para
+  `client="vscode"` — no es un resolutor general de "qué herramientas
+  hacen falta". El `resolve_tools(required_capabilities, client,
+  session_context)` del pseudocódigo de la propuesta no existe, sería
+  un componente nuevo.
+- El Conversation Engine YA está conectado a la selección de
+  herramientas vía `required_capabilities` (desde el 2026-07-24, ver
+  la entrada "Capability Broker: desbloqueo dinámico de multimedia en
+  VS Code" más arriba) — la propuesta lo describía como si solo
+  sirviera para ruteo de intención.
+- El extractor de fallback de texto plano (`_extract_fallback_tool_call`)
+  YA valida el nombre parseado contra el toolset activo del turno
+  (`data.get("name") in tools`) — la propuesta afirmaba que "el
+  extractor de fallback parsea cualquier nombre", falso contra el
+  código actual.
+- Hallazgo real, confirmado en código, que la propuesta señalaba
+  correctamente: el schema de herramientas (`tool_schemas`) se
+  construía UNA sola vez antes del loop de `AgentLoop.run()` y se
+  mandaba sin cambios en cada paso — `ToolRepeatLimiter`/
+  `SelfCheckTracker` rechazan una llamada DESPUÉS de que el modelo la
+  emite (mensaje de ERROR), pero nunca sacaban la herramienta de lo
+  que el modelo podía volver a elegir en el paso siguiente. Barrera de
+  honor, no física, exactamente en el punto que la propuesta señalaba
+  como el problema real.
+- No existe ningún `SessionToolPolicy` — `ToolRepeatLimiter`/
+  `SelfCheckTracker` viven y mueren dentro de un solo `run()`, no
+  persisten entre turnos.
+
+**Opinión dada**: el principio de fondo (kernel controla el espacio de
+acciones, no el prompt) es correcto y coherente con cómo ya piensa
+este proyecto (Permission Manager, sandbox de ejecución,
+ResourceBroker). Pero convertir `CapabilityBroker` en la autoridad
+PRIMARIA del toolset apuesta fuerte a que el Conversation Engine
+(modelo local chico, fail-open, con su propio umbral de confianza
+precisamente porque a veces se equivoca) tenga razón — sin una válvula
+de escape, una mala clasificación deja al agente sin herramientas para
+todo el turno, sin poder corregirse. Recomendación: separar en dos
+mejoras independientes en vez de una reforma grande — (1) barato y de
+alto valor ya: recortar el schema en cada paso dentro del MISMO `run()`
+según el estado real de `ToolRepeatLimiter`/`SelfCheckTracker`, sin
+depender de que el Conversation Engine acierte; (2) más ambicioso,
+evaluar aparte con una válvula de escape explícita: usar
+`required_capabilities` para restringir el toolset INICIAL.
+
+**Fix implementado (parte 1 de la recomendación)**:
+`ToolRepeatLimiter` gana `is_blocked(name, is_self_checked)` — versión
+de solo lectura de `evaluate()` (mismo criterio exacto: tope general,
+tope de 2 para autochequeadas, "ya tuvo éxito" para VS-Code-only), sin
+incrementar el contador interno. `AgentLoop.run()` ahora recalcula
+`tool_schemas` al INICIO de cada paso del loop (antes: una sola vez
+antes del loop), filtrando cualquier herramienta que `is_blocked()`
+marque para el estado actual. El mensaje de ERROR post-rechazo se deja
+tal cual, como red de seguridad para el fallback de texto plano (que
+no depende del schema nativo) y para varias llamadas a la misma
+herramienta dentro de UN mismo paso — el recorte de schema es una capa
+ADICIONAL, no un reemplazo.
+
+7 tests nuevos en `test_tool_repeat_limiter.py` (`is_blocked` aislado:
+no bloquea antes del tope, bloquea al llegar, nunca bloquea una
+herramienta nunca llamada, no muta el contador como efecto de lado,
+VS-Code-only ya exitosa, VS-Code-only que solo falló, tope de 2 para
+autochequeadas). 2 tests nuevos end-to-end en `test_agent_loop.py`
+confirmando que `fake_llm.calls[N]["tools"]` ya no incluye la
+herramienta bloqueada en el paso siguiente al bloqueo (una vez para
+tope de repeticiones, una vez para VS-Code-only ya exitosa). Suite
+completa, 0 regresiones.

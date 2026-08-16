@@ -93,3 +93,63 @@ def test_counts_are_independent_per_tool_name():
     over_limit, _ = limiter.evaluate("image_editing", is_self_checked=False)
 
     assert over_limit is False
+
+
+def test_is_blocked_is_false_before_reaching_the_limit():
+    limiter = ToolRepeatLimiter(max_tool_repeats=3)
+    limiter.evaluate("image_generation", is_self_checked=False)
+
+    assert limiter.is_blocked("image_generation", is_self_checked=False) is False
+
+
+def test_is_blocked_is_true_once_the_limit_is_reached():
+    limiter = ToolRepeatLimiter(max_tool_repeats=3)
+    for _ in range(3):
+        limiter.evaluate("image_generation", is_self_checked=False)
+
+    assert limiter.is_blocked("image_generation", is_self_checked=False) is True
+
+
+def test_is_blocked_never_a_tool_never_called():
+    limiter = ToolRepeatLimiter(max_tool_repeats=1)
+
+    assert limiter.is_blocked("image_generation", is_self_checked=False) is False
+
+
+def test_is_blocked_does_not_mutate_counts_as_a_side_effect():
+    """Consultar is_blocked() no debe contar como un intento — a
+    diferencia de evaluate(), que sí incrementa el contador."""
+    limiter = ToolRepeatLimiter(max_tool_repeats=3)
+    limiter.evaluate("image_generation", is_self_checked=False)
+
+    for _ in range(10):
+        limiter.is_blocked("image_generation", is_self_checked=False)
+
+    over_limit, _ = limiter.evaluate("image_generation", is_self_checked=False)
+    assert over_limit is False  # segunda llamada real, todavía bajo el tope de 3
+
+
+def test_is_blocked_true_for_a_vscode_only_tool_that_already_succeeded():
+    limiter = ToolRepeatLimiter(max_tool_repeats=5)
+    limiter.evaluate("propose_project_files", is_self_checked=False)
+    limiter.record_outcome("propose_project_files", observation="Se prepararon 2 archivo(s)")
+
+    assert limiter.is_blocked("propose_project_files", is_self_checked=False) is True
+
+
+def test_is_blocked_false_for_a_vscode_only_tool_that_only_failed_so_far():
+    limiter = ToolRepeatLimiter(max_tool_repeats=5)
+    limiter.evaluate("propose_project_files", is_self_checked=False)
+    limiter.record_outcome("propose_project_files", observation="ERROR: ruta inválida")
+
+    assert limiter.is_blocked("propose_project_files", is_self_checked=False) is False
+
+
+def test_is_blocked_uses_the_stricter_cap_of_2_for_self_checked_tools():
+    limiter = ToolRepeatLimiter(max_tool_repeats=5)
+    limiter.evaluate("image_generation", is_self_checked=True)
+    limiter.evaluate("image_generation", is_self_checked=True)
+
+    assert limiter.is_blocked("image_generation", is_self_checked=True) is True
+    # Bajo el tope general (5), el mismo conteo sin autochequeo no está bloqueado.
+    assert limiter.is_blocked("image_generation", is_self_checked=False) is False

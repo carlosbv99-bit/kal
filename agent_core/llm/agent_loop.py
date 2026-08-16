@@ -528,7 +528,6 @@ class AgentLoop:
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": goal})
-        tool_schemas = [t.to_ollama_schema() for t in tools.values()]
         steps: list[AgentStep] = []
         # Ver agent_core/llm/tool_repeat_limiter.py y
         # agent_core/llm/self_check_tracker.py para la historia completa
@@ -538,6 +537,25 @@ class AgentLoop:
         self_check = SelfCheckTracker()
 
         for _ in range(max_steps):
+            # GAP ESTRUCTURAL IDENTIFICADO (revisión de diseño,
+            # 2026-07-30): antes, `tool_schemas` se calculaba UNA sola
+            # vez antes de este loop y se mandaba sin cambios en cada
+            # paso — una herramienta que ya superó su tope de
+            # repeticiones (o, para las VS-Code-only, que ya tuvo éxito
+            # una vez) seguía apareciendo como opción, y el único freno
+            # era el mensaje de ERROR después de que el modelo insistía
+            # (barrera de honor, no física). Recalcularlo acá, en cada
+            # paso, según el estado real de `limiter`/`self_check`,
+            # saca la herramienta de lo que el modelo puede volver a
+            # elegir — el ERROR post-rechazo sigue existiendo como red
+            # de seguridad para el fallback de texto plano (que no
+            # depende del schema nativo) y para varias llamadas a la
+            # misma herramienta dentro de UN mismo paso.
+            tool_schemas = [
+                t.to_ollama_schema()
+                for name, t in tools.items()
+                if not limiter.is_blocked(name, self_check.is_checked(name))
+            ]
             try:
                 response = self.llm.chat(messages, model=model, tools=tool_schemas, temperature=settings.llm.temperature)
             except ProviderError as e:

@@ -565,6 +565,60 @@ def test_max_tool_repeats_counts_independently_per_tool_name():
     assert all("ERROR" not in s.observation for s in result.steps)
 
 
+def test_tool_schema_is_recomputed_each_step_and_excludes_a_tool_once_blocked():
+    """
+    GAP ESTRUCTURAL IDENTIFICADO (revisión de diseño, 2026-07-30): antes,
+    `tool_schemas` se calculaba UNA sola vez antes del loop — una
+    herramienta sobre su tope de repeticiones seguía apareciendo en el
+    `tools=` que se le manda al LLM en TODOS los pasos siguientes, y el
+    único freno era el mensaje de ERROR después del rechazo (barrera de
+    honor). Ahora el schema se recalcula en cada paso: una vez que
+    'image_generation' llega a su tope, deja de estar presente en las
+    llamadas siguientes a self.llm.chat() — barrera física, no un pedido
+    de texto.
+    """
+    calls: list = []
+    tools = [_counting_tool(calls)]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="image_generation", arguments={})])
+        for _ in range(2)
+    ] + [ChatResponse(content="listo")]
+    loop, fake_llm = _loop(responses, tools=tools)
+
+    loop.run("generá una imagen", max_steps=10, max_tool_repeats=1)
+
+    def _tool_names(call_index: int) -> set[str]:
+        return {t["function"]["name"] for t in fake_llm.calls[call_index]["tools"]}
+
+    # Paso 1: todavía no se llamó a nada, la herramienta está disponible.
+    assert "image_generation" in _tool_names(0)
+    # Paso 2: la primera llamada ya alcanzó max_tool_repeats=1 — el
+    # schema del paso SIGUIENTE ya no la incluye, aunque el modelo
+    # (guionado acá) insista en pedirla de nuevo.
+    assert "image_generation" not in _tool_names(1)
+
+
+def test_tool_schema_excludes_a_vscode_only_tool_after_it_already_succeeded_once():
+    calls: list = []
+    tools = [
+        AgentTool(
+            name="propose_project_files", description="d", parameters_schema={"type": "object", "properties": {}},
+            handler=lambda **kw: calls.append(kw) or "Se prepararon 2 archivo(s)",
+        ),
+    ]
+    responses = [
+        ChatResponse(content="", tool_calls=[ToolCall(name="propose_project_files", arguments={"files": []})]),
+        ChatResponse(content="", tool_calls=[ToolCall(name="propose_project_files", arguments={"files": []})]),
+        ChatResponse(content="listo"),
+    ]
+    loop, fake_llm = _loop(responses, tools=tools)
+
+    loop.run("armá los archivos", max_steps=10, max_tool_repeats=5)
+
+    tool_names_after_success = {t["function"]["name"] for t in fake_llm.calls[1]["tools"]}
+    assert "propose_project_files" not in tool_names_after_success
+
+
 def _generative_tool(name: str, calls: list, artifact_dir: str = "data/artifacts/images") -> AgentTool:
     """Simula una herramienta que genera un Artifact real (con .uri) —
     a diferencia de _counting_tool(), necesario para probar el tope más

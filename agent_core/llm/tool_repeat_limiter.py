@@ -80,3 +80,29 @@ class ToolRepeatLimiter:
         """Para que run() elija el mensaje de rechazo correcto (ya tuvo
         éxito antes vs. todavía no logró nada) sin exponer el set interno."""
         return name in self._succeeded_vscode_only_tools
+
+    def is_blocked(self, name: str, is_self_checked: bool) -> bool:
+        """
+        Versión de solo lectura de evaluate() — mismo criterio exacto,
+        pero SIN incrementar `_counts` (para consultar "¿esto va a
+        rechazarse la próxima vez?" sin que la consulta en sí cuente
+        como un intento).
+
+        GAP ESTRUCTURAL IDENTIFICADO (revisión de diseño, 2026-07-30):
+        antes de este método, una herramienta que ya superó su tope
+        seguía apareciendo en el `tools` que se le manda al LLM en
+        CADA paso siguiente — evaluate() la rechazaba con un mensaje de
+        ERROR después de que el modelo insistiera, pero nunca se sacaba
+        de lo que el modelo podía volver a elegir. El rechazo por
+        mensaje es una barrera de honor (depende de que el modelo
+        entienda y respete el ERROR); usado junto con
+        AgentLoop.run() recalculando el schema en cada paso, esto se
+        convierte en una barrera estructural: la herramienta
+        directamente deja de estar disponible para llamar de nuevo.
+        """
+        count = self._counts.get(name, 0)
+        if is_self_checked:
+            return count >= min(2, self.max_tool_repeats)
+        if name in _VSCODE_ONLY_TOOL_NAMES:
+            return name in self._succeeded_vscode_only_tools or count >= self.max_tool_repeats
+        return count >= self.max_tool_repeats
