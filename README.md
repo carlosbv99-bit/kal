@@ -16,6 +16,16 @@ Kal is local-first (Ollama, or any OpenAI-compatible endpoint — no
 GPU required, everything ships CPU-first) and open source
 ([Apache 2.0](LICENSE)).
 
+If you're wiring an LLM up to run code, load third-party plugins, or
+touch its own source, Kal is built around that specific risk: every
+Skill runs in an isolated, non-root Docker container regardless of
+where it came from, a tiered permission cascade decides what any piece
+of code is allowed to touch, memory content matching known credential
+patterns gets redacted before it's ever kept long-term, and
+self-modification requires explicit human approval before anything
+reaches disk. See [Security first](#security-first) below for exactly
+what this covers, and what it doesn't.
+
 ```
                           User
                            │
@@ -72,6 +82,10 @@ GPU required, everything ships CPU-first) and open source
   the real security boundary (the sandbox is).
 - Every sensitive action is recorded in an append-only, hash-chained
   audit log — tampering with a past entry breaks the chain visibly.
+- Memory content matching known credential patterns (API keys, tokens)
+  is redacted before being kept long-term; content is never shared
+  with a cloud LLM provider unless explicitly marked shareable,
+  checked at recall time regardless of tier.
 - Skill packages are signed (Ed25519) and verified before loading —
   a tampered package is rejected outright, fail-closed.
 - Installing a Skill from a remote market **requires** a valid
