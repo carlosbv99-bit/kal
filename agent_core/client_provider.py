@@ -118,6 +118,18 @@ _VSCODE_CLIENT_INSTRUCTION = (
     "exactamente?\") — nunca inventar una incapacidad que no probaste, y mucho menos una que ni siquiera es "
     "real. Solo mencioná una limitación real DESPUÉS de haber intentado de verdad la herramienta "
     "correspondiente y haber recibido un rechazo concreto.\n\n"
+    "IMPORTANTE: tenés disponible android_build_and_screenshot para cuando el usuario pida ver "
+    "visualmente el progreso de una app Android real que se está construyendo — compila el "
+    "proyecto, lo instala en un dispositivo conectado (USB o WiFi) y muestra una captura de "
+    "pantalla real. El resultado NUNCA llega en esta misma respuesta ni podés verlo vos: la "
+    "extensión de VS Code hace el trabajo real (que tarda, compila de verdad) y se lo muestra al "
+    "usuario directamente en el chat en un momento posterior. Por eso, en tu respuesta final "
+    "después de llamarla, decí algo como \"estoy compilando el proyecto e instalándolo en tu "
+    "dispositivo, en un momento vas a ver una captura real de cómo se ve\" — NUNCA digas que ya se "
+    "instaló, nunca describas ni inventes cómo se ve la app (no tenés forma de saberlo), y nunca "
+    "dés la tarea por terminada en esta respuesta. Si no hay ningún proyecto Android real en el "
+    "workspace o ningún dispositivo conectado, el usuario va a ver un aviso explicando qué falta "
+    "— no asumas que funcionó ni lo repitas sin que el usuario te confirme qué pasó.\n\n"
     "IMPORTANTE: tenés disponible read_workspace_file para pedir el contenido REAL de un archivo del "
     "árbol del proyecto (ver el listado de 'Árbol de archivos' de esta conversación) que no esté ya "
     "incluido acá — nunca inventes o asumas qué contiene un archivo que no viste. Llamala con la ruta "
@@ -153,12 +165,19 @@ _MULTIMEDIA_TOOL_NAMES = frozenset({
 # de las tres solo generaría una respuesta que nadie puede usar.
 #
 # También se usa en agent_core/llm/agent_loop.py para el tope de
-# repeticiones por turno de estas 3 herramientas específicamente — ESE
+# repeticiones por turno de estas 4 herramientas específicamente — ESE
 # uso es una propiedad intrínseca de las herramientas (piden aprobación
 # async, una segunda llamada en el mismo turno nunca tiene información
 # nueva), no depende de cuál sea el `client` activo, así que no pasa
 # por ClientProvider — solo importa esta misma constante.
-_VSCODE_ONLY_TOOL_NAMES = frozenset({"propose_project_files", "import_resource", "read_workspace_file"})
+# android_build_and_screenshot (ver tool_integration/adapters/
+# vscode_android.py) sigue el mismo criterio: compilar/instalar/
+# capturar es asincrónico del lado de la extensión, una segunda
+# llamada en el mismo turno (antes de que el usuario vea el resultado
+# de la primera) nunca tiene información nueva tampoco.
+_VSCODE_ONLY_TOOL_NAMES = frozenset(
+    {"propose_project_files", "import_resource", "read_workspace_file", "android_build_and_screenshot"}
+)
 
 
 @runtime_checkable

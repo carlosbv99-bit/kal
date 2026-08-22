@@ -7010,3 +7010,104 @@ discusión (screenshot bajo demanda vía `adb`, dispositivo físico por
 USB o WiFi, nunca un emulador por el costo de RAM en esta máquina),
 sin implementar todavía. Ver memoria del proyecto para el detalle
 completo de esa discusión de seguridad.
+
+## Nueva capacidad: android_build_and_screenshot — monitoreo visual de una app Android en un dispositivo conectado (2026-07-30)
+
+Pedido explícito del usuario: mientras kal construye un proyecto
+Android real (vía `propose_project_files`), poder ver visualmente el
+progreso en un dispositivo conectado (USB o WiFi, nunca un emulador —
+descartado por el costo de RAM en esta máquina de 14GB total).
+
+**Verificación real antes de diseñar**: se confirmó en la máquina del
+usuario que el toolchain YA estaba instalado — `adb` real, Android SDK
+completo en `~/Android/Sdk` (build-tools, platform-tools, varias
+versiones de platforms), OpenJDK 21 — mucho más barato de lo que
+parecía en un principio (no hacía falta instalar nada desde cero).
+
+**Discusión de seguridad, resuelta antes de implementar**: esta
+función corre ENTERAMENTE del lado de la extensión de VS Code, fuera
+del sandbox Docker de las Skills (mismo criterio ya establecido para
+`propose_project_files`/`import_resource` — el backend no tiene acceso
+a ningún dispositivo ni al workspace real). Riesgos nombrados
+explícitamente, sin suavizarlos: (1) compilar con Gradle ejecuta
+código real y descarga dependencias de internet — el mismo riesgo que
+correr `./gradlew build` a mano, kal no lo aumenta; (2) `adb` tiene
+capacidades amplias sobre un dispositivo — kal solo usa 3 comandos
+fijos (`install`, lanzar la actividad principal vía `monkey`,
+`screencap`), nunca un `adb shell` genérico; (3) si la computadora se
+compromete DURANTE la compilación con un dispositivo ya conectado, ese
+riesgo no depende de kal (es la misma exposición de tener depuración
+USB/WiFi habilitada con cualquier computadora). El usuario pidió un
+aviso de seguridad puntual (una sola vez, no bloqueante) en vez de un
+bloqueo estricto — desproporcionado para un riesgo marginal y estándar
+del ecosistema Android.
+
+**Alcance deliberadamente fuera de esto**: la ceremonia de
+emparejamiento INICIAL de depuración inalámbrica (leer el código que
+muestra el teléfono y ejecutar `adb pair`/`adb connect`) NO se
+automatizó — el usuario la hace una sola vez con las herramientas
+normales de Android, fuera de kal. `android_build_and_screenshot` solo
+funciona con un dispositivo que YA aparece en `adb devices` (por USB,
+o por WiFi ya emparejado) — no pide el código de emparejamiento porque
+el flujo de un tool call no tiene forma de pedir ese tipo de input
+interactivo a mitad de camino.
+
+**Diseño**: mismo patrón exacto que `read_workspace_file` (pedido
+pendiente → la extensión resuelve el trabajo real), con una diferencia
+clave: NO se encadena de vuelta a otro paso del agente — el modelo no
+necesita "ver" los píxeles de la captura, el resultado se le muestra
+al usuario directamente en el chat.
+
+- `tool_integration/adapters/vscode_android.py::AndroidBuildScreenshotTool`
+  — nunca compila/instala nada ella misma, devuelve un Artifact
+  "pendiente". Agregada a `_VSCODE_ONLY_TOOL_NAMES`
+  (`agent_core/client_provider.py`) — mismo tope de "1 éxito por turno"
+  que las otras 3 herramientas exclusivas de VS Code.
+- `_VSCODE_CLIENT_INSTRUCTION` reforzada: después de llamarla, la
+  respuesta final del modelo NUNCA puede decir que ya se instaló ni
+  inventar cómo se ve la app — el trabajo real es asincrónico.
+- `vscode-extension/src/androidBuild.ts::maybeHandleAndroidBuild` — el
+  trabajo real: detecta la raíz del proyecto buscando el wrapper de
+  Gradle (`gradlew`), corre `adb devices -l` (0 dispositivos → aviso
+  con las dos vías USB/WiFi; más de 1 → pide desconectar todos menos
+  uno), muestra el aviso de seguridad puntual (`context.globalState`,
+  una sola vez para siempre, no bloqueante), compila
+  (`./gradlew assembleDebug`), instala (`adb install -r`), lanza
+  (`adb shell monkey -p <package> -c android.intent.category.LAUNCHER 1`
+  — no necesita saber el nombre de la actividad principal), espera
+  1.5s a que renderice, y captura (`adb exec-out screencap -p`). El
+  nombre del paquete se extrae del APK ya compilado vía
+  `aapt dump badging` (más confiable que parsear el manifiesto/
+  build.gradle a mano, donde el `applicationId` puede vivir en
+  cualquiera de los dos según la versión del Android Gradle Plugin).
+- La captura viaja como `data:image/png;base64,...` directo de la
+  extensión al webview — NUNCA sube al backend (no hay ningún artifact
+  server-side para esto). CSP del webview (`media/chat.html`) ampliado
+  con `img-src data:` para permitirlo, sin abrir carga de imágenes
+  remotas.
+- Auditoría: nuevo router `agent_core/routers/android_build.py`
+  (`POST /android-build/{request_id}/report-outcome`, sin token admin
+  — mismo criterio que `report_filesystem_access_outcome`, no hay
+  ninguna decisión de permiso que auditar, solo el resultado real) y 2
+  `EventType` nuevos en `audit/audit_log.py`
+  (`android_build_completed`/`android_build_failed`).
+- Errores manejados explícitamente en vez de fallar en silencio: sin
+  proyecto Android real (falta `gradlew`), sin dispositivo, más de un
+  dispositivo, build de Gradle fallido (se muestra el error REAL
+  truncado, no un mensaje genérico), instalación fallida, captura
+  fallida tras instalar bien.
+
+10 tests nuevos en Python (`test_android_build_screenshot_tool.py`,
+`test_android_build_router.py`, `test_orchestrator_chat_android_build_request.py`,
+más assertions en `test_client_provider.py`/`test_agent_loop.py`/
+`test_orchestrator_admin_auth.py`). 10 tests nuevos en TypeScript
+(`androidBuildFormat.test.ts`, Node puro — el módulo real
+`androidBuild.ts`, que sí usa `vscode`/`child_process`, no es
+verificable en este entorno sin VS Code corriendo de verdad). TS
+compila sin errores.
+
+**Pendiente, sin implementar a propósito**: automatizar el
+emparejamiento inicial de WiFi (`adb pair`/`adb connect` con el código
+que muestra el teléfono) — el usuario lo sigue haciendo a mano, y el
+diseño queda así hasta que él mismo pruebe el flujo completo en su
+máquina real y decida si hace falta.

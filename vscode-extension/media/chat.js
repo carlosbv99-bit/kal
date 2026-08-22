@@ -83,6 +83,19 @@
       // rastro DENTRO de la conversación de qué pasó con una propuesta
       // de archivos — pendiente, aplicada, o descartada.
       appendMessage(message.text, "msg-notice");
+    } else if (message.type === "android-build-notice") {
+      // Ver src/androidBuild.ts: resultado real de compilar/instalar
+      // una app Android — a diferencia de project-files-notice, puede
+      // traer una captura de pantalla REAL del dispositivo (base64,
+      // nunca sube al backend, viaja directo de la extensión al
+      // webview) para mostrar inline.
+      const div = appendMessage(message.text, "msg-notice");
+      if (message.imageDataUri) {
+        const img = document.createElement("img");
+        img.src = message.imageDataUri;
+        img.className = "android-screenshot";
+        div.appendChild(img);
+      }
     } else if (message.type === "ready") {
       inputEl.disabled = false;
       sendBtn.disabled = false;

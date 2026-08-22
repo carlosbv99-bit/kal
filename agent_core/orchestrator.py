@@ -235,6 +235,7 @@ def _artifact_url(uri: str) -> str | None:
 # router hace `from agent_core.orchestrator import ...` de estos nombres,
 # así que tienen que estar definidos antes de este punto.
 from agent_core.routers import (  # noqa: E402
+    android_build,
     audit,
     chat,
     diagnostics,
@@ -252,7 +253,7 @@ from agent_core.routers import (  # noqa: E402
 for _router_module in (
     health, llm_settings, chat, tasks, tools, memory,
     self_modification, permissions, diagnostics, vscode_integration, audit,
-    skill_creator,
+    skill_creator, android_build,
 ):
     app.include_router(_router_module.router)
 

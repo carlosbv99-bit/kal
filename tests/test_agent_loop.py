@@ -1239,6 +1239,32 @@ def test_workspace_file_request_artifact_tells_the_model_to_wait_not_invent_cont
     assert "no inventes" in observation.lower()
 
 
+def test_android_build_request_artifact_tells_the_model_it_is_still_in_progress():
+    """
+    AndroidBuildScreenshotTool (tool_integration/adapters/vscode_android.py):
+    a diferencia de workspace_file_request, esto no se encadena de vuelta
+    al modelo — el resultado real (captura o error de Gradle) se lo
+    muestra la extensión directamente al usuario. La observación debe
+    dejar claro que sigue en curso, para que la respuesta final del
+    modelo no dé la tarea por terminada ni invente el resultado.
+    """
+    class FakeAndroidBuildTool:
+        class manifest:
+            description = "compila e instala una app Android"
+            parameters_schema = {"type": "object", "properties": {}}
+            permissions = frozenset()
+
+        def execute(self, **kwargs):
+            return Artifact(modality="android_build_request", uri="", metadata={"request_id": "req-1"})
+
+    agent_tool = _agent_tool_from_tool("android_build_and_screenshot", FakeAndroidBuildTool())
+
+    observation = agent_tool.handler()
+
+    assert "sigue en curso" in observation
+    assert "no inventes" in observation.lower()
+
+
 # --- Fallback: modelos que no completan tool_calls nativo (bug real de producción) ---
 
 

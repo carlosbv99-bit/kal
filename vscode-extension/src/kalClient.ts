@@ -48,15 +48,29 @@ export interface WorkspaceFileRequestArtifact {
   path: string;
 }
 
+/**
+ * Ver AndroidBuildScreenshotTool (tool_integration/adapters/
+ * vscode_android.py) y androidBuild.ts — el backend no tiene acceso a
+ * ningún dispositivo Android ni al proyecto real, solo avisa que hay
+ * un pedido pendiente. A diferencia de workspace_file_request, esto
+ * NO se encadena de vuelta al modelo: el resultado (captura real, o
+ * el error de Gradle) se le muestra al usuario directamente.
+ */
+export interface AndroidBuildRequestArtifact {
+  modality: "android_build_request";
+  request_id: string;
+}
+
 export interface ChatStep {
   tool: string;
   arguments: Record<string, unknown>;
   observation: string;
-  // Solo se tipan completos "project_files"/"workspace_file_request"
-  // (lo único que esta extensión necesita leer estructurado, ver
-  // projectFiles.ts/readWorkspaceFile.ts) — cualquier otro modality
-  // (p.ej. "image") llega tal cual, sin usarse acá.
-  artifact?: ProjectFilesArtifact | WorkspaceFileRequestArtifact | Record<string, unknown> | null;
+  // Solo se tipan completos "project_files"/"workspace_file_request"/
+  // "android_build_request" (lo único que esta extensión necesita leer
+  // estructurado, ver projectFiles.ts/readWorkspaceFile.ts/
+  // androidBuild.ts) — cualquier otro modality (p.ej. "image") llega
+  // tal cual, sin usarse acá.
+  artifact?: ProjectFilesArtifact | WorkspaceFileRequestArtifact | AndroidBuildRequestArtifact | Record<string, unknown> | null;
 }
 
 export interface ChatResult {
@@ -142,6 +156,32 @@ export class KalClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ outcome, files_written: filesWritten }),
+      });
+    } catch {
+      // best-effort, ver docstring
+    }
+  }
+
+  /**
+   * Deja constancia auditada de qué pasó DE VERDAD con un pedido de
+   * android_build_and_screenshot (ver tool_integration/adapters/
+   * vscode_android.py) — compilar/instalar/capturar ocurre enteramente
+   * del lado de esta extensión (gradlew/adb como procesos nativos, sin
+   * pasar por el backend en absoluto). Sin token admin ni decisión de
+   * permiso que auditar (a diferencia de filesystem-access) — solo el
+   * resultado real. Best-effort: si falla, no debe romper el flujo real
+   * (compilar/instalar/mostrar), que ya ocurrió para cuando esto se llama.
+   */
+  async reportAndroidBuildOutcome(
+    requestId: string,
+    outcome: "installed" | "build_failed" | "no_device" | "discarded",
+    detail: string = ""
+  ): Promise<void> {
+    try {
+      await this.fetchFn(`${this.baseUrl}/android-build/${requestId}/report-outcome`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outcome, detail }),
       });
     } catch {
       // best-effort, ver docstring

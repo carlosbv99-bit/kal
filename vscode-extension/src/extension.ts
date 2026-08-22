@@ -14,7 +14,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("kal.openChat", () => {
-      ChatPanel.createOrShow(context.extensionUri, getClient());
+      ChatPanel.createOrShow(context.extensionUri, getClient(), context);
     }),
 
     vscode.commands.registerCommand("kal.askAboutSelection", () => {
@@ -23,7 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showWarningMessage("Kal: no hay ningún editor activo para tomar contexto.");
         return;
       }
-      ChatPanel.createOrShow(context.extensionUri, getClient(), snapshot);
+      ChatPanel.createOrShow(context.extensionUri, getClient(), context, snapshot);
     }),
 
     vscode.commands.registerCommand("kal.applySuggestedEdit", () => {
@@ -43,7 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // quedar "siempre ahí" con una conversación en curso.
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
-      new ChatViewProvider(context.extensionUri, getClient()),
+      new ChatViewProvider(context.extensionUri, getClient(), context),
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { maybeHandleAndroidBuild } from "./androidBuild";
 import { buildChatHtml } from "./chatWebviewHtml";
 import { EditorSnapshot } from "./editorContextFormat";
 import { KalClient } from "./kalClient";
@@ -16,6 +17,7 @@ export class ChatPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly client: KalClient;
   private readonly extensionUri: vscode.Uri;
+  private readonly context: vscode.ExtensionContext;
   private readonly disposables: vscode.Disposable[] = [];
   // Un panel = una conversación (ver agent_core/sessions.py) — vive
   // mientras el panel esté abierto, se pierde al cerrarlo (igual que
@@ -27,10 +29,11 @@ export class ChatPanel {
   // La extensión nunca la formatea a texto, solo la reenvía.
   private pendingEditorContext: EditorSnapshot | undefined;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, client: KalClient) {
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, client: KalClient, context: vscode.ExtensionContext) {
     this.panel = panel;
     this.extensionUri = extensionUri;
     this.client = client;
+    this.context = context;
 
     this.panel.webview.html = buildChatHtml(this.panel.webview, this.extensionUri);
 
@@ -46,7 +49,12 @@ export class ChatPanel {
     );
   }
 
-  static createOrShow(extensionUri: vscode.Uri, client: KalClient, editorSnapshot?: EditorSnapshot): void {
+  static createOrShow(
+    extensionUri: vscode.Uri,
+    client: KalClient,
+    context: vscode.ExtensionContext,
+    editorSnapshot?: EditorSnapshot
+  ): void {
     if (ChatPanel.current) {
       ChatPanel.current.panel.reveal(vscode.ViewColumn.Beside);
     } else {
@@ -60,7 +68,7 @@ export class ChatPanel {
           localResourceRoots: [vscode.Uri.joinPath(extensionUri, "media")],
         }
       );
-      ChatPanel.current = new ChatPanel(panel, extensionUri, client);
+      ChatPanel.current = new ChatPanel(panel, extensionUri, client, context);
     }
 
     if (editorSnapshot) {
@@ -88,7 +96,9 @@ export class ChatPanel {
       const finalResult = await resolvePendingWorkspaceFileReads(result, this.client, model, editorContext);
       this.sessionId = finalResult.session_id;
       this.panel.webview.postMessage({ type: "answer", result: finalResult });
-      await maybeHandleProjectFiles(finalResult, this.client, (m) => this.panel.webview.postMessage(m));
+      const postToChat = (m: unknown) => this.panel.webview.postMessage(m);
+      await maybeHandleProjectFiles(finalResult, this.client, postToChat);
+      await maybeHandleAndroidBuild(finalResult, this.client, postToChat, this.context);
     } catch (e) {
       this.panel.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
     } finally {

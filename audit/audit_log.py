@@ -62,6 +62,8 @@ EventType = Literal[
     "network_access_granted",
     "network_access_denied",
     "network_access_escalated",
+    "android_build_completed",
+    "android_build_failed",
 ]
 
 

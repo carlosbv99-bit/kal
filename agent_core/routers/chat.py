@@ -251,6 +251,18 @@ def chat(req: ChatRequest):
                 "request_id": step.artifact.metadata.get("request_id"),
                 "path": step.artifact.metadata.get("path"),
             }
+        if step.artifact.modality == "android_build_request":
+            # AndroidBuildScreenshotTool (tool_integration/adapters/vscode_android.py):
+            # el backend no tiene acceso a ningún dispositivo Android ni al
+            # proyecto real — esto solo le avisa a la extensión que hay un
+            # pedido pendiente. A diferencia de workspace_file_request, la
+            # extensión NO encadena la respuesta de vuelta acá (el modelo no
+            # necesita "ver" la captura) — se la muestra al usuario
+            # directamente (ver vscode-extension/src/androidBuild.ts).
+            return {
+                "modality": "android_build_request",
+                "request_id": step.artifact.metadata.get("request_id"),
+            }
         if step.artifact.modality != "image":
             return None
         url = _artifact_url(step.artifact.uri)

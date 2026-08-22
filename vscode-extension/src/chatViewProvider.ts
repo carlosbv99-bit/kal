@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { maybeHandleAndroidBuild } from "./androidBuild";
 import { buildChatHtml } from "./chatWebviewHtml";
 import { captureEditorSnapshot, captureOpenEditors, captureWorkspaceTree } from "./editorContext";
 import { KalClient } from "./kalClient";
@@ -58,7 +59,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly client: KalClient
+    private readonly client: KalClient,
+    private readonly context: vscode.ExtensionContext
   ) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -124,7 +126,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const finalResult = await resolvePendingWorkspaceFileReads(result, this.client, model, editorContext);
       this.sessionId = finalResult.session_id;
       this.post({ type: "answer", result: finalResult });
-      await maybeHandleProjectFiles(finalResult, this.client, (m) => this.post(m));
+      const postToChat = (m: unknown) => this.post(m);
+      await maybeHandleProjectFiles(finalResult, this.client, postToChat);
+      await maybeHandleAndroidBuild(finalResult, this.client, postToChat, this.context);
     } catch (e) {
       this.post({ type: "error", message: String(e instanceof Error ? e.message : e) });
     } finally {

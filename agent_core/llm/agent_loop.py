@@ -262,6 +262,20 @@ def _artifact_to_observation(artifact: Artifact) -> str:
         files = artifact.metadata.get("files", [])
         names = ", ".join(f["path"] for f in files)
         return f"Se prepararon {len(files)} archivo(s) para el proyecto ({names}) — el usuario decidirá si los aplica."
+    if artifact.modality == "android_build_request":
+        # AndroidBuildScreenshotTool (tool_integration/adapters/vscode_android.py):
+        # a diferencia de workspace_file_request, esto NO se encadena de
+        # vuelta a un paso siguiente del agente — el resultado (captura
+        # real o el error de Gradle) se le muestra al usuario del lado
+        # de la extensión directamente, el modelo nunca lo ve. El
+        # mensaje deja explícito que sigue en curso, para que la
+        # respuesta final del modelo no dé la tarea por terminada.
+        return (
+            "Pedido de compilar/instalar/capturar enviado a la extensión de VS Code — sigue en "
+            "curso, todavía no hay resultado. El usuario va a ver el resultado real (captura de "
+            "pantalla, o el error de compilación) directamente en el chat en un momento. No "
+            "inventes ni asumas cómo se ve la app ni si terminó bien."
+        )
     if artifact.modality == "workspace_file_request":
         # ReadWorkspaceFileTool (tool_integration/adapters/vscode_files.py):
         # acá tampoco hay contenido real todavía — lo pide la extensión de
