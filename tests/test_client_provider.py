@@ -50,6 +50,22 @@ def test_vscode_provider_excludes_multimedia_tools():
     assert get_client_provider("vscode").excluded_tool_names() == _MULTIMEDIA_TOOL_NAMES
 
 
+def test_vscode_only_tool_names_includes_android_build_and_screenshot():
+    assert "android_build_and_screenshot" in _VSCODE_ONLY_TOOL_NAMES
+
+
+def test_vscode_instruction_tells_the_model_never_to_claim_the_android_build_already_finished():
+    """
+    Pedido explícito del usuario (2026-07-30): monitorear visualmente el
+    progreso de una app Android en un dispositivo conectado. El trabajo
+    real (compilar/instalar/capturar) es asincrónico del lado de la
+    extensión — el modelo nunca ve el resultado, así que su respuesta
+    final no puede dar la tarea por terminada ni inventar cómo se ve.
+    """
+    assert "android_build_and_screenshot" in _VSCODE_CLIENT_INSTRUCTION
+    assert "NUNCA digas que ya se" in _VSCODE_CLIENT_INSTRUCTION
+
+
 def test_vscode_instruction_tells_the_model_never_to_claim_files_are_already_saved():
     """
     BUG REAL ENCONTRADO EN USO (2026-07-30): tras propose_project_files

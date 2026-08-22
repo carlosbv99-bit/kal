@@ -101,6 +101,20 @@ def test_ungated_endpoint_still_works_without_any_token():
     assert response.status_code == 200
 
 
+def test_android_build_report_outcome_never_requires_a_token():
+    """
+    Mismo criterio que filesystem-access/report-outcome: no hay ninguna
+    decisión de permiso acá, solo un aviso auditado de la extensión
+    sobre lo que pasó DE VERDAD al compilar/instalar del lado real del
+    dispositivo — nunca debería exigir el token admin.
+    """
+    response = client.post(
+        "/android-build/algun-id/report-outcome",
+        json={"outcome": "installed", "detail": "app-debug.apk instalado"},
+    )
+    assert response.status_code == 200
+
+
 def test_filesystem_access_report_outcome_never_requires_a_token():
     """
     Deliberadamente SIN token: el Kernel ya auto-permitió esta acción
