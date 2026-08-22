@@ -6904,3 +6904,59 @@ confirmando que `fake_llm.calls[N]["tools"]` ya no incluye la
 herramienta bloqueada en el paso siguiente al bloqueo (una vez para
 tope de repeticiones, una vez para VS-Code-only ya exitosa). Suite
 completa, 0 regresiones.
+
+## Decisión: estrategia de comunidad de contribuyentes, primeros pasos (2026-07-30)
+
+El usuario trajo una propuesta extensa de posicionamiento/marketing
+("Kal es infraestructura, no un asistente") y un plan de 8 semanas
+(benchmarks contra otros frameworks, post en Hacker News, adaptador
+MCP como gancho, paquete `langgraph-kal-sandbox`, etc.). Se dio
+opinión punto por punto: varias piezas dependían de trabajo recién
+frenado en la sesión anterior (el split `kal-core`/`kal-agent`, el
+adaptador MCP — ver la entrada de arriba sobre la propuesta de
+allow-list y "Diseño pendiente: adaptador MCP"), y el plan completo
+suponía una decisión de fondo (¿kal busca usuarios de otros
+frameworks, o sigue siendo lo que fue toda esta sesión?) que todavía
+no se había tomado explícitamente.
+
+El usuario aclaró el objetivo real: la estrategia actual es
+específicamente conseguir que otros desarrolladores conozcan kal y
+empiecen a APORTAR (comunidad de contribuyentes, no solo usuarios).
+Esto reordenó la prioridad del plan original: usuarios y contribuyentes
+tienen embudos distintos — HN/benchmarks generan tráfico y estrellas,
+pero convertir a alguien en un PR real depende de que el camino para
+contribuir ya esté listo cuando llega ese tráfico.
+
+**Hallazgo real que motivó el primer paso**: `CONTRIBUTING.md` estaba
+titulado "Contributing a Skill" y cubría ÚNICAMENTE el flujo de
+publicar una Skill en el market — no existía ninguna guía de cómo
+contribuir código al kernel/`agent_core` en sí, ni `.github/ISSUE_TEMPLATE`,
+ni ningún issue etiquetado "good first issue". Ese era el gap real y
+barato de cerrar antes que cualquier contenido de difusión.
+
+**Hecho**:
+1. `CONTRIBUTING.md`/`CONTRIBUTING.es.md` reestructurados: nueva
+   sección "Contributing code"/"Contribuir código" antes de la de
+   Skills (setup del entorno, mismos comandos de test/lint que corre
+   la CI, mapa de dónde vive cada cosa y la relación de dependencia
+   real `kernel/`/`sdk/` → cero acoplamiento con `agent_core/`, nunca
+   al revés). La sección de Skills existente quedó intacta, solo bajó
+   un nivel de heading.
+2. 3 issues reales abiertos en GitHub, etiquetados "good first issue"
+   (verificados contra el código antes de escribirlos, no inventados):
+   - Documentar el protocolo del Kernel Bus (`docs/KERNEL_BUS_PROTOCOL.md`
+     no existe hoy — confirmado, solo hay tests que lo ejercitan).
+   - Test directo para el timeout de `DockerSandboxRunner` (confirmado:
+     ningún test ejercita `SandboxResult.status == "timeout"`
+     directamente, solo indirecto vía mocks de `TaskExecutor`).
+   - Comentario `TODO(seguridad)` desactualizado en
+     `agent_core/memory/long_term.py:174` — pide una sanitización que
+     ya está implementada en `MemoryManager.promote_mid_to_long()`
+     (`classify()`/`redact()` antes de `store()`), el comentario quedó
+     obsoleto tras esa implementación.
+
+El resto del plan original (benchmarks contra otros frameworks,
+adaptador MCP, `langgraph-kal-sandbox`, post en HN) se mantiene
+pospuesto — no descartado, sino secuenciado DESPUÉS de que el camino
+de contribución ya esté en pie, y reformulado como invitación a
+contribuir en vez de trabajo de un solo autor con fecha fija.
