@@ -22,8 +22,8 @@ export class ChatPanel {
   // Un panel = una conversación (ver agent_core/sessions.py) — vive
   // mientras el panel esté abierto, se pierde al cerrarlo (igual que
   // cerrar una pestaña de chat empieza una conversación nueva). Se
-  // puede reiniciar sin cerrar el panel con el botón "Nueva
-  // conversación" (ver handleNewSession abajo).
+  // puede reiniciar sin cerrar el panel con el botón "Nuevo chat"
+  // (ver handleNewSession abajo).
   private sessionId: string | undefined;
   // Señal cruda del editor, adjunta al PRÓXIMO mensaje que se mande
   // (un solo uso — mismo comportamiento que el prefill de texto que

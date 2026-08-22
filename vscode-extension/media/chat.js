@@ -159,7 +159,7 @@
       messagesEl.innerHTML = "";
       contextIndicatorEl.style.display = "none";
     } else if (message.type === "ready") {
-      // También el recovery path del botón "Nueva conversación" si el
+      // También el recovery path del botón "Nuevo chat" si el
       // campo hubiera quedado deshabilitado por cualquier motivo (ver
       // BUG REAL ENCONTRADO EN USO en chatPanel.ts).
       inputEl.disabled = false;

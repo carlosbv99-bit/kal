@@ -7199,3 +7199,22 @@ siempre clickeable) y su respuesta siempre reactiva el campo con
 Aplicado en `ChatPanel` y `ChatViewProvider` por igual. TS compila sin
 errores, 58 tests existentes pasan (sin lógica pura nueva que testear
 — todo el código nuevo depende de la API real de `vscode`).
+
+## Ajustes menores: texto del botón + timeout de Ollama insuficiente para proyectos grandes (2026-07-30)
+
+Dos pedidos del usuario tras seguir probando en vivo:
+
+1. Botón "🆕 Nueva conversación" → "Nuevo chat" (sin ícono) —
+   cosmético, `media/chat.html`.
+2. "crea un proyecto de agenda para android" agotó los 300s de
+   `llm.timeout_seconds` — generar de una sola respuesta el manifest +
+   build.gradle + actividad principal + layout (varios archivos
+   reales, la instrucción de "archivos mínimos indispensables" en
+   `agent_core/client_provider.py`) con `qwen3.5:4b-q4_K_M` en CPU es
+   más lento que un pedido de un solo archivo, que es lo que motivó el
+   valor anterior (300s, 2026-07-20). Subido a 600s en
+   `config/config.yaml`. Verificado que `settings.llm.timeout_seconds`
+   carga el valor nuevo correctamente.
+
+Sin tests Python nuevos (valor de config, no lógica). TS compila sin
+errores, 58 tests existentes de la extensión siguen pasando.
