@@ -7218,3 +7218,33 @@ Dos pedidos del usuario tras seguir probando en vivo:
 
 Sin tests Python nuevos (valor de config, no lógica). TS compila sin
 errores, 58 tests existentes de la extensión siguen pasando.
+
+## Bug real: el webview cacheaba chat.js/chat.css entre reinstalaciones (2026-08-23)
+
+El usuario probó una vez más el fix de los botones reales en el chat
+(commit anterior) tras reinstalar la extensión — y volvió a ver el
+comportamiento VIEJO: el diálogo nativo se cerró solo, sin ningún
+botón en el mensaje del chat. Revisado `projectFiles.ts` a fondo: el
+código no tiene ningún diálogo nativo en el camino de "proponer"
+— la causa no estaba ahí.
+
+**Causa real**: mismo problema de caché ya resuelto una vez para el
+frontend web (ver "Caché del navegador: no-store" —
+`index.html`/`style.css`/`app.js` servidos con `Cache-Control: no-store`),
+nunca aplicado al lado de la extensión de VS Code.
+`chatWebviewHtml.ts::buildChatHtml()` generaba la URL de `chat.js`/
+`chat.css` vía `webview.asWebviewUri(...)` SIN ningún cache-busting —
+la misma URL exacta sin importar si el contenido del archivo cambió,
+así que el webview de VS Code podía seguir sirviendo una copia vieja
+cacheada incluso después de reinstalar una versión nueva de la
+extensión.
+
+**Fix**: se agrega `?v=<mtime>` a ambas URLs, usando el timestamp de
+modificación real del archivo en disco (`fs.statSync(...).mtimeMs`) —
+cambia solo, automáticamente, cada vez que el archivo real cambia
+(cada reinstalación real trae un mtime distinto), sin necesitar un
+bump de versión manual en `package.json` ni ningún otro paso extra.
+
+TS compila sin errores, 58 tests existentes siguen pasando (no
+testeable en Node puro — depende de `vscode.Uri`/`webview.asWebviewUri`
+reales, mismo límite ya documentado para el resto de este archivo).
