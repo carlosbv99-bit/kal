@@ -76,6 +76,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.handleAsk(message.text);
       } else if (message?.type === "project-files-decision") {
         await handleProjectFilesDecision(message, this.client, (m) => this.post(m));
+      } else if (message?.type === "new-session") {
+        this.handleNewSession();
       }
     });
 
@@ -101,6 +103,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     for (const message of queued) {
       this.view?.webview.postMessage(message);
     }
+  }
+
+  /**
+   * Pedido explícito del usuario (2026-07-30): poder arrancar una
+   * conversación nueva sin cerrar la vista. También sirve como salida
+   * de emergencia si el campo de texto quedara deshabilitado por
+   * cualquier motivo — "ready" se manda siempre acá, sin depender de
+   * ningún pedido en curso.
+   */
+  private handleNewSession(): void {
+    this.sessionId = undefined;
+    this.post({ type: "new-session-started" });
+    this.post({ type: "ready" });
   }
 
   private async handleAsk(text: string): Promise<void> {

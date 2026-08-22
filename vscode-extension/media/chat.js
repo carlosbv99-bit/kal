@@ -9,10 +9,20 @@
   const contextIndicatorEl = document.getElementById("context-indicator");
   const contextLabelEl = document.getElementById("context-label");
   const contextDismissBtn = document.getElementById("context-dismiss");
+  const newSessionBtn = document.getElementById("new-session");
 
   contextDismissBtn.addEventListener("click", () => {
     contextIndicatorEl.style.display = "none";
     vscode.postMessage({ type: "dismiss-context" });
+  });
+
+  // Pedido explícito del usuario (2026-07-30): poder arrancar una
+  // conversación nueva en cualquier momento, sin cerrar y reabrir el
+  // panel. También sirve como salida de emergencia si el campo de
+  // texto quedara deshabilitado por cualquier motivo — ver el
+  // "ready" que manda el extension host al recibir "new-session".
+  newSessionBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "new-session" });
   });
 
   function appendMessage(text, className) {
@@ -142,7 +152,16 @@
         img.className = "android-screenshot";
         div.appendChild(img);
       }
+    } else if (message.type === "new-session-started") {
+      // Limpia la conversación visible — el session_id real ya se
+      // reinició del lado del extension host (ver chatPanel.ts/
+      // chatViewProvider.ts::handleNewSession).
+      messagesEl.innerHTML = "";
+      contextIndicatorEl.style.display = "none";
     } else if (message.type === "ready") {
+      // También el recovery path del botón "Nueva conversación" si el
+      // campo hubiera quedado deshabilitado por cualquier motivo (ver
+      // BUG REAL ENCONTRADO EN USO en chatPanel.ts).
       inputEl.disabled = false;
       sendBtn.disabled = false;
       inputEl.focus();

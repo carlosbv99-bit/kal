@@ -10,6 +10,26 @@ body {
   box-sizing: border-box;
 }
 
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+#new-session {
+  background: none;
+  border: 1px solid var(--vscode-widget-border, transparent);
+  color: var(--vscode-foreground);
+  border-radius: 2px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+#new-session:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, var(--vscode-editorWidget-background));
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;

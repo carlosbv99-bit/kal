@@ -7160,3 +7160,42 @@ errores, 58 tests existentes de la extensión siguen pasando sin
 cambios (la lógica nueva vive enteramente en código dependiente de la
 API real de `vscode`, no testeable en este entorno — mismo límite ya
 documentado para el resto de `projectFiles.ts`).
+
+## Bug real: el chat quedaba deshabilitado para siempre + botón de nueva conversación (2026-07-30)
+
+El usuario reportó, después de probar el fix anterior: el campo de
+texto del chat quedó deshabilitado, sin poder escribir más nada.
+
+**Causa real, ya conocida en otra parte del código**: `ChatViewProvider`
+(la vista fija de la barra lateral) ya tenía documentado y arreglado
+este exacto problema desde 2026-07-20 — la API de `postMessage()` de
+vscode puede perder mensajes en silencio si el webview no está visible
+en ese momento (incluso con `retainContextWhenHidden`), y por eso ya
+usa una cola (`pendingMessages`/`flushPendingMessages()`) que reenvía
+todo cuando la vista vuelve a ser visible. `ChatPanel` (la pestaña
+"al costado") NUNCA tuvo esa misma protección — mandaba `postMessage`
+directo en todos lados. Si el usuario cambiaba a otra pestaña/archivo
+mientras kal todavía procesaba un pedido, el mensaje final `"ready"`
+(el único que reactiva el campo de texto) podía perderse — dejando el
+chat deshabilitado para siempre, sin ninguna forma de recuperarlo.
+
+**Fix 1**: mismo patrón exacto que `ChatViewProvider` — `ChatPanel`
+gana `post()`/`pendingMessages`/`flushPendingMessages()`, usando
+`panel.onDidChangeViewState` (el equivalente de `onDidChangeVisibility`
+para `WebviewPanel`) para reenviar la cola cuando el panel vuelve a
+ser visible.
+
+**Fix 2 (pedido explícito del usuario)**: botón "🆕 Nueva conversación"
+en la barra superior del chat (`media/chat.html`/`chat.js`/`chat.css`),
+disponible en cualquier momento — manda `{type: "new-session"}`, el
+extension host reinicia `sessionId` (nueva conversación real del lado
+del backend, ver `agent_core/sessions.py`) y limpia el historial
+visible. Deliberadamente sirve TAMBIÉN como salida de emergencia ante
+el bug de arriba (o cualquier otro que deje el campo bloqueado): el
+botón nunca depende de `inputEl.disabled` (es un elemento aparte,
+siempre clickeable) y su respuesta siempre reactiva el campo con
+`"ready"`, sin depender de ningún pedido en curso.
+
+Aplicado en `ChatPanel` y `ChatViewProvider` por igual. TS compila sin
+errores, 58 tests existentes pasan (sin lógica pura nueva que testear
+— todo el código nuevo depende de la API real de `vscode`).
