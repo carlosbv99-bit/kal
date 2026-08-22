@@ -6960,3 +6960,53 @@ adaptador MCP, `langgraph-kal-sandbox`, post en HN) se mantiene
 pospuesto — no descartado, sino secuenciado DESPUÉS de que el camino
 de contribución ya esté en pie, y reformulado como invitación a
 contribuir en vez de trabajo de un solo autor con fecha fija.
+
+## Bug real: propose_project_files decía "creé" cuando en realidad quedaba pendiente de aprobación (2026-07-30)
+
+El usuario pidió "creá un proyecto de agenda para Android" — kal
+respondió "creé los archivos mínimos indispensables" (siguiendo
+correctamente la instrucción ya existente de limitar un proyecto
+grande a los archivos esenciales primero), pero esos archivos nunca
+aparecieron en el árbol de VS Code, y no tenía forma de revisarlos
+antes de guardarlos.
+
+**Investigación real** (`logs/agent.log`/`logs/audit.log`, correlation_id
+`dba79af2f303`): la herramienta SÍ se ejecutó — `filesystem_access_requested`/
+`filesystem_access_granted` confirmados para `vscode_integration`. No
+es el patrón ya conocido de "el modelo miente sin llamar a la
+herramienta". La causa real está en `vscode-extension/src/chatPanel.ts`/
+`chatViewProvider.ts`: la respuesta de TEXTO del modelo se muestra en
+el panel de chat primero, y RECIÉN DESPUÉS se dispara el diálogo
+NATIVO de VS Code (`maybeHandleProjectFiles`, un
+`showInformationMessage` modal con "Ver detalle"/"Aplicar"/"Descartar")
+— una ventana aparte del panel de chat, fácil de no notar. El texto
+del modelo ("creé...") sonaba a tarea terminada, cuando en realidad
+había un diálogo separado esperando la decisión del usuario.
+
+**Dos fixes**:
+1. `agent_core/client_provider.py::_VSCODE_CLIENT_INSTRUCTION`: nueva
+   regla explícita — después de `propose_project_files`, la respuesta
+   final debe decir "propuse"/"preparé" (nunca "creé"/"guardé"/"generé")
+   y avisar del diálogo pendiente en VS Code. 1 test nuevo en
+   `test_client_provider.py`.
+2. `vscode-extension/src/projectFiles.ts`: nuevo parámetro `postToChat`
+   que manda un aviso DENTRO del panel de chat (no solo el diálogo
+   nativo) en cada etapa — propuesta pendiente (mencionando
+   explícitamente "Ver detalle", que YA existía pero nadie lo notaba
+   por este mismo problema), aplicada, descartada, o rechazada por
+   ruta inválida/sin workspace/fuera del proyecto. Nuevo tipo de
+   mensaje `project-files-notice` en `media/chat.js`/`chat.css`
+   (clase `.msg-notice`, colores de warning de VS Code). Ambos
+   llamadores (`chatPanel.ts`, `chatViewProvider.ts`) actualizados.
+
+TypeScript compila sin errores, 48 tests de la extensión (Node, sin
+depender de la API real de vscode) pasan. Suite completa de Python:
+1076 tests, 0 regresiones.
+
+**Nota de proceso**: a raíz de este bug, el usuario preguntó si es
+posible tener una vista previa visual de una app Android en un
+dispositivo conectado mientras se construye — quedó como diseño en
+discusión (screenshot bajo demanda vía `adb`, dispositivo físico por
+USB o WiFi, nunca un emulador por el costo de RAM en esta máquina),
+sin implementar todavía. Ver memoria del proyecto para el detalle
+completo de esa discusión de seguridad.

@@ -30,8 +30,23 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
  * maneja todo el flujo: vista previa, aprobación del usuario, y
  * escritura real (o descarte) — nunca se llama dos veces para la misma
  * respuesta, así que no hace falta deduplicar.
+ *
+ * `postToChat`: además del diálogo NATIVO de VS Code de abajo (que
+ * puede pasar desapercibido — es una ventana aparte del panel de chat,
+ * no algo dentro de la conversación que el usuario ya está mirando),
+ * manda un aviso DENTRO del panel de chat mismo. BUG REAL ENCONTRADO EN
+ * USO (2026-07-30): el modelo respondió "creé los archivos" en el chat
+ * y el usuario nunca notó que había un diálogo aparte esperando su
+ * aprobación — sin ningún rastro de eso en la conversación, no había
+ * forma de saber que hacía falta hacer algo más. Este aviso es una
+ * señal redundante en la MISMA superficie que el usuario ya está
+ * mirando, no depende de que note una ventana nueva.
  */
-export async function maybeHandleProjectFiles(result: ChatResult, client: KalClient): Promise<void> {
+export async function maybeHandleProjectFiles(
+  result: ChatResult,
+  client: KalClient,
+  postToChat: (message: unknown) => void
+): Promise<void> {
   const artifact = findProjectFilesArtifact(result);
   if (!artifact || artifact.files.length === 0) {
     return;
@@ -39,6 +54,10 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
+    postToChat({
+      type: "project-files-notice",
+      text: `⚠️ Kal propuso ${artifact.files.length} archivo(s), pero no hay ninguna carpeta abierta en VS Code — no se guardó nada.`,
+    });
     const action = await vscode.window.showWarningMessage(
       `Kal propone crear ${artifact.files.length} archivo(s), pero no hay ninguna carpeta abierta en VS Code.`,
       "Abrir una carpeta..."
@@ -52,6 +71,10 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
 
   const invalidPathError = findFirstInvalidPath(artifact.files);
   if (invalidPathError !== null) {
+    postToChat({
+      type: "project-files-notice",
+      text: `⚠️ Kal propuso un archivo inválido, se descartó la propuesta entera: ${invalidPathError}`,
+    });
     vscode.window.showErrorMessage(`Kal propuso un archivo inválido, se descarta la propuesta entera: ${invalidPathError}`);
     await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
     return;
@@ -59,6 +82,11 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
 
   const root = workspaceFolders[0].uri;
   const fileList = artifact.files.map((f) => f.path).join("\n");
+
+  postToChat({
+    type: "project-files-notice",
+    text: `⚠️ Kal propuso ${artifact.files.length} archivo(s) — todavía NO se guardaron. Revisá el diálogo que apareció en VS Code: "Ver detalle" muestra el contenido completo antes de decidir, "Aplicar" los guarda de verdad, "Descartar" los descarta.\n${fileList}`,
+  });
 
   let choice = await vscode.window.showInformationMessage(
     `Kal propone crear ${artifact.files.length} archivo(s) en el proyecto:\n${fileList}`,
@@ -92,6 +120,7 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
   }
 
   if (choice !== "Aplicar") {
+    postToChat({ type: "project-files-notice", text: "❌ La propuesta de archivos fue descartada — no se guardó nada." });
     await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
     return;
   }
@@ -111,6 +140,7 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
       "Cancelar"
     );
     if (overwriteChoice !== "Sobrescribir todos") {
+      postToChat({ type: "project-files-notice", text: "❌ La propuesta de archivos fue descartada — no se guardó nada." });
       await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
       return;
     }
@@ -123,6 +153,10 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
   for (const file of artifact.files) {
     const targetUri = vscode.Uri.joinPath(root, file.path);
     if (!isWithinRoot(root.fsPath, targetUri.fsPath)) {
+      postToChat({
+        type: "project-files-notice",
+        text: `⚠️ '${file.path}' queda fuera de la carpeta del proyecto — se abortó todo, no se escribió nada.`,
+      });
       vscode.window.showErrorMessage(
         `Kal: '${file.path}' queda fuera de la carpeta del proyecto — se aborta todo, no se escribió nada.`
       );
@@ -141,6 +175,7 @@ export async function maybeHandleProjectFiles(result: ChatResult, client: KalCli
     written.push(file.path);
   }
 
+  postToChat({ type: "project-files-notice", text: `✅ Se guardaron ${written.length} archivo(s) en el proyecto: ${written.join(", ")}` });
   vscode.window.showInformationMessage(`Kal creó ${written.length} archivo(s) en el proyecto.`);
   await client.reportFilesystemAccessOutcome(artifact.request_id, "written", written);
 }

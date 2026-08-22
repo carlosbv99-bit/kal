@@ -88,7 +88,7 @@ export class ChatPanel {
       const finalResult = await resolvePendingWorkspaceFileReads(result, this.client, model, editorContext);
       this.sessionId = finalResult.session_id;
       this.panel.webview.postMessage({ type: "answer", result: finalResult });
-      await maybeHandleProjectFiles(finalResult, this.client);
+      await maybeHandleProjectFiles(finalResult, this.client, (m) => this.panel.webview.postMessage(m));
     } catch (e) {
       this.panel.webview.postMessage({ type: "error", message: String(e instanceof Error ? e.message : e) });
     } finally {

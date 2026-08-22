@@ -77,6 +77,12 @@
     } else if (message.type === "error") {
       removePending();
       appendMessage(message.message, "msg-error");
+    } else if (message.type === "project-files-notice") {
+      // Ver src/projectFiles.ts: además del diálogo NATIVO de VS Code
+      // (aparte del panel de chat, fácil de no notar), esto deja un
+      // rastro DENTRO de la conversación de qué pasó con una propuesta
+      // de archivos — pendiente, aplicada, o descartada.
+      appendMessage(message.text, "msg-notice");
     } else if (message.type === "ready") {
       inputEl.disabled = false;
       sendBtn.disabled = false;

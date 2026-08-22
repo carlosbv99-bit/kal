@@ -124,7 +124,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const finalResult = await resolvePendingWorkspaceFileReads(result, this.client, model, editorContext);
       this.sessionId = finalResult.session_id;
       this.post({ type: "answer", result: finalResult });
-      await maybeHandleProjectFiles(finalResult, this.client);
+      await maybeHandleProjectFiles(finalResult, this.client, (m) => this.post(m));
     } catch (e) {
       this.post({ type: "error", message: String(e instanceof Error ? e.message : e) });
     } finally {

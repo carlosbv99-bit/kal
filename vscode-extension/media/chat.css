@@ -48,6 +48,12 @@ body {
   font-style: italic;
 }
 
+.msg-notice {
+  background-color: var(--vscode-inputValidation-warningBackground, transparent);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
+  font-size: 0.9em;
+}
+
 .context-indicator {
   display: flex;
   align-items: center;
