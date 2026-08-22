@@ -55,7 +55,15 @@ llm:
   # 120s en una sola respuesta — Ollama nunca colgó, el modelo grande
   # simplemente necesitaba más tiempo. Subido a 300s para dar margen
   # real sin esperar indefinidamente si algo se cuelga de verdad.
-  timeout_seconds: 300
+  #
+  # BUG REAL ENCONTRADO EN USO (2026-07-30, VS Code): "crea un proyecto
+  # de agenda para android" agotó los 300s de arriba — generar de una
+  # sola respuesta el manifest + build.gradle + actividad principal +
+  # layout (varios archivos reales, ver la instrucción de "archivos
+  # mínimos indispensables" en agent_core/client_provider.py) con
+  # qwen3.5:4b-q4_K_M en CPU es más lento que un pedido de un solo
+  # archivo. Subido a 600s.
+  timeout_seconds: 600
   max_agent_steps: 8                    # tope de iteraciones del loop antes de forzar una respuesta final
   # Descomponer el objetivo en subtareas antes de ejecutar (ver
   # agent_core/llm/planner.py). BUG REAL ENCONTRADO EN USO: con el modelo
