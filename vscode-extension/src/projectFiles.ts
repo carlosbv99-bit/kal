@@ -7,13 +7,31 @@
  * aprobación del usuario ocurren acá, la única parte del sistema que
  * de verdad sabe cuál es el workspace.
  *
+ * BUG REAL ENCONTRADO EN USO (2026-07-30): el diseño anterior dependía
+ * ENTERAMENTE de un diálogo modal nativo de VS Code
+ * (showInformationMessage) para decidir aplicar/descartar — el usuario
+ * reportó que el diálogo se cerró solo antes de poder leerlo, sin
+ * ninguna forma de recuperar la propuesta. Rediseñado: la decisión
+ * (Ver detalle/Aplicar/Descartar) ahora vive como botones REALES
+ * dentro del propio mensaje del panel de chat (ver media/chat.js) —
+ * parte del historial persistente de la conversación, no un diálogo
+ * transitorio que se pueda perder. maybeHandleProjectFiles() ya NO
+ * espera una decisión: valida y publica la propuesta, listo.
+ * handleProjectFilesDecision() aplica la decisión real cuando el
+ * usuario hace clic en un botón del webview (ver chatPanel.ts/
+ * chatViewProvider.ts::onDidReceiveMessage). La confirmación de
+ * colisiones (sobrescribir archivos ya existentes) sigue siendo un
+ * diálogo nativo por ahora — camino secundario, menos frecuente, no
+ * el que se reportó roto — a revisar si algún día se reporta el mismo
+ * problema ahí.
+ *
  * Parte de la API real de vscode (workspace.fs, diálogos nativos), no
  * verificable en este entorno sin un VS Code real corriendo — la
  * validación de rutas en sí (sin depender de vscode) vive aparte, en
  * projectFilesFormat.ts, testeable con Node normal.
  */
 import * as vscode from "vscode";
-import { ChatResult, KalClient } from "./kalClient";
+import { ChatResult, KalClient, ProjectFile } from "./kalClient";
 import { findFirstInvalidPath, findProjectFilesArtifact, isWithinRoot } from "./projectFilesFormat";
 
 async function fileExists(uri: vscode.Uri): Promise<boolean> {
@@ -27,20 +45,11 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
 
 /**
  * Si la respuesta de /chat trae una propuesta de propose_project_files,
- * maneja todo el flujo: vista previa, aprobación del usuario, y
- * escritura real (o descarte) — nunca se llama dos veces para la misma
- * respuesta, así que no hace falta deduplicar.
- *
- * `postToChat`: además del diálogo NATIVO de VS Code de abajo (que
- * puede pasar desapercibido — es una ventana aparte del panel de chat,
- * no algo dentro de la conversación que el usuario ya está mirando),
- * manda un aviso DENTRO del panel de chat mismo. BUG REAL ENCONTRADO EN
- * USO (2026-07-30): el modelo respondió "creé los archivos" en el chat
- * y el usuario nunca notó que había un diálogo aparte esperando su
- * aprobación — sin ningún rastro de eso en la conversación, no había
- * forma de saber que hacía falta hacer algo más. Este aviso es una
- * señal redundante en la MISMA superficie que el usuario ya está
- * mirando, no depende de que note una ventana nueva.
+ * valida lo básico (workspace abierto, rutas válidas) y la publica en
+ * el chat como un mensaje INTERACTIVO (con botones reales) — nunca
+ * escribe nada acá. La decisión real llega después, de forma
+ * asincrónica, vía handleProjectFilesDecision() cuando el usuario hace
+ * clic en un botón del webview.
  */
 export async function maybeHandleProjectFiles(
   result: ChatResult,
@@ -75,32 +84,40 @@ export async function maybeHandleProjectFiles(
       type: "project-files-notice",
       text: `⚠️ Kal propuso un archivo inválido, se descartó la propuesta entera: ${invalidPathError}`,
     });
-    vscode.window.showErrorMessage(`Kal propuso un archivo inválido, se descarta la propuesta entera: ${invalidPathError}`);
     await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
     return;
   }
 
-  const root = workspaceFolders[0].uri;
-  const fileList = artifact.files.map((f) => f.path).join("\n");
-
+  // Publica la propuesta como mensaje interactivo — chat.js dibuja los
+  // botones y guarda `files` tal cual para devolverlos en la decisión
+  // (el extension host no necesita mantener ningún estado pendiente
+  // propio: el webview es la fuente de verdad mientras el usuario
+  // decide, mismo espíritu "sin servidor" que el resto de este flujo).
   postToChat({
-    type: "project-files-notice",
-    text: `⚠️ Kal propuso ${artifact.files.length} archivo(s) — todavía NO se guardaron. Revisá el diálogo que apareció en VS Code: "Ver detalle" muestra el contenido completo antes de decidir, "Aplicar" los guarda de verdad, "Descartar" los descarta.\n${fileList}`,
+    type: "project-files-proposal",
+    requestId: artifact.request_id,
+    files: artifact.files,
   });
+}
 
-  let choice = await vscode.window.showInformationMessage(
-    `Kal propone crear ${artifact.files.length} archivo(s) en el proyecto:\n${fileList}`,
-    { modal: true },
-    "Ver detalle",
-    "Aplicar",
-    "Descartar"
-  );
-
-  if (choice === "Ver detalle") {
+/**
+ * Aplica la decisión real que el usuario tomó haciendo clic en un
+ * botón del mensaje interactivo (ver maybeHandleProjectFiles arriba) —
+ * llamada desde chatPanel.ts/chatViewProvider.ts::onDidReceiveMessage
+ * cuando llega `{type: "project-files-decision", ...}` desde el
+ * webview. "detail" no escribe nada, solo abre una vista previa real
+ * del contenido; "apply"/"discard" son las decisiones finales.
+ */
+export async function handleProjectFilesDecision(
+  decision: { requestId: string; decision: "detail" | "apply" | "discard"; files: ProjectFile[] },
+  client: KalClient,
+  postToChat: (message: unknown) => void
+): Promise<void> {
+  if (decision.decision === "detail") {
     // Archivos binarios (encoding "base64", ver Artifact Service /
     // import_resource): mostrar un placeholder, nunca el blob base64
     // crudo — ilegible e inútil para revisar en una vista previa.
-    const combined = artifact.files
+    const combined = decision.files
       .map((f) => {
         if (f.encoding === "base64") {
           const approxBytes = Math.floor((f.content.length * 3) / 4);
@@ -111,23 +128,32 @@ export async function maybeHandleProjectFiles(
       .join("\n\n");
     const doc = await vscode.workspace.openTextDocument({ content: combined });
     await vscode.window.showTextDocument(doc, { preview: true });
-    choice = await vscode.window.showInformationMessage(
-      `¿Aplicar los ${artifact.files.length} archivo(s) propuestos?`,
-      { modal: true },
-      "Aplicar",
-      "Descartar"
-    );
-  }
-
-  if (choice !== "Aplicar") {
-    postToChat({ type: "project-files-notice", text: "❌ La propuesta de archivos fue descartada — no se guardó nada." });
-    await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
+    // Los botones siguen disponibles en el mensaje del chat después de
+    // esto — el usuario decide aplicar/descartar desde ahí, no hace
+    // falta un segundo paso acá.
     return;
   }
 
-  // Colisiones: todo o nada (ver "Fuera de alcance" del plan — sin merge parcial).
+  if (decision.decision === "discard") {
+    postToChat({ type: "project-files-notice", text: "❌ La propuesta de archivos fue descartada — no se guardó nada." });
+    await client.reportFilesystemAccessOutcome(decision.requestId, "discarded", []);
+    return;
+  }
+
+  // decision.decision === "apply" de acá en adelante.
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    postToChat({ type: "project-files-notice", text: "⚠️ No hay ninguna carpeta abierta en VS Code — no se guardó nada." });
+    await client.reportFilesystemAccessOutcome(decision.requestId, "discarded", []);
+    return;
+  }
+  const root = workspaceFolders[0].uri;
+
+  // Colisiones: todo o nada (ver "Fuera de alcance" del plan — sin
+  // merge parcial). Sigue siendo un diálogo nativo por ahora (ver
+  // docstring del archivo) — camino secundario, no el reportado roto.
   const collisions: string[] = [];
-  for (const file of artifact.files) {
+  for (const file of decision.files) {
     if (await fileExists(vscode.Uri.joinPath(root, file.path))) {
       collisions.push(file.path);
     }
@@ -141,7 +167,7 @@ export async function maybeHandleProjectFiles(
     );
     if (overwriteChoice !== "Sobrescribir todos") {
       postToChat({ type: "project-files-notice", text: "❌ La propuesta de archivos fue descartada — no se guardó nada." });
-      await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
+      await client.reportFilesystemAccessOutcome(decision.requestId, "discarded", []);
       return;
     }
   }
@@ -150,23 +176,20 @@ export async function maybeHandleProjectFiles(
   // el backend ya rechazó rutas absolutas/".." antes de proponer nada.
   // Si CUALQUIER archivo resuelve fuera de la raíz, se aborta TODO —
   // ninguna escritura parcial.
-  for (const file of artifact.files) {
+  for (const file of decision.files) {
     const targetUri = vscode.Uri.joinPath(root, file.path);
     if (!isWithinRoot(root.fsPath, targetUri.fsPath)) {
       postToChat({
         type: "project-files-notice",
         text: `⚠️ '${file.path}' queda fuera de la carpeta del proyecto — se abortó todo, no se escribió nada.`,
       });
-      vscode.window.showErrorMessage(
-        `Kal: '${file.path}' queda fuera de la carpeta del proyecto — se aborta todo, no se escribió nada.`
-      );
-      await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
+      await client.reportFilesystemAccessOutcome(decision.requestId, "discarded", []);
       return;
     }
   }
 
   const written: string[] = [];
-  for (const file of artifact.files) {
+  for (const file of decision.files) {
     const targetUri = vscode.Uri.joinPath(root, file.path);
     const parentDir = vscode.Uri.joinPath(targetUri, "..");
     await vscode.workspace.fs.createDirectory(parentDir);
@@ -176,6 +199,5 @@ export async function maybeHandleProjectFiles(
   }
 
   postToChat({ type: "project-files-notice", text: `✅ Se guardaron ${written.length} archivo(s) en el proyecto: ${written.join(", ")}` });
-  vscode.window.showInformationMessage(`Kal creó ${written.length} archivo(s) en el proyecto.`);
-  await client.reportFilesystemAccessOutcome(artifact.request_id, "written", written);
+  await client.reportFilesystemAccessOutcome(decision.requestId, "written", written);
 }

@@ -3,7 +3,7 @@ import { maybeHandleAndroidBuild } from "./androidBuild";
 import { buildChatHtml } from "./chatWebviewHtml";
 import { captureEditorSnapshot, captureOpenEditors, captureWorkspaceTree } from "./editorContext";
 import { KalClient } from "./kalClient";
-import { maybeHandleProjectFiles } from "./projectFiles";
+import { handleProjectFilesDecision, maybeHandleProjectFiles } from "./projectFiles";
 import { resolvePendingWorkspaceFileReads } from "./readWorkspaceFile";
 
 /**
@@ -74,6 +74,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message?.type === "ask" && typeof message.text === "string") {
         await this.handleAsk(message.text);
+      } else if (message?.type === "project-files-decision") {
+        await handleProjectFilesDecision(message, this.client, (m) => this.post(m));
       }
     });
 

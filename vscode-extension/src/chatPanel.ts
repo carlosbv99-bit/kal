@@ -3,7 +3,7 @@ import { maybeHandleAndroidBuild } from "./androidBuild";
 import { buildChatHtml } from "./chatWebviewHtml";
 import { EditorSnapshot } from "./editorContextFormat";
 import { KalClient } from "./kalClient";
-import { maybeHandleProjectFiles } from "./projectFiles";
+import { handleProjectFilesDecision, maybeHandleProjectFiles } from "./projectFiles";
 import { resolvePendingWorkspaceFileReads } from "./readWorkspaceFile";
 
 /**
@@ -43,6 +43,8 @@ export class ChatPanel {
           await this.handleAsk(message.text);
         } else if (message?.type === "dismiss-context") {
           this.pendingEditorContext = undefined;
+        } else if (message?.type === "project-files-decision") {
+          await handleProjectFilesDecision(message, this.client, (m) => this.panel.webview.postMessage(m));
         }
       }),
       this.panel.onDidDispose(() => this.dispose())

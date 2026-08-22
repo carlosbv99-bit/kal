@@ -7111,3 +7111,52 @@ emparejamiento inicial de WiFi (`adb pair`/`adb connect` con el código
 que muestra el teléfono) — el usuario lo sigue haciendo a mano, y el
 diseño queda así hasta que él mismo pruebe el flujo completo en su
 máquina real y decida si hace falta.
+
+## Bug real: el diálogo de propose_project_files se cerraba solo antes de poder leerlo (2026-07-30)
+
+El usuario probó en vivo el fix anterior ("propuse" en vez de "creé" +
+aviso en el chat) y reportó algo nuevo: el diálogo modal nativo de VS
+Code apareció, el aviso en el chat también apareció explicando lo
+mismo, pero antes de poder leerlo el diálogo se cerró solo — sin
+ninguna forma de recuperar la propuesta, y sin ningún botón en el
+propio mensaje del chat para decidir desde ahí (algo que el usuario
+esperaba que ya existiera).
+
+**Causa**: no reproducible en este entorno (sin VS Code real
+corriendo) para confirmar por qué el modal se cerró — pero el diseño
+anterior dependía ENTERAMENTE de ese diálogo nativo como única vía de
+decisión, así que cualquier forma en que se cierre sin responder
+(pérdida de foco, otra notificación, lo que sea) deja al usuario sin
+ninguna forma de aplicar la propuesta.
+
+**Fix real, no un parche**: en vez de intentar diagnosticar por qué
+el modal se cierra, se sacó la dependencia de raíz. `maybeHandleProjectFiles`
+(`vscode-extension/src/projectFiles.ts`) ya NO espera ninguna decisión
+— valida y publica la propuesta como un mensaje INTERACTIVO dentro del
+propio panel de chat (`project-files-proposal`, con botones reales
+"Ver detalle"/"Aplicar"/"Descartar" dibujados en `media/chat.js`,
+`media/chat.css`). La decisión real la maneja la nueva
+`handleProjectFilesDecision`, invocada cuando el usuario hace clic en
+un botón del webview (`chatPanel.ts`/`chatViewProvider.ts::
+onDidReceiveMessage`, nuevo caso `"project-files-decision"`) — mismo
+código de escritura/colisiones/validación que antes, ahora disparado
+desde un botón que vive en el historial persistente de la
+conversación, no en un diálogo transitorio que se pueda perder.
+
+La confirmación de colisiones (sobrescribir archivos ya existentes)
+sigue siendo un diálogo nativo por ahora — camino secundario, menos
+frecuente, no el que se reportó roto — documentado explícitamente como
+un punto a revisar si algún día se reporta el mismo problema ahí.
+
+Consecuencia de diseño aceptada a propósito: el campo de texto del
+chat ya no queda bloqueado esperando la decisión de una propuesta
+pendiente (antes sí, vía un mecanismo dedicado) — como la propuesta
+ahora es persistente y visible en el chat (no un diálogo que se
+pierde), el riesgo de confusión que motivaba ese bloqueo es mucho
+menor.
+
+Sin tests Python (no se tocó ningún archivo `.py`). TS compila sin
+errores, 58 tests existentes de la extensión siguen pasando sin
+cambios (la lógica nueva vive enteramente en código dependiente de la
+API real de `vscode`, no testeable en este entorno — mismo límite ya
+documentado para el resto de `projectFiles.ts`).

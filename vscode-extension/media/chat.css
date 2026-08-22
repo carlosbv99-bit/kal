@@ -54,6 +54,31 @@ body {
   font-size: 0.9em;
 }
 
+.proposal-buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.proposal-buttons button {
+  background-color: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  border: none;
+  padding: 4px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.proposal-buttons button:hover:not(:disabled) {
+  background-color: var(--vscode-button-hoverBackground);
+}
+
+.proposal-buttons button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .android-screenshot {
   display: block;
   max-width: 100%;

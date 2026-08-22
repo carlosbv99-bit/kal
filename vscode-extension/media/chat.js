@@ -32,15 +32,14 @@
     contextIndicatorEl.style.display = "none"; // adjunto de un solo uso, ver chatPanel.ts
     const pending = appendMessage("kal está pensando...", "msg-pending");
     pending.dataset.pending = "true";
-    // BUG REAL ENCONTRADO EN USO: sin deshabilitar el envío acá, el
-    // usuario podía mandar un pedido nuevo mientras la vista previa de
-    // archivos (propose_project_files, ver projectFiles.ts) de un
-    // pedido ANTERIOR todavía estaba esperando su decisión — VS Code
-    // encola los diálogos nativos, así que el usuario seguía viendo la
-    // propuesta VIEJA (a veces de varios mensajes atrás) sin importar
-    // cuántos pedidos nuevos hiciera después. Se vuelve a habilitar
-    // recién con "ready", que el extension host manda cuando TODO el
-    // flujo del pedido (incluida esa vista previa, si la hubo) terminó.
+    // Se deshabilita mientras el pedido está en curso, y se vuelve a
+    // habilitar con "ready" (el extension host lo manda cuando el
+    // pedido — incluida la propuesta de archivos, si la hubo —
+    // terminó de publicarse). Una propuesta de propose_project_files
+    // YA NO bloquea esto esperando una decisión (ver src/projectFiles.ts,
+    // 2026-07-30): sus botones quedan en el propio mensaje del chat,
+    // persistentes, así que el usuario puede seguir escribiendo sin
+    // perder la propuesta de vista.
     inputEl.disabled = true;
     sendBtn.disabled = true;
     vscode.setState({ lastQuestion: text });
@@ -78,11 +77,58 @@
       removePending();
       appendMessage(message.message, "msg-error");
     } else if (message.type === "project-files-notice") {
-      // Ver src/projectFiles.ts: además del diálogo NATIVO de VS Code
-      // (aparte del panel de chat, fácil de no notar), esto deja un
-      // rastro DENTRO de la conversación de qué pasó con una propuesta
-      // de archivos — pendiente, aplicada, o descartada.
+      // Ver src/projectFiles.ts: notificaciones de solo texto — error
+      // de validación, descartada, o el resultado final tras aplicar.
       appendMessage(message.text, "msg-notice");
+    } else if (message.type === "project-files-proposal") {
+      // BUG REAL ENCONTRADO EN USO (2026-07-30): antes, la ÚNICA forma
+      // de decidir era un diálogo modal nativo de VS Code — el usuario
+      // reportó que se cerró solo antes de poder leerlo, sin ninguna
+      // forma de recuperar la propuesta. Ahora los botones viven ACÁ,
+      // dentro del mensaje del chat — parte del historial persistente
+      // de la conversación, no un diálogo transitorio que se pueda
+      // perder. Ver src/projectFiles.ts::handleProjectFilesDecision.
+      const fileList = message.files.map((f) => f.path).join("\n");
+      const div = appendMessage(
+        `📋 Kal propone crear ${message.files.length} archivo(s) — todavía NO se guardaron:\n${fileList}`,
+        "msg-notice"
+      );
+
+      const buttonRow = document.createElement("div");
+      buttonRow.className = "proposal-buttons";
+
+      function sendDecision(decision) {
+        vscode.postMessage({ type: "project-files-decision", requestId: message.requestId, decision: decision, files: message.files });
+      }
+
+      const detailBtn = document.createElement("button");
+      detailBtn.textContent = "Ver detalle";
+      detailBtn.addEventListener("click", () => sendDecision("detail"));
+
+      const applyBtn = document.createElement("button");
+      applyBtn.textContent = "Aplicar";
+      applyBtn.addEventListener("click", () => {
+        sendDecision("apply");
+        // Se deshabilitan ambos botones de decisión final (no "Ver
+        // detalle", que se puede reabrir sin riesgo) para que un
+        // doble clic no aplique/descarte dos veces la misma propuesta.
+        applyBtn.disabled = true;
+        discardBtn.disabled = true;
+      });
+
+      const discardBtn = document.createElement("button");
+      discardBtn.textContent = "Descartar";
+      discardBtn.addEventListener("click", () => {
+        sendDecision("discard");
+        applyBtn.disabled = true;
+        discardBtn.disabled = true;
+      });
+
+      buttonRow.appendChild(detailBtn);
+      buttonRow.appendChild(applyBtn);
+      buttonRow.appendChild(discardBtn);
+      div.appendChild(buttonRow);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
     } else if (message.type === "android-build-notice") {
       // Ver src/androidBuild.ts: resultado real de compilar/instalar
       // una app Android — a diferencia de project-files-notice, puede
