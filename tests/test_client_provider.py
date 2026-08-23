@@ -66,6 +66,18 @@ def test_vscode_instruction_tells_the_model_never_to_claim_the_android_build_alr
     assert "NUNCA digas que ya se" in _VSCODE_CLIENT_INSTRUCTION
 
 
+def test_vscode_instruction_tells_the_model_not_to_call_android_build_automatically_after_creating_a_project():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-08-23): "crea un proyecto de agenda
+    para android" (sin pedir ver el progreso visual) llamó igual a
+    android_build_and_screenshot después de propose_project_files, un
+    paso que el usuario nunca pidió sobre archivos que ni siquiera se
+    habían aplicado todavía. Debe llamarse SOLO cuando el pedido pide
+    explícitamente ver/monitorear/mostrar el progreso visual.
+    """
+    assert "NUNCA se llama automáticamente después de crear/proponer" in _VSCODE_CLIENT_INSTRUCTION
+
+
 def test_vscode_instruction_tells_the_model_never_to_claim_files_are_already_saved():
     """
     BUG REAL ENCONTRADO EN USO (2026-07-30): tras propose_project_files

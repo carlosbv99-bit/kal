@@ -7248,3 +7248,25 @@ bump de versión manual en `package.json` ni ningún otro paso extra.
 TS compila sin errores, 58 tests existentes siguen pasando (no
 testeable en Node puro — depende de `vscode.Uri`/`webview.asWebviewUri`
 reales, mismo límite ya documentado para el resto de este archivo).
+
+## Bug real: android_build_and_screenshot se disparaba sin que el usuario lo pidiera (2026-08-23)
+
+"Crea un proyecto de agenda para android" (sin pedir ver el progreso
+visual) respondió "Estoy compilando y instalando tu app... en un
+momento verás una captura real del dispositivo" — texto que coincide
+exactamente con la instrucción para DESPUÉS de llamar a
+`android_build_and_screenshot`. Confirmado con el audit log
+(`filesystem_access_granted` para `propose_project_files`, 12
+archivos): el modelo llamó a la herramienta de build/captura además de
+proponer los archivos, sin que el usuario lo pidiera en ningún
+momento — un paso extra, no pedido, sobre archivos que ni siquiera se
+habían aplicado todavía.
+
+**Fix**: `_VSCODE_CLIENT_INSTRUCTION` (`agent_core/client_provider.py`)
+gana una regla explícita — `android_build_and_screenshot` NUNCA se
+llama automáticamente después de crear/proponer un proyecto, SOLO
+cuando el pedido del usuario, en ESE mismo mensaje, pide explícitamente
+ver/monitorear/mostrar el progreso visual. Crear un proyecto es una
+tarea completa en sí misma; compilar y mostrar el progreso puede
+ofrecerse como paso siguiente OPCIONAL en la respuesta, nunca
+ejecutarse sin que lo pidan. 1 test nuevo en `test_client_provider.py`.
