@@ -276,6 +276,18 @@ class ResourceBrokerConfig(BaseModel):
     """
     idle_timeout_seconds: int = 300
     min_available_ram_mb: int = 2048
+    # Timeout PROPIO (más largo) para el modelo de chat de Ollama —
+    # diagnóstico de lentitud (2026-08-23, ver docs/HISTORY.md): con el
+    # timeout general de 300s, el modelo de chat se descargaba tan
+    # seguido como los pipelines pesados de imagen/audio/STT (que sí
+    # conviene liberar rápido, son varios GB cada uno) — pero es chico
+    # (~3-4GB) y se usa mucho más seguido, así que conviene mantenerlo
+    # cargado más tiempo. NUNCA afecta el chequeo de RAM baja (ver
+    # ResourceBroker.evict_idle_and_pressured): ante presión real de
+    # memoria, se libera igual que cualquier otro recurso, sin
+    # excepción — esto solo cambia CUÁNTO tiempo de inactividad
+    # tolera antes de liberarse por reloj.
+    ollama_idle_timeout_seconds: int = 1800
 
 
 class ConversationEngineConfig(BaseModel):

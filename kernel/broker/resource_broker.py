@@ -41,6 +41,13 @@ class _ManagedResource:
     is_loaded: Callable[[], bool]
     unload: Callable[[], None]
     last_used: float = field(default_factory=time.monotonic)
+    # None = usa el timeout GENERAL del broker (idle_timeout_seconds).
+    # Un recurso puede pedir el suyo propio, más largo — ver
+    # register() y evict_idle_and_pressured() abajo. Nunca afecta al
+    # chequeo de RAM baja: ese sigue siendo global e incondicional
+    # para TODOS los recursos, sin importar este valor (ver docstring
+    # de evict_idle_and_pressured).
+    idle_timeout_seconds: int | None = None
 
 
 class ResourceBroker:
@@ -49,13 +56,38 @@ class ResourceBroker:
         self._min_available_ram_mb = min_available_ram_mb
         self._resources: dict[str, _ManagedResource] = {}
 
-    def register(self, name: str, is_loaded: Callable[[], bool], unload: Callable[[], None]) -> None:
-        self._resources[name] = _ManagedResource(name=name, is_loaded=is_loaded, unload=unload)
+    def register(
+        self,
+        name: str,
+        is_loaded: Callable[[], bool],
+        unload: Callable[[], None],
+        idle_timeout_seconds: int | None = None,
+    ) -> None:
+        """
+        `idle_timeout_seconds`: override PROPIO de este recurso para el
+        chequeo de inactividad — None (default) usa el general del
+        broker. Pensado para un recurso liviano y de uso muy frecuente
+        (el modelo de chat de Ollama, ver agent_core/orchestrator.py)
+        que conviene mantener cargado más tiempo que un pipeline
+        pesado de imagen/audio/STT — nunca cambia el chequeo de RAM
+        baja, que sigue evictando este recurso igual que cualquier
+        otro ante presión real (ver evict_idle_and_pressured).
+        """
+        self._resources[name] = _ManagedResource(
+            name=name, is_loaded=is_loaded, unload=unload, idle_timeout_seconds=idle_timeout_seconds
+        )
 
     def is_registered(self, name: str) -> bool:
         """Para tests que verifican que un llamador registró el recurso
         esperado, sin exponer `_resources` directo."""
         return name in self._resources
+
+    def own_idle_timeout_seconds(self, name: str) -> int | None:
+        """El override PROPIO (ver register()) del recurso, o None si no
+        pidió uno (usa el general del broker) o no está registrado —
+        para tests, sin exponer `_resources` directo."""
+        resource = self._resources.get(name)
+        return resource.idle_timeout_seconds if resource is not None else None
 
     def mark_used(self, name: str) -> None:
         resource = self._resources.get(name)
@@ -64,12 +96,15 @@ class ResourceBroker:
 
     def evict_idle_and_pressured(self) -> None:
         """
-        Libera cada recurso cargado que lleve más de idle_timeout_seconds
-        sin uso. Si la RAM disponible del sistema ya está por debajo de
-        min_available_ram_mb, libera TODOS los recursos cargados de
-        inmediato — evicción agresiva ante presión real, no solo por
-        reloj (el timeout por sí solo no alcanzaría si la presión llega
-        antes de que se cumpla).
+        Libera cada recurso cargado que lleve más de su propio
+        idle_timeout_seconds (o el general del broker, si no pidió uno
+        propio — ver register()) sin uso. Si la RAM disponible del
+        sistema ya está por debajo de min_available_ram_mb, libera
+        TODOS los recursos cargados de inmediato — evicción agresiva
+        ante presión real, SIN excepción para ningún recurso sin
+        importar su timeout propio (esto es lo que evitó el freeze
+        real documentado arriba; un timeout más largo para un recurso
+        puntual nunca debe debilitar esta protección).
         """
         now = time.monotonic()
         low_memory = self._available_ram_mb() < self._min_available_ram_mb
@@ -77,7 +112,8 @@ class ResourceBroker:
             if not resource.is_loaded():
                 continue
             idle_for = now - resource.last_used
-            if low_memory or idle_for >= self._idle_timeout_seconds:
+            timeout = resource.idle_timeout_seconds if resource.idle_timeout_seconds is not None else self._idle_timeout_seconds
+            if low_memory or idle_for >= timeout:
                 logger.info(
                     f"Liberando '{resource.name}' de RAM (inactivo {idle_for:.0f}s, RAM del sistema baja={low_memory})"
                 )

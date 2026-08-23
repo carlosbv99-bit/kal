@@ -114,3 +114,76 @@ def test_does_not_evict_when_ram_is_plentiful_and_nothing_is_idle(monkeypatch):
     broker.evict_idle_and_pressured()
 
     assert unloaded == []
+
+
+class TestPerResourceIdleTimeout:
+    """
+    register(idle_timeout_seconds=...) — diagnóstico de lentitud
+    (2026-08-23, ver docs/HISTORY.md): un recurso chico y de uso muy
+    frecuente (el modelo de chat de Ollama) puede pedir un timeout
+    PROPIO, más largo que el general del broker (pensado para
+    pipelines pesados de imagen/audio/STT, que sí conviene liberar
+    rápido). El chequeo de RAM baja nunca respeta este override — sigue
+    aplicando sin excepción a TODOS los recursos.
+    """
+
+    def test_uses_the_broker_general_timeout_when_none_given(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
+        broker = _broker(idle_timeout_seconds=300, monkeypatch=monkeypatch)
+
+        unloaded = []
+        broker.register("x", is_loaded=lambda: True, unload=lambda: unloaded.append(1))
+        broker.mark_used("x")
+
+        clock[0] = 301.0
+        broker.evict_idle_and_pressured()
+
+        assert unloaded == [1]
+
+    def test_does_not_evict_before_its_own_longer_timeout_even_past_the_general_one(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
+        broker = _broker(idle_timeout_seconds=300, monkeypatch=monkeypatch)
+
+        unloaded = []
+        broker.register("ollama.chat_model", is_loaded=lambda: True, unload=lambda: unloaded.append(1), idle_timeout_seconds=1800)
+        broker.mark_used("ollama.chat_model")
+
+        clock[0] = 301.0  # pasó el general (300s) pero no el propio (1800s)
+        broker.evict_idle_and_pressured()
+
+        assert unloaded == []
+
+    def test_evicts_once_its_own_longer_timeout_is_reached(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
+        broker = _broker(idle_timeout_seconds=300, monkeypatch=monkeypatch)
+
+        unloaded = []
+        broker.register("ollama.chat_model", is_loaded=lambda: True, unload=lambda: unloaded.append(1), idle_timeout_seconds=1800)
+        broker.mark_used("ollama.chat_model")
+
+        clock[0] = 1800.0
+        broker.evict_idle_and_pressured()
+
+        assert unloaded == [1]
+
+    def test_a_longer_own_timeout_never_survives_real_ram_pressure(self, monkeypatch):
+        """La protección real contra el freeze de RAM (ver el bug
+        documentado en el docstring del módulo) nunca se debilita por
+        un timeout propio más largo — ante RAM baja, se libera igual."""
+        clock = [0.0]
+        monkeypatch.setattr("kernel.broker.resource_broker.time.monotonic", lambda: clock[0])
+        broker = _broker(idle_timeout_seconds=300, min_available_ram_mb=2048, available_ram_mb=100, monkeypatch=monkeypatch)
+
+        unloaded = []
+        broker.register(
+            "ollama.chat_model", is_loaded=lambda: True, unload=lambda: unloaded.append(1), idle_timeout_seconds=1800
+        )
+        broker.mark_used("ollama.chat_model")
+
+        clock[0] = 1.0  # muy lejos de cualquiera de los dos timeouts
+        broker.evict_idle_and_pressured()
+
+        assert unloaded == [1]
