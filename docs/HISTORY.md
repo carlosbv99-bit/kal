@@ -7511,3 +7511,62 @@ sigue evictando aunque el timeout propio sea más largo; 1 en
 configurado; más un getter nuevo `ResourceBroker.own_idle_timeout_seconds()`
 para poder testear sin exponer `_resources` directo). Suite completa:
 1108 tests, 0 regresiones.
+
+## OpenAPI spec pulido — Fase 0 de la propuesta "kal-in" (2026-08-23)
+
+Contexto: propuesta en discusión de una rama separada ("kal-in") que
+optimizaría kal como capa de seguridad para montarse debajo de OTROS
+frameworks de agentes (LangChain, CrewAI, etc.), sin tocar el kal
+actual. Se evaluó el roadmap completo (OpenAPI spec → adaptador MCP →
+passthrough de LLM cloud del host → docs/ejemplo de integración →
+sidecar eBPF/LSM deferido) y se decidió explícitamente **no** arrancar
+la rama todavía — kal tiene usuarios reales generando señal real ahora
+(esta misma sesión fue una cadena de bugs reales encontrados en uso),
+mientras que kal-in depende de demanda y colaboradores que todavía no
+existen. La única pieza que se ejecutó es la Fase 0, por ser de costo
+casi nulo y no competir por el mismo esfuerzo que kal.
+
+FastAPI ya genera `/openapi.json` y `/docs` gratis, pero sin
+metadata: `FastAPI(title="Kal")` sin `description`/`version`, cero
+`tags`, cero endpoint con `summary=` (varios ni tenían docstring real —
+comentarios `#` sobre la función NO cuentan para FastAPI, solo el
+docstring). El spec era técnicamente válido pero inútil como catálogo
+para alguien evaluando integrar con kal.
+
+**Cambios** (`agent_core/orchestrator.py` + los 13 archivos de
+`agent_core/routers/`):
+- `FastAPI(...)` ganó `description` (explica el kernel de seguridad —
+  permisos, sandbox, auditoría — sin prometer nada de multi-framework
+  que todavía no existe) y `version="0.1.0"` (primer número de
+  versión del proyecto, no existía ninguno antes).
+- `openapi_tags` con 12 grupos (Chat, Permisos, Auditoría,
+  Herramientas, Sistema, Memoria, Tareas, Configuración LLM,
+  Diagnóstico, Auto-modificación, Skills (propuestas), Integración VS
+  Code) — cada router de `agent_core/routers/*.py` ganó el `tags=`
+  correspondiente en su `APIRouter(...)`.
+- `/`, `/style.css`, `/app.js` (sirven el frontend estático, no son
+  operaciones de API) marcados `include_in_schema=False` — dejaban de
+  ser ruido en `/docs`.
+- Tratamiento completo (summary + description + `Field(description=...)`
+  en los modelos Pydantic) para los 4 grupos más relevantes para
+  alguien integrando desde afuera: `/chat` (punto de entrada del
+  agente), `/tools/*` y `/skills`, `/filesystem-access/*` y
+  `/network-access/*`, `/audit/tail`. El resto de los routers (uso
+  interno: self-modification, skill-proposals, integración VS Code,
+  configuración LLM, diagnóstico, memoria, tareas) recibió solo
+  `tags=` — mismo criterio de foco que ya se había aplicado al decidir
+  qué construir primero del roadmap de kal-in.
+- `/admin-token`: la narrativa completa de "BUG REAL ENCONTRADO EN
+  USO" que antes vivía en el docstring (y por lo tanto se filtraba
+  entera al spec público) se movió a un comentario; el spec ahora
+  muestra un `summary`/`description` cortos, mismo patrón que el
+  recorte de prompt de [[technical_slow_response_diagnosis_and_prompt_shrink]].
+
+Verificado en vivo con `TestClient` real (no solo mocks): `/openapi.json`
+devuelve 200, `info.title`/`version`/`description` presentes, 12 tags,
+48 paths totales, las 3 rutas estáticas ausentes del schema, `/chat`
+con su summary/tags nuevos. 108 tests de los routers/permisos/auditoría/
+context service tocados, 0 regresiones; suite completa corriendo.
+
+Nada de esto es una rama nueva ni cambia el comportamiento de kal —
+es metadata sobre una API que ya existía y ya funcionaba igual.

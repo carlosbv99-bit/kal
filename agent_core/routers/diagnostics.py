@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from agent_core.orchestrator import orchestrator, require_admin_token
 from agent_core.self_diagnosis import INVARIANT_CHECKS
 
-router = APIRouter(prefix="/diagnostics")
+router = APIRouter(prefix="/diagnostics", tags=["Diagnóstico"])
 
 
 class SelfDiagnosisRequest(BaseModel):

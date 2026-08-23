@@ -17,13 +17,13 @@ from audit.audit_log import AuditEvent, audit_log
 from kernel.permissions.filesystem_access_manager import FilesystemAccessError, filesystem_access_manager
 from kernel.permissions.network_access_manager import NetworkAccessError, network_access_manager
 
-router = APIRouter()
+router = APIRouter(tags=["Permisos"])
 
 
 class FilesystemAccessApproveRequest(BaseModel):
     # "once" | "session" | "project" | "skill" — ver
     # kernel/permissions/filesystem_access_manager.py::GrantLevel.
-    level: str = "once"
+    level: str = Field(default="once", description="Alcance de la concesión: once | session | project | skill.")
 
 
 class FilesystemAccessOutcomeRequest(BaseModel):
@@ -31,14 +31,14 @@ class FilesystemAccessOutcomeRequest(BaseModel):
     # decide en la vista previa — el Kernel ya auto-permitió la acción
     # por política, esto deja constancia de qué pasó DE VERDAD (auditoría
     # con datos reales, no solo "se permitió").
-    outcome: str  # "written" | "discarded"
+    outcome: str = Field(description="'written' | 'discarded' — qué pasó realmente del lado del cliente.")
     files_written: list[str] = Field(default_factory=list)
 
 
 class NetworkAccessApproveRequest(BaseModel):
     # "once" | "session" | "project" | "skill" — ver
     # kernel/permissions/network_access_manager.py::GrantLevel.
-    level: str = "once"
+    level: str = Field(default="once", description="Alcance de la concesión: once | session | project | skill.")
 
 
 # --- Permission Manager de filesystem ---
@@ -49,7 +49,7 @@ class NetworkAccessApproveRequest(BaseModel):
 # quedan listos para cuando una Skill futura (o una acción
 # delete/rename de VS Code) sí lo necesite.
 
-@router.get("/filesystem-access")
+@router.get("/filesystem-access", summary="Listar accesos a filesystem pendientes de aprobación")
 def list_pending_filesystem_access():
     return [
         {
@@ -60,7 +60,11 @@ def list_pending_filesystem_access():
     ]
 
 
-@router.post("/filesystem-access/{request_id}/approve", dependencies=[Depends(require_admin_token)])
+@router.post(
+    "/filesystem-access/{request_id}/approve",
+    dependencies=[Depends(require_admin_token)],
+    summary="Aprobar un acceso a filesystem pendiente",
+)
 def approve_filesystem_access(request_id: str, req: FilesystemAccessApproveRequest):
     try:
         filesystem_access_manager.approve(request_id, level=req.level)
@@ -69,7 +73,11 @@ def approve_filesystem_access(request_id: str, req: FilesystemAccessApproveReque
     return {"id": request_id, "status": "approved"}
 
 
-@router.post("/filesystem-access/{request_id}/deny", dependencies=[Depends(require_admin_token)])
+@router.post(
+    "/filesystem-access/{request_id}/deny",
+    dependencies=[Depends(require_admin_token)],
+    summary="Denegar un acceso a filesystem pendiente",
+)
 def deny_filesystem_access(request_id: str):
     try:
         filesystem_access_manager.deny(request_id)
@@ -78,7 +86,7 @@ def deny_filesystem_access(request_id: str):
     return {"id": request_id, "status": "denied"}
 
 
-@router.post("/filesystem-access/{request_id}/report-outcome")
+@router.post("/filesystem-access/{request_id}/report-outcome", summary="Reportar qué pasó realmente con un acceso auto-permitido")
 def report_filesystem_access_outcome(request_id: str, req: FilesystemAccessOutcomeRequest):
     """
     Sin token admin a propósito: el Kernel ya auto-permitió esta acción
@@ -99,7 +107,7 @@ def report_filesystem_access_outcome(request_id: str, req: FilesystemAccessOutco
 
 # --- Permission Manager de red ---
 
-@router.get("/network-access")
+@router.get("/network-access", summary="Listar accesos a red pendientes de aprobación")
 def list_pending_network_access():
     return [
         {
@@ -110,7 +118,11 @@ def list_pending_network_access():
     ]
 
 
-@router.post("/network-access/{request_id}/approve", dependencies=[Depends(require_admin_token)])
+@router.post(
+    "/network-access/{request_id}/approve",
+    dependencies=[Depends(require_admin_token)],
+    summary="Aprobar un acceso a red pendiente",
+)
 def approve_network_access(request_id: str, req: NetworkAccessApproveRequest):
     try:
         network_access_manager.approve(request_id, level=req.level)
@@ -119,7 +131,11 @@ def approve_network_access(request_id: str, req: NetworkAccessApproveRequest):
     return {"id": request_id, "status": "approved"}
 
 
-@router.post("/network-access/{request_id}/deny", dependencies=[Depends(require_admin_token)])
+@router.post(
+    "/network-access/{request_id}/deny",
+    dependencies=[Depends(require_admin_token)],
+    summary="Denegar un acceso a red pendiente",
+)
 def deny_network_access(request_id: str):
     try:
         network_access_manager.deny(request_id)

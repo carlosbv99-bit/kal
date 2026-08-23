@@ -13,15 +13,15 @@ from audit.audit_log import audit_log
 from error_handling.circuit_breaker import circuit_breaker
 from utils.config import settings
 
-router = APIRouter()
+router = APIRouter(tags=["Sistema"])
 
 
-@router.get("/health")
+@router.get("/health", summary="Liveness check")
 def health():
     return {"status": "ok"}
 
 
-@router.get("/status")
+@router.get("/status", summary="Estado de las garantías de seguridad del sistema")
 def status():
     """
     Estado de las garantías de seguridad del sistema, usado por la
@@ -40,7 +40,7 @@ def status():
     }
 
 
-@router.get("/models")
+@router.get("/models", summary="Modelos LLM disponibles en el proveedor activo")
 def list_models():
     try:
         return {"models": orchestrator.llm.list_models(), "default": settings.llm.default_model}

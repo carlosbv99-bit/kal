@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from agent_core.orchestrator import require_admin_token
 from agent_core.vscode_integration import VSCodeIntegrationError, get_status as get_vscode_status, install_extension
 
-router = APIRouter(prefix="/integrations/vscode")
+router = APIRouter(prefix="/integrations/vscode", tags=["Integración VS Code"])
 
 
 @router.get("/status")

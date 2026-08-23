@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from agent_core.orchestrator import orchestrator
 
-router = APIRouter(prefix="/memory")
+router = APIRouter(prefix="/memory", tags=["Memoria"])
 
 
 class MemoryVerifyRequest(BaseModel):

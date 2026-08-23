@@ -23,7 +23,7 @@ from agent_core.llm_settings import (
 )
 from agent_core.orchestrator import _reinject_llm_client, require_admin_token
 
-router = APIRouter(prefix="/settings/llm")
+router = APIRouter(prefix="/settings/llm", tags=["Configuración LLM"])
 
 
 class LLMSettingsUpdateRequest(BaseModel):

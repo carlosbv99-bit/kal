@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from agent_core.orchestrator import require_admin_token
 from agent_core.skill_creator import skill_creator_manager
 
-router = APIRouter(prefix="/skill-proposals")
+router = APIRouter(prefix="/skill-proposals", tags=["Skills (propuestas)"])
 
 
 class SkillProposalRejectRequest(BaseModel):

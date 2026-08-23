@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_core.context_service import EditorContextSignals
 from agent_core.conversation_engine import is_trivial_message
@@ -21,7 +21,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Chat"])
 
 
 class EditorContextRequest(BaseModel):
@@ -39,27 +39,30 @@ class EditorContextRequest(BaseModel):
     # agent_core/context_service.py::EditorContextSignals. Ambos vacíos
     # por defecto: compatibilidad con clientes viejos que todavía no
     # los mandan.
-    workspace_tree: list[str] = []
-    open_editors: list[str] = []
+    workspace_tree: list[str] = Field(default_factory=list)
+    open_editors: list[str] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
-    goal: str
-    model: str | None = None
-    use_planner: bool | None = None  # None = usar el default de config.yaml (llm.planning_enabled)
-    session_id: str | None = None  # None = sesión nueva (ver agent_core/sessions.py)
+    goal: str = Field(description="Mensaje del usuario / objetivo para el agente.")
+    model: str | None = Field(default=None, description="Override del modelo LLM a usar. None = el default de config.yaml.")
+    use_planner: bool | None = Field(default=None, description="None = usar el default de config.yaml (llm.planning_enabled).")
+    session_id: str | None = Field(default=None, description="None = crea una sesión nueva (ver agent_core/sessions.py).")
     # Override de la cascada de permisos para esta sesión (ver
     # sdk/permissions.py::PermissionCascade). None = no tocar
     # lo que ya había (default); [] = limpiar cualquier restricción previa;
     # una lista = REEMPLAZA el override completo (no se acumula turno a
     # turno, para que nunca quede algo bloqueado "para siempre" sin que el
     # usuario lo vea venir).
-    deny_permissions: list[str] | None = None
+    deny_permissions: list[str] | None = Field(
+        default=None,
+        description="Override de permisos para esta sesión. None = no tocar; [] = limpiar; lista = reemplaza el override completo.",
+    )
     editor_context: EditorContextRequest | None = None
     # None/"web" = interfaz web (default: genera imagen/audio/video). "vscode" =
     # extensión de VS Code (ver agent_core/context_service.py::_VSCODE_CLIENT_INSTRUCTION) —
     # ahí "página web"/"app"/"script" es un pedido de código, no de imágenes.
-    client: str | None = None
+    client: str | None = Field(default=None, description="None/'web' = interfaz web. 'vscode' = extensión de VS Code.")
 
 
 def _backend_model_for_tool(tool_name: str) -> str | None:
@@ -86,7 +89,15 @@ def _backend_model_for_tool(tool_name: str) -> str | None:
     return mapping.get(tool_name)
 
 
-@router.post("/chat")
+@router.post(
+    "/chat",
+    summary="Punto de entrada del agente",
+    description=(
+        "Procesa un mensaje del usuario: el agente decide qué herramientas llamar (mediadas por "
+        "el kernel de permisos/sandbox/auditoría) y devuelve una respuesta final más los pasos "
+        "intermedios. Ver /chat/progress/{session_id} para seguir un turno en curso."
+    ),
+)
 def chat(req: ChatRequest):
     # Correlation ID (ver utils/correlation.py): un identificador corto
     # que va a aparecer en cada línea de logs/agent.log y en el context
@@ -318,7 +329,7 @@ def chat(req: ChatRequest):
     }
 
 
-@router.get("/chat/progress/{session_id}")
+@router.get("/chat/progress/{session_id}", summary="Progreso en vivo de un turno en curso")
 def chat_progress(session_id: str):
     """
     Recorrido en vivo del turno EN CURSO de esta sesión (ver
@@ -334,7 +345,7 @@ def chat_progress(session_id: str):
     return {"progress": session.progress}
 
 
-@router.get("/chat/sessions/{session_id}/artifacts")
+@router.get("/chat/sessions/{session_id}/artifacts", summary="Historial de artefactos de una sesión")
 def chat_session_artifacts(session_id: str):
     """
     Historial completo de artefactos (generados o subidos) de esta
@@ -364,7 +375,7 @@ def chat_session_artifacts(session_id: str):
 _ALLOWED_UPLOAD_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 
-@router.post("/uploads")
+@router.post("/uploads", summary="Subir una imagen propia")
 async def upload_image(file: UploadFile = File(...), session_id: str | None = Form(None)):
     """
     Sube una imagen propia del usuario (no generada por kal) y la

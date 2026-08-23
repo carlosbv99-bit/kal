@@ -148,7 +148,39 @@ class Orchestrator:
 orchestrator = Orchestrator()
 
 # --- API HTTP ---
-app = FastAPI(title="Kal")
+#
+# Fase 0 de la propuesta "kal-in" (2026-08-23, ver docs/HISTORY.md):
+# antes de construir ningún adaptador para otros frameworks de agentes,
+# dejar el spec OpenAPI que FastAPI ya genera gratis (/openapi.json,
+# /docs) en condiciones de servir como catálogo real — hasta acá tenía
+# título pero sin descripción/versión/tags, y ningún endpoint tenía
+# `summary=` (algunos ni docstring: los comentarios con `#` que parecen
+# documentación no cuentan, FastAPI solo lee el docstring real).
+app = FastAPI(
+    title="Kal",
+    description=(
+        "API HTTP del agente Kal: cada acción (herramienta, escritura de "
+        "archivo, acceso a red) pasa por un kernel de seguridad propio — "
+        "permisos explícitos (/filesystem-access, /network-access), "
+        "sandboxing de herramientas y un log de auditoría con cadena "
+        "verificable (/audit/tail). Punto de entrada del agente: /chat."
+    ),
+    version="0.1.0",
+    openapi_tags=[
+        {"name": "Chat", "description": "Punto de entrada del agente."},
+        {"name": "Permisos", "description": "Aprobación/denegación de acceso a filesystem y red."},
+        {"name": "Auditoría", "description": "Log de auditoría con cadena verificable."},
+        {"name": "Herramientas", "description": "Herramientas y Skills activas/pendientes de aprobación."},
+        {"name": "Sistema", "description": "Salud, estado de las garantías de seguridad, modelos disponibles."},
+        {"name": "Memoria", "description": "Memoria de corto/mediano/largo plazo del agente."},
+        {"name": "Tareas", "description": "Tareas asíncronas de larga duración."},
+        {"name": "Configuración LLM", "description": "Proveedor/modelo del LLM y perfiles cloud."},
+        {"name": "Diagnóstico", "description": "Invariantes de auto-diagnóstico y auto-reparación."},
+        {"name": "Auto-modificación", "description": "Propuestas de cambio de código del propio agente."},
+        {"name": "Skills (propuestas)", "description": "Propuestas de Skills nuevas pendientes de aprobación humana."},
+        {"name": "Integración VS Code", "description": "Uso interno de la extensión de VS Code."},
+    ],
+)
 
 # Segunda capa de defensa (la primera es que docker-compose ya solo
 # publica este puerto en 127.0.0.1, ver docker-compose.yml) para las
@@ -176,22 +208,25 @@ def require_admin_token(x_kal_admin_token: str | None = Header(default=None)) ->
 _LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
 
 
-@app.get("/admin-token")
+# Fricción real encontrada en uso: pedirle a un usuario no-programador
+# que copie el token administrativo de una terminal para poder usar la
+# interfaz web era impracticable. Esto se lo entrega automáticamente al
+# FRONTEND (nunca al agente ni a una skill: no es un tool, no hay forma
+# de que el LLM llegue a esto) — pero SOLO si la conexión viene de
+# loopback (mismo criterio que docker-compose.yml: 127.0.0.1). Quien
+# accede desde la propia máquina donde corre kal ya podría leer
+# data/keys/admin_token directamente del disco — esto no le da a un
+# atacante remoto ninguna capacidad nueva, solo evita que el usuario
+# legítimo tenga que ir a buscarlo a mano. Alguien conectándose desde
+# otra máquina en la LAN (el caso real que este token protege) sigue
+# sin poder obtenerlo por acá.
+@app.get(
+    "/admin-token",
+    tags=["Sistema"],
+    summary="Token administrativo (solo desde loopback)",
+    description="Entrega el token de X-Kal-Admin-Token al frontend — solo responde si la conexión viene de 127.0.0.1/::1.",
+)
 def get_admin_token_endpoint(request: Request):
-    """
-    Fricción real encontrada en uso: pedirle a un usuario no-programador
-    que copie el token administrativo de una terminal para poder usar
-    la interfaz web era impracticable. Esto se lo entrega automáticamente
-    al FRONTEND (nunca al agente ni a una skill: no es un tool, no hay
-    forma de que el LLM llegue a esto) — pero SOLO si la conexión viene
-    de loopback (mismo criterio que docker-compose.yml: 127.0.0.1). Quien
-    accede desde la propia máquina donde corre kal ya podría leer
-    data/keys/admin_token directamente del disco — esto no le da a un
-    atacante remoto ninguna capacidad nueva, solo evita que el usuario
-    legítimo tenga que ir a buscarlo a mano. Alguien conectándose desde
-    otra máquina en la LAN (el caso real que este token protege) sigue
-    sin poder obtenerlo por acá.
-    """
     if request.client is None or request.client.host not in _LOOPBACK_ADDRESSES:
         raise HTTPException(status_code=403, detail="Solo disponible desde la misma máquina donde corre kal.")
     return {"token": _ADMIN_TOKEN}
@@ -279,17 +314,21 @@ for _router_module in (
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
-@app.get("/style.css")
+@app.get("/style.css", include_in_schema=False)
 def serve_style_css():
     return FileResponse(_FRONTEND_DIR / "style.css", media_type="text/css", headers={"Cache-Control": "no-store"})
 
 
-@app.get("/app.js")
+@app.get("/app.js", include_in_schema=False)
 def serve_app_js():
     return FileResponse(_FRONTEND_DIR / "app.js", media_type="application/javascript", headers={"Cache-Control": "no-store"})
 
 
-@app.get("/")
+# Fuera del spec OpenAPI (include_in_schema=False, arriba y abajo):
+# estas 3 rutas sirven el frontend estático, no son operaciones de la
+# API — dejarlas en /docs solo agrega ruido a alguien evaluando
+# integrar con kal vía su API (ver Fase 0 de "kal-in", docs/HISTORY.md).
+@app.get("/", include_in_schema=False)
 def serve_index_html():
     # BUG REAL ENCONTRADO EN USO: la suposición original de que
     # "index.html no cambia tan seguido" dejó de ser cierta — ganó

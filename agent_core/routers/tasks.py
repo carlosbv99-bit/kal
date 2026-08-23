@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from agent_core.orchestrator import orchestrator
 
-router = APIRouter(prefix="/tasks")
+router = APIRouter(prefix="/tasks", tags=["Tareas"])
 
 
 class TaskRequest(BaseModel):

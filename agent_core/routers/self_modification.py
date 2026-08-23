@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from agent_core.orchestrator import orchestrator, require_admin_token
 
-router = APIRouter(prefix="/self-modification")
+router = APIRouter(prefix="/self-modification", tags=["Auto-modificación"])
 
 
 class SelfModProposeRequest(BaseModel):

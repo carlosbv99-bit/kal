@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from audit.audit_log import AuditEvent, audit_log
 
-router = APIRouter()
+router = APIRouter(tags=["Integración VS Code"])
 
 
 class AndroidBuildOutcomeRequest(BaseModel):
