@@ -7293,3 +7293,40 @@ la carpeta.
 TS compila sin errores, 58 tests existentes de la extensión siguen
 pasando (código nuevo dependiente de la API real de `vscode`, no
 testeable en este entorno).
+
+## Bug real: Ollama devolvía 500 al fallar su propio parseo de una llamada a herramienta larga (2026-08-23)
+
+"Crea un proyecto de agenda para android" tiró
+`Ollama devolvió un error HTTP: 500 Server Error`. Investigado con el
+log real de Ollama (`journalctl -u ollama`), no solo el de kal — causa
+confirmada, no asumida:
+
+```
+level=WARN source=qwen35.go:105 msg="qwen3.5 tool call parsing failed"
+  error="XML syntax error on line 6: element <function> closed by </parameter>"
+[GIN] ... | 500 | 48.039857194s | ... POST "/api/chat"
+```
+
+No es un bug de kal: el propio MODELO generó XML mal formado
+describiendo su llamada a `propose_project_files` (12 archivos, una
+generación larga — 8217 tokens, 48s) — el parser interno de Ollama
+para qwen3.5, en vez de devolver el texto crudo como fallback (que el
+`_extract_fallback_tool_call` de kal sabría interpretar), corta la
+request entera con 500, perdiendo toda esa generación. Es un artefacto
+de muestreo probabilístico (no determinístico: la misma llamada
+regenerada puede salir bien), no algo que kal pueda arreglar del lado
+de Ollama.
+
+**Fix**: `OllamaClient._post_with_retry()` (`agent_core/llm/ollama_client.py`)
+ahora reintenta específicamente ante un 500 (con el mismo
+`connection_retries`/`retry_backoff_seconds` ya usado para
+`ConnectionError`) — nunca ante un 4xx, que sí es un error real del
+pedido donde reintentar solo repetiría lo mismo. Se corrigió de paso
+`FakeResponse.raise_for_status()` en `test_ollama_client.py`, que no
+replicaba el `response=self` real de `requests.Response` (necesario
+para poder distinguir 500 de 4xx por código).
+
+4 tests nuevos/reescritos en `test_ollama_client.py` (4xx nunca
+reintenta, 500 reintenta hasta el tope, éxito tras un 500 transitorio
+devuelve la respuesta real). Suite completa: 1091 tests, 0
+regresiones.

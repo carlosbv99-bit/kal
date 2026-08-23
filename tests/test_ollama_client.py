@@ -25,8 +25,12 @@ class FakeResponse:
         return self._json
 
     def raise_for_status(self):
+        # `response=self` replica el comportamiento REAL de
+        # requests.Response.raise_for_status() — necesario para que
+        # _post_with_retry() pueda distinguir un 500 (reintentable) de
+        # un 4xx (no) mirando e.response.status_code.
         if self.status_code >= 400:
-            raise requests.exceptions.HTTPError(f"status {self.status_code}")
+            raise requests.exceptions.HTTPError(f"status {self.status_code}", response=self)
 
 
 class FakeResourceBroker:
@@ -219,14 +223,62 @@ def test_chat_does_not_retry_on_timeout():
     assert len(calls) == 1
 
 
-def test_chat_does_not_retry_on_http_error():
-    def bad_status_post(*a, **kw):
-        return FakeResponse({}, status_code=500)
+def test_chat_does_not_retry_on_a_4xx_http_error():
+    """Un 4xx es un error real del pedido en sí — reintentar solo repetiría
+    el mismo error, nunca se resuelve solo."""
+    calls = []
 
-    client = _client(post_fn=bad_status_post, connection_retries=2)
+    def bad_request_post(*a, **kw):
+        calls.append(1)
+        return FakeResponse({}, status_code=400)
+
+    client = _client(post_fn=bad_request_post, connection_retries=2)
 
     with pytest.raises(OllamaError):
         client.chat([{"role": "user", "content": "hola"}])
+    assert len(calls) == 1
+
+
+def test_chat_retries_on_a_500_http_error():
+    """
+    BUG REAL ENCONTRADO EN USO (2026-08-23): "crea un proyecto de agenda
+    para android" (propose_project_files con 12 archivos) tiró 500 tras
+    48s de generación — confirmado en el propio log de Ollama
+    (journalctl -u ollama): "qwen3.5 tool call parsing failed" / "XML
+    syntax error... element <function> closed by </parameter>". El
+    MODELO generó XML mal formado al describir su propia llamada a
+    herramienta; el parser interno de Ollama corta la request entera
+    con 500 en vez de devolver el texto crudo. Es un artefacto de
+    muestreo (no determinístico) — reintentar tiene sentido, a
+    diferencia de un 4xx real.
+    """
+    calls = []
+
+    def flaky_post(*a, **kw):
+        calls.append(1)
+        return FakeResponse({}, status_code=500)
+
+    client = _client(post_fn=flaky_post, connection_retries=2)
+
+    with pytest.raises(OllamaError):
+        client.chat([{"role": "user", "content": "hola"}])
+    assert len(calls) == 3  # intento original + 2 reintentos, todos 500
+
+
+def test_chat_succeeds_after_a_transient_500_http_error():
+    """El mismo pedido regenerado por el modelo puede salir bien la
+    segunda vez — el reintento debe devolver esa respuesta real, no
+    seguir fallando solo porque el PRIMER intento falló."""
+    responses = [FakeResponse({}, status_code=500), FakeResponse({"message": {"content": "listo"}})]
+
+    def flaky_then_ok_post(*a, **kw):
+        return responses.pop(0)
+
+    client = _client(post_fn=flaky_then_ok_post, connection_retries=2)
+
+    result = client.chat([{"role": "user", "content": "hola"}])
+
+    assert result.content == "listo"
 
 
 def test_list_models_uses_injected_get_fn():

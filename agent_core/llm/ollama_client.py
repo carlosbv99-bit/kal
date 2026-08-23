@@ -195,6 +195,27 @@ class OllamaClient:
                     "subir llm.timeout_seconds en config.yaml si esto pasa seguido)"
                 ) from e
             except requests.exceptions.HTTPError as e:
+                # BUG REAL ENCONTRADO EN USO (2026-08-23): "crea un proyecto de agenda
+                # para android" (propose_project_files con 12 archivos, una llamada a
+                # herramienta larga/compleja) tiró 500 tras 48s y 8217 tokens —
+                # confirmado en el propio log de Ollama (journalctl -u ollama):
+                # "qwen3.5 tool call parsing failed" / "XML syntax error... element
+                # <function> closed by </parameter>". No es un bug de kal: el MODELO
+                # generó XML mal formado al describir su propia llamada a herramienta,
+                # y el parser interno de Ollama, en vez de devolver el texto crudo
+                # como fallback, corta la request entera con 500 — perdiendo toda esa
+                # generación. Es un artefacto de muestreo (no determinístico: la misma
+                # llamada regenerada puede salir bien), así que reintentar tiene
+                # sentido acá — a diferencia de un 4xx (error real del pedido, donde
+                # reintentar solo repite el mismo error).
+                if e.response is not None and e.response.status_code == 500 and attempt < attempts:
+                    logger.warning(
+                        f"Ollama devolvió 500 (intento {attempt}/{attempts}, probable fallo de parseo del "
+                        f"propio modelo al generar una llamada a herramienta), reintentando en "
+                        f"{self.retry_backoff_seconds}s: {e}"
+                    )
+                    self._sleep(self.retry_backoff_seconds)
+                    continue
                 raise OllamaError(f"Ollama devolvió un error HTTP: {e}") from e
 
     def is_model_loaded(self) -> bool:
