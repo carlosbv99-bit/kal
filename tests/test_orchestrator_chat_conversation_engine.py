@@ -76,9 +76,15 @@ def test_low_confidence_responds_immediately_without_running_the_agent(monkeypat
 
 
 def test_high_confidence_runs_the_agent_normally(monkeypatch):
+    # BUG REAL ENCONTRADO EN USO (2026-08-23): "hola" ahora es un
+    # mensaje trivial (ver is_trivial_message() en
+    # conversation_engine.py) que salta classify() por completo — este
+    # test verifica el camino de ALTA confianza vía classify(), así
+    # que necesita un goal que NO esté en esa allowlist para seguir
+    # ejercitando el mock de verdad.
     fake_ce = _FakeConversationEngine(
         ConversationEngineResult(
-            intent="saludo", confidence=0.95, required_capabilities=["conversation"], user_reply="listo"
+            intent="crear_pagina_web", confidence=0.95, required_capabilities=["coding"], user_reply="listo"
         )
     )
     monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
@@ -87,12 +93,13 @@ def test_high_confidence_runs_the_agent_normally(monkeypatch):
         type("_", (), {"run": staticmethod(lambda *a, **kw: _scripted_planning_result())})(),
     )
 
-    response = client.post("/chat", json={"goal": "hola"})
+    response = client.post("/chat", json={"goal": "hacé una página web"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["final_answer"] == "Respuesta real del agente."
     assert body["status"] != "needs_clarification"
+    assert fake_ce.calls == ["hacé una página web"]
     # Sin req.model explícito, el que de verdad resolvió el turno es
     # settings.llm.default_model (misma resolución que OllamaClient.chat()).
     assert body["model_used"] == settings.llm.default_model
@@ -101,7 +108,7 @@ def test_high_confidence_runs_the_agent_normally(monkeypatch):
 def test_model_used_reflects_an_explicit_model_override(monkeypatch):
     fake_ce = _FakeConversationEngine(
         ConversationEngineResult(
-            intent="saludo", confidence=0.95, required_capabilities=["conversation"], user_reply="listo"
+            intent="crear_pagina_web", confidence=0.95, required_capabilities=["coding"], user_reply="listo"
         )
     )
     monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
@@ -110,7 +117,7 @@ def test_model_used_reflects_an_explicit_model_override(monkeypatch):
         type("_", (), {"run": staticmethod(lambda *a, **kw: _scripted_planning_result())})(),
     )
 
-    response = client.post("/chat", json={"goal": "hola", "model": "otro-modelo:1b"})
+    response = client.post("/chat", json={"goal": "hacé una página web", "model": "otro-modelo:1b"})
 
     assert response.json()["model_used"] == "otro-modelo:1b"
 
@@ -118,6 +125,29 @@ def test_model_used_reflects_an_explicit_model_override(monkeypatch):
 def test_conversation_engine_returning_none_falls_through_to_the_agent_normally(monkeypatch):
     # "Fail-open": clasificador deshabilitado o que falló (ver
     # ConversationEngine.classify()) — el flujo sigue como si esto no existiera.
+    # goal NO trivial a propósito, para seguir ejercitando ese camino
+    # específico (ver test aparte para el salteo por is_trivial_message).
+    fake_ce = _FakeConversationEngine(None)
+    monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
+    monkeypatch.setattr(
+        orchestrator_module.orchestrator, "planning_agent",
+        type("_", (), {"run": staticmethod(lambda *a, **kw: _scripted_planning_result())})(),
+    )
+
+    response = client.post("/chat", json={"goal": "hacé una página web"})
+
+    assert response.status_code == 200
+    assert response.json()["final_answer"] == "Respuesta real del agente."
+    assert fake_ce.calls == ["hacé una página web"]
+
+
+def test_a_trivial_message_never_calls_classify(monkeypatch):
+    """
+    BUG REAL ENCONTRADO EN USO (2026-08-23, diagnóstico de lentitud):
+    classify() es una llamada COMPLETA a otro modelo — is_trivial_message()
+    la salta para saludos conocidos como "hola", donde SYSTEM_PROMPT ya
+    le dice al modelo que no llame ninguna herramienta de todos modos.
+    """
     fake_ce = _FakeConversationEngine(None)
     monkeypatch.setattr(orchestrator_module.orchestrator, "conversation_engine", fake_ce)
     monkeypatch.setattr(
@@ -128,4 +158,4 @@ def test_conversation_engine_returning_none_falls_through_to_the_agent_normally(
     response = client.post("/chat", json={"goal": "hola"})
 
     assert response.status_code == 200
-    assert response.json()["final_answer"] == "Respuesta real del agente."
+    assert fake_ce.calls == []

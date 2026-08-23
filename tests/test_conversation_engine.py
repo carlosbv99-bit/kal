@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agent_core.conversation_engine import _RUNTIME_NAME, ConversationEngine
+from agent_core.conversation_engine import _RUNTIME_NAME, ConversationEngine, is_trivial_message
 from agent_core.llm.ollama_client import OllamaClient
 from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
 from agent_core.llm.provider import ProviderError
@@ -175,3 +175,56 @@ class TestDefaultClientGoesThroughTheRuntimeManager:
         engine = ConversationEngine(cfg=cfg)  # no debe lanzar
 
         assert isinstance(engine.llm_client, RuntimeManagedLLMProvider)
+
+
+class TestIsTrivialMessage:
+    """
+    is_trivial_message() — mejora de latencia (2026-08-23, ver
+    docs/HISTORY.md "diagnóstico de lentitud"): salta la llamada
+    completa a classify() para saludos/despedidas/preguntas de
+    identidad conocidas, donde SYSTEM_PROMPT ya le dice al modelo que
+    no llame ninguna herramienta de todos modos.
+    """
+
+    def test_matches_common_greetings_case_insensitive(self):
+        assert is_trivial_message("hola") is True
+        assert is_trivial_message("Hola") is True
+        assert is_trivial_message("HOLA") is True
+
+    def test_matches_with_surrounding_whitespace(self):
+        assert is_trivial_message("  hola  ") is True
+
+    def test_matches_regardless_of_accents(self):
+        # "día"/"dia", "qué"/"que" — no hace falta listar cada variante.
+        assert is_trivial_message("buen dia") is True
+        assert is_trivial_message("buen día") is True
+        assert is_trivial_message("que tal") is True
+        assert is_trivial_message("qué tal") is True
+
+    def test_matches_identity_questions(self):
+        assert is_trivial_message("quien sos") is True
+        assert is_trivial_message("quién sos?") is True
+        assert is_trivial_message("who are you") is True
+
+    def test_matches_farewells_and_thanks(self):
+        assert is_trivial_message("gracias") is True
+        assert is_trivial_message("chau") is True
+        assert is_trivial_message("bye") is True
+
+    def test_does_not_match_a_real_request_even_if_short(self):
+        """Nunca falsos positivos sobre un pedido real — más vale
+        clasificar de más que perder un desbloqueo de capacidad real."""
+        assert is_trivial_message("hazme un logo") is False
+        assert is_trivial_message("crea una imagen") is False
+        assert is_trivial_message("¿cuánto es 2+2?") is False
+
+    def test_does_not_match_a_greeting_as_a_substring_of_a_longer_message(self):
+        """Coincidencia de mensaje ENTERO, nunca de una palabra suelta
+        dentro de un pedido más largo — "hola" en "hola, hazme un logo"
+        no debe saltear la clasificación real."""
+        assert is_trivial_message("hola, hazme un logo") is False
+        assert is_trivial_message("hola! necesito ayuda con algo") is False
+
+    def test_empty_message_is_not_trivial(self):
+        assert is_trivial_message("") is False
+        assert is_trivial_message("   ") is False
