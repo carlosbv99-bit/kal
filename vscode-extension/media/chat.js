@@ -139,6 +139,31 @@
       buttonRow.appendChild(discardBtn);
       div.appendChild(buttonRow);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else if (message.type === "no-workspace-notice") {
+      // Ver src/projectFiles.ts::handleOpenOrCreateFolder — pedido
+      // explícito del usuario (2026-08-23): ofrecer abrir una carpeta
+      // EXISTENTE o crear una NUEVA, como botones reales acá en vez de
+      // un diálogo modal nativo con una sola opción.
+      const div = appendMessage(message.text, "msg-notice");
+      const buttonRow = document.createElement("div");
+      buttonRow.className = "proposal-buttons";
+
+      const openBtn = document.createElement("button");
+      openBtn.textContent = "Abrir carpeta existente";
+      openBtn.addEventListener("click", () => {
+        vscode.postMessage({ type: "open-or-create-folder", decision: "open" });
+      });
+
+      const createBtn = document.createElement("button");
+      createBtn.textContent = "Crear carpeta nueva";
+      createBtn.addEventListener("click", () => {
+        vscode.postMessage({ type: "open-or-create-folder", decision: "create" });
+      });
+
+      buttonRow.appendChild(openBtn);
+      buttonRow.appendChild(createBtn);
+      div.appendChild(buttonRow);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
     } else if (message.type === "android-build-notice") {
       // Ver src/androidBuild.ts: resultado real de compilar/instalar
       // una app Android — a diferencia de project-files-notice, puede

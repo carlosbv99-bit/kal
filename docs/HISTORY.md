@@ -7270,3 +7270,26 @@ ver/monitorear/mostrar el progreso visual. Crear un proyecto es una
 tarea completa en sí misma; compilar y mostrar el progreso puede
 ofrecerse como paso siguiente OPCIONAL en la respuesta, nunca
 ejecutarse sin que lo pidan. 1 test nuevo en `test_client_provider.py`.
+
+## Mejora: "no hay carpeta abierta" ahora ofrece abrir O crear una, con botones reales (2026-08-23)
+
+Pedido del usuario: cuando no hay ninguna carpeta abierta en VS Code
+al proponer archivos, debería avisarse claramente y ofrecer la opción
+de crear una carpeta nueva, no solo abrir una existente. El diseño
+anterior además dependía de un diálogo modal nativo con un solo botón
+("Abrir una carpeta...") — mismo problema de fragilidad ya resuelto
+para la propuesta principal.
+
+**Fix**: nuevo mensaje interactivo `no-workspace-notice` en el chat,
+con dos botones reales — "Abrir carpeta existente" y "Crear carpeta
+nueva" (`vscode-extension/src/projectFiles.ts::handleOpenOrCreateFolder`,
+`media/chat.js`). Crear pide la ubicación (`showOpenDialog`) y el
+nombre (`showInputBox`), crea la carpeta real y la abre. Cualquiera de
+las dos acciones reinicia la ventana de VS Code (API nativa de
+`vscode.openFolder`) — el mensaje deja explícito que la propuesta
+original se pierde y hay que volver a pedírsela a kal una vez abierta
+la carpeta.
+
+TS compila sin errores, 58 tests existentes de la extensión siguen
+pasando (código nuevo dependiente de la API real de `vscode`, no
+testeable en este entorno).

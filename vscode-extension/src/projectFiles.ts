@@ -63,18 +63,20 @@ export async function maybeHandleProjectFiles(
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
+    // BUG REAL ENCONTRADO EN USO (2026-08-23): antes esto ofrecía un
+    // diálogo modal nativo con un solo botón ("Abrir una carpeta...")
+    // — mismo problema de fragilidad ya resuelto para la propuesta
+    // principal (ver docstring del archivo), y solo cubría abrir una
+    // carpeta YA EXISTENTE, nunca crear una nueva. Ahora son botones
+    // reales en el chat, con las dos opciones.
     postToChat({
-      type: "project-files-notice",
-      text: `⚠️ Kal propuso ${artifact.files.length} archivo(s), pero no hay ninguna carpeta abierta en VS Code — no se guardó nada.`,
+      type: "no-workspace-notice",
+      text:
+        `⚠️ Kal propuso ${artifact.files.length} archivo(s), pero no hay ninguna carpeta abierta en VS Code ` +
+        "— no se guardó nada. Abrir o crear una carpeta reinicia la ventana, así que esta propuesta se " +
+        "pierde: una vez que tengas la carpeta abierta, pedíselo a kal de nuevo.",
     });
-    const action = await vscode.window.showWarningMessage(
-      `Kal propone crear ${artifact.files.length} archivo(s), pero no hay ninguna carpeta abierta en VS Code.`,
-      "Abrir una carpeta..."
-    );
-    if (action === "Abrir una carpeta...") {
-      await vscode.commands.executeCommand("vscode.openFolder");
-    }
-    // Nada que reportar: sin workspace, ni siquiera hubo una vista previa real.
+    await client.reportFilesystemAccessOutcome(artifact.request_id, "discarded", []);
     return;
   }
 
@@ -200,4 +202,41 @@ export async function handleProjectFilesDecision(
 
   postToChat({ type: "project-files-notice", text: `✅ Se guardaron ${written.length} archivo(s) en el proyecto: ${written.join(", ")}` });
   await client.reportFilesystemAccessOutcome(decision.requestId, "written", written);
+}
+
+/**
+ * Abre una carpeta existente o crea una nueva y la abre — disparado
+ * desde los botones del mensaje "no-workspace-notice" (ver arriba).
+ * Cualquiera de las dos acciones reinicia la ventana de VS Code (API
+ * nativa de `vscode.openFolder`), así que no hay ninguna propuesta que
+ * retomar después — el usuario tiene que volver a pedírselo a kal una
+ * vez que la carpeta esté abierta.
+ */
+export async function handleOpenOrCreateFolder(decision: "open" | "create"): Promise<void> {
+  if (decision === "open") {
+    await vscode.commands.executeCommand("vscode.openFolder");
+    return;
+  }
+
+  const parentPick = await vscode.window.showOpenDialog({
+    canSelectFolders: true,
+    canSelectFiles: false,
+    canSelectMany: false,
+    title: "Elegí dónde crear la carpeta del proyecto",
+  });
+  if (!parentPick || parentPick.length === 0) {
+    return;
+  }
+
+  const name = await vscode.window.showInputBox({
+    prompt: "Nombre de la carpeta nueva",
+    validateInput: (value) => (value.trim() ? null : "El nombre no puede estar vacío"),
+  });
+  if (!name) {
+    return;
+  }
+
+  const newFolderUri = vscode.Uri.joinPath(parentPick[0], name.trim());
+  await vscode.workspace.fs.createDirectory(newFolderUri);
+  await vscode.commands.executeCommand("vscode.openFolder", newFolderUri);
 }

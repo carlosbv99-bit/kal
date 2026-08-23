@@ -3,7 +3,7 @@ import { maybeHandleAndroidBuild } from "./androidBuild";
 import { buildChatHtml } from "./chatWebviewHtml";
 import { EditorSnapshot } from "./editorContextFormat";
 import { KalClient } from "./kalClient";
-import { handleProjectFilesDecision, maybeHandleProjectFiles } from "./projectFiles";
+import { handleOpenOrCreateFolder, handleProjectFilesDecision, maybeHandleProjectFiles } from "./projectFiles";
 import { resolvePendingWorkspaceFileReads } from "./readWorkspaceFile";
 
 /**
@@ -56,6 +56,8 @@ export class ChatPanel {
           this.pendingEditorContext = undefined;
         } else if (message?.type === "project-files-decision") {
           await handleProjectFilesDecision(message, this.client, (m) => this.post(m));
+        } else if (message?.type === "open-or-create-folder") {
+          await handleOpenOrCreateFolder(message.decision);
         } else if (message?.type === "new-session") {
           this.handleNewSession();
         }
