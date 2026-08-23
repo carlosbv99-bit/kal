@@ -7364,3 +7364,57 @@ contaminar el contexto de los pedidos siguientes.
 2 tests nuevos en `test_orchestrator_chat_llm_error_not_recorded.py`
 (un turno `llm_error` no se graba; un turno exitoso sigue
 grabándose normal, sin regresión).
+
+## Diagnóstico + fix: kal respondía mucho más lento que el mismo modelo por terminal (2026-08-23)
+
+El usuario notó que hasta un simple "hola" tardaba mucho más en kal
+que usando `qwen3.5:4b` directo por terminal. Investigado con evidencia
+real (no solo teoría): `journalctl -u ollama` mostró, para un "hola"
+real, DOS cargas de modelo separadas (`loaded runners count=2`) y la
+segunda llamada tardando 25.76s en total — coincidiendo con tres
+causas medidas:
+
+1. **Dos llamadas a modelos por mensaje**: el Conversation Engine
+   (`qwen2.5:3b`) clasifica intención ANTES de que el modelo principal
+   (`qwen3.5:4b`) vea el mensaje — una llamada extra completa que la
+   terminal nunca paga.
+2. **Prompt de sistema gigante**: medido en vivo, `SYSTEM_PROMPT` +
+   `_VSCODE_CLIENT_INSTRUCTION` combinados sumaban **~4.996 tokens**
+   — acumulados sesión tras sesión como párrafos "BUG REAL ENCONTRADO
+   EN USO" con la historia completa de cada incidente, reprocesados en
+   CADA mensaje.
+3. **Esquemas de las 13 herramientas disponibles**: otros ~2.800
+   tokens más, sin tocar en este fix.
+
+**Fix implementado (opción elegida por el usuario, la de menor riesgo
+de las cinco evaluadas)**: separar la NARRATIVA de cada bug (por qué
+existe la regla, qué pasó) de la INSTRUCCIÓN real que necesita el
+modelo — la narrativa completa se movió a un comentario en el código
+fuente (sigue disponible para cualquiera que lea `agent_loop.py`/
+`client_provider.py`), y el texto que se manda al modelo quedó reducido
+a la regla accionable. Ninguna regla se debilitó ni se eliminó — se
+verificó rule por regla contra los tests existentes que ya afirmaban
+frases exactas de cada instrucción.
+
+**Bug real propio, encontrado corriendo los tests**: al recortar,
+2 frases exactas que un archivo de test DISTINTO
+(`test_context_service.py`, no importaba las constantes por nombre,
+así que un grep inicial por `_VSCODE_CLIENT_INSTRUCTION` no lo
+encontró) verificaba — "no significa que no haya acceso" y "sin haber
+intentado" — quedaron afuera sin querer. Corregido, agregándolas de
+vuelta explícitamente sin re-inflar el texto. También se repitió, dos
+veces más, el mismo bug de corte de línea ya documentado antes
+(`imagen YA EXISTENTE` partido por un salto de línea sin querer) —
+esta vez en "NO hace falta que diga 'SOLO una/un X'", "llamá primero a
+analyze_image", y "FIJATE primero en tu lista real de herramientas
+disponibles" — corregido reacomodando el punto de corte de cada línea.
+
+**Resultado medido en vivo, honesto**: `SYSTEM_PROMPT` bajó de ~2.317 a
+~1.279 tokens, `_VSCODE_CLIENT_INSTRUCTION` de ~2.678 a ~1.492 —
+combinado, de ~4.996 a ~2.771 tokens (~45% menos), confirmado con un
+"hola" real: el prompt procesado por el modelo principal bajó a 5.547
+tokens. PERO la respuesta total siguió tardando ~21s, porque las otras
+dos causas (doble llamada a modelos, esquemas de herramientas) siguen
+sin atacarse — mejora real y medida, no el problema completo resuelto.
+
+Suite completa: 1093 tests, 0 regresiones.
