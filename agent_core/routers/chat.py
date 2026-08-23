@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from agent_core.context_service import EditorContextSignals
+from agent_core.conversation_engine import is_trivial_message
 from agent_core.llm.provider import ProviderError
 from agent_core.orchestrator import _artifact_url, orchestrator
 from sdk.artifacts import Artifact
@@ -132,7 +133,16 @@ def chat(req: ChatRequest):
     # planner/agent_loop completo. Si falla por cualquier motivo o la
     # confianza alcanza, el flujo sigue exactamente como antes de este
     # cambio.
-    ce_result = orchestrator.conversation_engine.classify(req.goal)
+    #
+    # BUG REAL ENCONTRADO EN USO (2026-08-23, diagnóstico de lentitud):
+    # classify() es una llamada COMPLETA a otro modelo, incluso para
+    # "hola" — is_trivial_message() salta esa llamada para el puñado
+    # de mensajes donde SYSTEM_PROMPT ya dice "no llames ninguna
+    # herramienta" de todos modos (ver conversation_engine.py para la
+    # allowlist completa y por qué es deliberadamente angosta).
+    # ce_result=None es el mismo camino fail-open que ya existía para
+    # cuando el Conversation Engine está deshabilitado o falla.
+    ce_result = None if is_trivial_message(req.goal) else orchestrator.conversation_engine.classify(req.goal)
     if ce_result is not None:
         orchestrator.sessions.append_progress(session, {
             "stage": "conversation_engine", "model": settings.conversation_engine.model,

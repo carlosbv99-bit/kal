@@ -7418,3 +7418,51 @@ dos causas (doble llamada a modelos, esquemas de herramientas) siguen
 sin atacarse — mejora real y medida, no el problema completo resuelto.
 
 Suite completa: 1093 tests, 0 regresiones.
+
+## Segunda mejora de latencia: saltear el Conversation Engine para saludos conocidos (2026-08-23)
+
+Segunda de las cinco opciones evaluadas para la lentitud diagnosticada
+arriba: el Conversation Engine (`qwen2.5:3b`) clasifica intención
+ANTES del modelo principal en CADA mensaje, incluido "hola" — una
+llamada completa a otro modelo que la terminal nunca paga.
+
+**Fix**: nueva `is_trivial_message()` en `agent_core/conversation_engine.py`
+— allowlist deliberadamente angosta y de coincidencia EXACTA de
+mensaje entero (nunca substring dentro de un pedido más largo) contra
+saludos/despedidas/preguntas de identidad conocidas ("hola", "gracias",
+"quién sos", etc., normalizado sin tildes/mayúsculas). Para esos
+mensajes puntuales, `SYSTEM_PROMPT` ya le dice al modelo "no llames
+ninguna herramienta" de todos modos — clasificar intención/capacidades
+no aporta nada ahí. `agent_core/routers/chat.py` salta `classify()`
+por completo cuando `is_trivial_message(req.goal)` es verdadero,
+usando el mismo camino fail-open (`ce_result=None`) que ya existía
+para cuando el Conversation Engine está deshabilitado o falla.
+
+Deliberadamente conservador: ante cualquier duda (pedido corto pero
+real, como "hazme un logo"), se sigue llamando a `classify()` como
+siempre — el riesgo de saltear la clasificación por error (perder un
+desbloqueo de capacidad real) pesa más que el ahorro.
+
+**Bug propio encontrado corriendo los tests**: dos tests existentes en
+`test_orchestrator_chat_conversation_engine.py` usaban `goal="hola"`
+para ejercitar el camino de "alta confianza" de `classify()` — con
+este fix, "hola" ya no llega a `classify()` en absoluto, así que esos
+tests seguían pasando pero por una razón DISTINTA a la que decían
+probar (silenciosamente dejaron de ejercitar el mock). Corregidos para
+usar un goal no trivial ("hacé una página web") y afirmar
+`fake_ce.calls` explícitamente, más un test nuevo dedicado que sí
+verifica el salteo real para "hola".
+
+**Resultado medido en vivo, con las dos mejoras (prompt recortado +
+esta) combinadas**: primer pedido tras un rato de inactividad (modelo
+frío) ~21s — confirmado en `journalctl -u ollama` que ahora es
+`loaded runners count=1` (antes 2). Segundo pedido inmediato después
+(modelo YA caliente): **4.26 segundos** — bajando de los ~26s
+originales. Lo que queda de lentitud en el primer pedido de una
+sesión es la carga en frío del modelo (tema aparte, opción 5 del menú
+original: mantener el modelo caliente más tiempo).
+
+20 tests nuevos para `is_trivial_message()`, 1 test nuevo de
+integración en `chat.py` (confirma que `classify()` nunca se llama
+para "hola"), 2 tests existentes corregidos. Suite completa: 1102
+tests, 0 regresiones.

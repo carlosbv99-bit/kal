@@ -31,6 +31,7 @@ pedido real.
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import dataclass
 
 from agent_core.llm.ollama_client import OllamaClient
@@ -99,6 +100,43 @@ Usuario: "Hacé una página web para una veterinaria"
 Usuario: "Convertí este texto en audio"
 {"intent": "texto_a_audio", "confidence": 0.9, "required_capabilities": ["text-to-speech"], "user_reply": "Listo, genero el audio ahora."}
 """
+
+
+# Mejora de latencia (2026-08-23, ver docs/HISTORY.md "diagnóstico de
+# lentitud"): classify() es una llamada COMPLETA a un modelo aparte
+# (qwen2.5:3b) que corre ANTES del modelo principal, incluso para un
+# simple "hola" — confirmado en vivo (journalctl -u ollama) que esto
+# duplica el número de cargas de modelo por mensaje. Para el puñado de
+# mensajes donde SYSTEM_PROMPT (agent_core/llm/agent_loop.py) ya le
+# dice al modelo "responder directo, sin llamar a NINGUNA herramienta"
+# (saludos, despedidas, preguntas de identidad), clasificar intención/
+# capacidades no aporta nada — no hay ninguna capacidad que desbloquear
+# ni ninguna ambigüedad que aclarar. Allowlist deliberadamente angosta
+# y de coincidencia EXACTA (nunca substring dentro de un mensaje más
+# largo) — el riesgo de saltear classify() por error en un pedido real
+# es peor que el ahorro, así que ante cualquier duda se sigue llamando
+# al Conversation Engine como siempre.
+_TRIVIAL_MESSAGES = frozenset({
+    "hola", "hola!", "hola.", "buenas", "buen dia", "buenos dias", "buenas tardes",
+    "buenas noches", "hey", "hi", "hello",
+    "como estas", "como estas?", "que tal", "que tal?", "todo bien?",
+    "quien sos", "quien sos?", "quien eres", "quien eres?", "who are you",
+    "gracias", "muchas gracias", "gracias!", "thank you", "thanks",
+    "chau", "chau!", "adios", "bye", "nos vemos", "hasta luego",
+})
+
+
+def is_trivial_message(goal: str) -> bool:
+    """
+    True si `goal` (normalizado: minúsculas, sin tildes, sin espacios
+    de más) coincide EXACTO con un saludo/despedida/pregunta de
+    identidad conocida — ver el comentario de _TRIVIAL_MESSAGES arriba
+    para la justificación completa. Coincidencia de mensaje ENTERO,
+    nunca de una palabra suelta dentro de un pedido más largo.
+    """
+    normalized = unicodedata.normalize("NFD", goal.strip().lower())
+    normalized = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+    return normalized in _TRIVIAL_MESSAGES
 
 
 @dataclass
