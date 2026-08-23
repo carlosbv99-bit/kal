@@ -7330,3 +7330,37 @@ para poder distinguir 500 de 4xx por código).
 reintenta, 500 reintenta hasta el tope, éxito tras un 500 transitorio
 devuelve la respuesta real). Suite completa: 1091 tests, 0
 regresiones.
+
+## Bug real: un error 500 quedaba grabado en el historial como si fuera una respuesta real (2026-08-23)
+
+Tras el 500 de Ollama de la entrada anterior, el usuario reintentó el
+mismo pedido — volvió a dar 500 — y al tercer intento el modelo
+respondió con algo raro: "Entendido. Usaré `propose_project_files`
+correctamente... Voy a crear los archivos... paso a paso" — nunca
+llamó la herramienta de una, solo narró un plan en prosa.
+
+**Causa real, confirmada rastreando el código, no asumida**:
+`AgentLoop.run()` atrapa `ProviderError` POR PASO y devuelve un
+`AgentRunResult` normal (`status="llm_error"`, `final_answer` = el
+TEXTO CRUDO del error HTTP) — nunca propaga como excepción.
+`agent_core/routers/chat.py` grababa esto igual con
+`record_turn(session, req.goal, result.final_answer)`, sin mirar
+`status` — el error técnico quedaba persistido en `session.turns`
+exactamente como si fuera una respuesta real de kal.
+`context_service.py::_windowed_history()` convierte CADA turno en
+`{"role": "assistant", "content": turn.final_answer}` para el
+historial del PRÓXIMO pedido — así que el modelo, en el siguiente
+intento de la MISMA sesión, veía su propio "mensaje anterior" siendo
+un error HTTP crudo, y reaccionaba con ese tono raro de "voy a hacerlo
+bien esta vez" en vez de simplemente reintentar la herramienta.
+
+**Fix**: `chat.py` ahora solo llama `record_turn(...)` cuando
+`result.status != "llm_error"`. Confirmado que `session.turns` NO se
+usa para nada más que construir ese historial (`grep`), así que saltear
+el registro de un turno de error no pierde nada que el usuario
+necesite — ya ve el error en esa misma respuesta, solo deja de
+contaminar el contexto de los pedidos siguientes.
+
+2 tests nuevos en `test_orchestrator_chat_llm_error_not_recorded.py`
+(un turno `llm_error` no se graba; un turno exitoso sigue
+grabándose normal, sin regresión).

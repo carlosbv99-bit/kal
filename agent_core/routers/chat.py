@@ -185,7 +185,23 @@ def chat(req: ChatRequest):
     except ProviderError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    orchestrator.sessions.record_turn(session, req.goal, result.final_answer)
+    # BUG REAL ENCONTRADO EN USO (2026-08-23): un 500 real de Ollama
+    # (ver agent_core/llm/agent_loop.py — ProviderError atrapado por
+    # paso, nunca propaga como excepción) deja result.status=="llm_error"
+    # y result.final_answer como el TEXTO CRUDO del error HTTP. Antes,
+    # eso se grababa igual como si fuera una respuesta real — el
+    # próximo pedido en la MISMA sesión mandaba ese error de vuelta al
+    # modelo como su propio mensaje "assistant" anterior (ver
+    # context_service.py::_windowed_history). Confirmado en vivo: tras
+    # dos 500 seguidos, el pedido siguiente respondió con un mensaje
+    # raro tipo "Entendido, usaré propose_project_files..." en vez de
+    # llamar la herramienta de una — el modelo reaccionaba a ver su
+    # "propia" respuesta anterior siendo un error técnico. session.turns
+    # solo se usa para construir ESE historial (ver grep), nada más
+    # depende de él — no grabar un turno de error no pierde nada que el
+    # usuario necesite (ya ve el error en ESTA respuesta).
+    if result.status != "llm_error":
+        orchestrator.sessions.record_turn(session, req.goal, result.final_answer)
     all_steps = [s for step_result in result.step_results for s in step_result.result.steps]
     for step in all_steps:
         if step.artifact is not None and step.artifact.modality != "text":
