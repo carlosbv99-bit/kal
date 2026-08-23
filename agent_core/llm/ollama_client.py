@@ -142,6 +142,18 @@ class OllamaClient:
             # soportan (confirmado con qwen2.5:3b) — seguro de mandar
             # siempre, no solo para modelos "thinking" conocidos.
             "think": False,
+            # Diagnóstico de lentitud (2026-08-23): sin esto, Ollama usa
+            # su propio default de systemd (OLLAMA_KEEP_ALIVE, 5m acá) —
+            # un segundo temporizador independiente del resource_broker
+            # de kal, que puede descargar el modelo ANTES de que el
+            # timeout propio (más largo, ver ResourceBrokerConfig.
+            # ollama_idle_timeout_seconds) llegue a aplicarse. Se manda
+            # el doble de ese valor acá a propósito: el resource_broker
+            # de kal queda como la autoridad real de cuándo descargar
+            # (incluida la evicción inmediata ante RAM baja, ver
+            # kernel/broker/resource_broker.py), esto es solo una red de
+            # seguridad generosa para que Ollama nunca actúe primero.
+            "keep_alive": settings.resource_broker.ollama_idle_timeout_seconds * 2,
         }
         if tools:
             payload["tools"] = tools

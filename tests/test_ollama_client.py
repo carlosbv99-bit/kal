@@ -14,6 +14,7 @@ import requests
 
 from agent_core.llm.ollama_client import OllamaClient, OllamaError
 from agent_core.llm.provider import ProviderError
+from utils.config import settings
 
 
 class FakeResponse:
@@ -348,6 +349,27 @@ def test_chat_always_disables_ollama_thinking_mode():
     client.chat([{"role": "user", "content": "hola"}])
 
     assert payloads[0]["think"] is False
+
+
+def test_chat_sends_a_keep_alive_longer_than_the_resource_broker_own_timeout():
+    """
+    Diagnóstico de lentitud (2026-08-23): sin esto, Ollama usa su propio
+    default de systemd (5m) — un segundo temporizador independiente del
+    resource_broker de kal que puede descargar el modelo ANTES de que
+    el timeout propio (más largo) del broker llegue a aplicarse. Se
+    manda el doble a propósito, para que el resource_broker de kal
+    quede como la autoridad real (ver kernel/broker/resource_broker.py).
+    """
+    payloads = []
+
+    def post_fn(url, json=None, **kw):
+        payloads.append(json)
+        return FakeResponse({"message": {"content": "hola"}})
+
+    client = _client(post_fn=post_fn)
+    client.chat([{"role": "user", "content": "hola"}])
+
+    assert payloads[0]["keep_alive"] == settings.resource_broker.ollama_idle_timeout_seconds * 2
 
 
 def test_chat_with_images_does_not_mutate_caller_messages():

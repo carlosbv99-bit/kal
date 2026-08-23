@@ -7466,3 +7466,48 @@ original: mantener el modelo caliente más tiempo).
 integración en `chat.py` (confirma que `classify()` nunca se llama
 para "hola"), 2 tests existentes corregidos. Suite completa: 1102
 tests, 0 regresiones.
+
+## Tercera mejora de latencia: mantener el modelo de chat "caliente" más tiempo (2026-08-23)
+
+Última de las tres opciones que el usuario pidió implementar de
+seguido para la lentitud diagnosticada. Dos mecanismos SEPARADOS
+descargaban el modelo de chat a los 5 minutos de inactividad: el
+`OLLAMA_KEEP_ALIVE` propio de Ollama (systemd) y el
+`resource_broker.idle_timeout_seconds` de kal (300s, el mismo usado
+para los pipelines PESADOS de imagen/audio/STT).
+
+**Fix, con cuidado de no debilitar la protección real contra el
+freeze de RAM** (ver "Freeze completo del sistema al generar imagen"
+más arriba en este mismo archivo):
+
+- `kernel/broker/resource_broker.py::ResourceBroker.register()` gana
+  un `idle_timeout_seconds` PROPIO opcional por recurso — el general
+  del broker sigue aplicando a menos que un recurso pida el suyo. El
+  chequeo de RAM baja (`evict_idle_and_pressured`) sigue siendo
+  GLOBAL e INCONDICIONAL para todos los recursos, sin excepción —
+  nunca se debilita, es lo que evitó el freeze original.
+- Nueva `ResourceBrokerConfig.ollama_idle_timeout_seconds: int = 1800`
+  (30 min) — el modelo de chat es chico (~3-4GB) y de uso mucho más
+  frecuente que los pipelines pesados, así que conviene mantenerlo
+  cargado más tiempo antes de pagar el costo real de recargarlo.
+- `agent_core/orchestrator.py::build_llm_client()` registra
+  `"ollama.chat_model"` con ese timeout propio.
+- `OllamaClient.chat()` ahora manda `"keep_alive"` en el payload
+  (`ollama_idle_timeout_seconds * 2` = 1 hora) — sin esto, el
+  `OLLAMA_KEEP_ALIVE` de systemd (5 min) podía descargar el modelo
+  ANTES de que el timeout propio del broker de kal llegara a aplicar.
+  El doble a propósito: el resource_broker de kal queda como la
+  autoridad real de cuándo descargar, esto es solo una red de
+  seguridad generosa para que Ollama nunca actúe primero.
+
+**Verificado en vivo**: tras un pedido real, `ollama ps` mostró
+`UNTIL 59 minutes from now` (antes: 5 minutos).
+
+8 tests nuevos (4 en `test_resource_broker.py` para el timeout por
+recurso, incluido uno que confirma explícitamente que la RAM baja
+sigue evictando aunque el timeout propio sea más largo; 1 en
+`test_ollama_client.py` para el `keep_alive`; 1 en
+`test_llm_client_factory.py` para el registro con el timeout
+configurado; más un getter nuevo `ResourceBroker.own_idle_timeout_seconds()`
+para poder testear sin exponer `_resources` directo). Suite completa:
+1108 tests, 0 regresiones.

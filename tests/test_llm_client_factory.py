@@ -86,6 +86,22 @@ def test_ollama_provider_registers_the_client_with_the_resource_broker(monkeypat
     assert fresh_broker.is_registered("ollama.chat_model")
 
 
+def test_ollama_provider_registers_with_a_longer_own_idle_timeout(monkeypatch):
+    """
+    Diagnóstico de lentitud (2026-08-23): el modelo de chat es chico y
+    de uso muy frecuente, a diferencia de los pipelines pesados de
+    imagen/audio/STT — pide un timeout PROPIO, más largo que el general
+    del broker (ver ResourceBrokerConfig.ollama_idle_timeout_seconds).
+    """
+    fresh_broker = ResourceBroker(idle_timeout_seconds=300, min_available_ram_mb=2048)
+    monkeypatch.setattr(orchestrator_module, "resource_broker", fresh_broker)
+    monkeypatch.setattr(settings.llm, "provider", "ollama")
+
+    build_llm_client()
+
+    assert fresh_broker.own_idle_timeout_seconds("ollama.chat_model") == settings.resource_broker.ollama_idle_timeout_seconds
+
+
 def test_openai_compatible_provider_never_registers_with_the_resource_broker(monkeypatch):
     """Un proveedor en la nube no usa RAM local — nada que liberar."""
     fresh_broker = ResourceBroker(idle_timeout_seconds=300, min_available_ram_mb=2048)

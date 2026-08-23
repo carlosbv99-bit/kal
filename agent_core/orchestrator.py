@@ -108,7 +108,17 @@ def build_llm_client() -> LLMProvider:
         # pipeline local pesado intentara cargar. Registrarlo acá cierra
         # ese hueco: kernel/services/services.py ahora llama
         # evict_idle_and_pressured() (que incluye esto) ANTES de cargar.
-        resource_broker.register("ollama.chat_model", is_loaded=client.is_model_loaded, unload=client.unload_model)
+        # Diagnóstico de lentitud (2026-08-23): timeout PROPIO, más largo
+        # que el general — el modelo de chat es chico y de uso muy
+        # frecuente, a diferencia de los pipelines de imagen/audio/STT
+        # (ver ResourceBrokerConfig.ollama_idle_timeout_seconds). El
+        # chequeo de RAM baja de arriba sigue aplicando sin excepción.
+        resource_broker.register(
+            "ollama.chat_model",
+            is_loaded=client.is_model_loaded,
+            unload=client.unload_model,
+            idle_timeout_seconds=settings.resource_broker.ollama_idle_timeout_seconds,
+        )
         runtime = OllamaRuntime(client, max_parallel=settings.runtimes.ollama.max_parallel)
     runtime_manager.register(_ACTIVE_RUNTIME_NAME, runtime)
     return RuntimeManagedLLMProvider(runtime_manager, _ACTIVE_RUNTIME_NAME)
