@@ -15,15 +15,37 @@ Flujo de propose():
      CORE_PATHS_HARDCODED — deliberadamente independiente de
      config.yaml para que no se pueda desactivar alterando la config.
   2. Validación estática del código propuesto (mismo denylist AST que
-     usa el sandbox para código no confiable).
+     usa el sandbox para código no confiable) — primera línea de
+     defensa, barata pero NO suficiente por sí sola (ver
+     code_analysis/denylist.py).
   3. Copia completa del proyecto a un directorio temporal (dos copias:
      "baseline" sin el cambio, "candidate" con el cambio aplicado).
-  4. Se corre el test suite completo en AMBAS copias.
+  4. Se corre el test suite completo en AMBAS copias, DENTRO del
+     sandbox de Docker (ver _run_tests()) — nunca en el proceso host.
   5. Si el candidato tiene más fallos/errores o menos tests pasando que
      el baseline: regresión detectada, propuesta rechazada.
   6. Sin regresión: la propuesta queda "pending_human_approval". Nunca
      se aplica sola, ni siquiera para módulos periféricos — escribir a
      disco es la acción de mayor alcance de todo el proyecto.
+
+BUG REAL ENCONTRADO EN REVISIÓN (2026-08-24, auditoría de un
+colaborador — verificado contra el código real antes de aceptarlo, ver
+docs/HISTORY.md): _run_tests() corría `pytest` como subproceso DIRECTO
+en el proceso host, sin sandbox. pytest IMPORTA (ejecuta código de
+nivel de módulo) todo lo que colecciona — con ~1100 tests cubriendo
+casi todo el proyecto, es muy probable que algún test importe
+transitivamente el archivo propuesto. La única barrera antes de esto
+era el denylist AST (paso 2), que el propio code_analysis/denylist.py
+documenta como insuficiente por sí solo ("el aislamiento real lo da el
+sandbox") — pero ese aislamiento real nunca se aplicaba acá. Corregido:
+_run_tests() ahora ejecuta pytest DENTRO de un contenedor Docker
+efímero (mismo mecanismo que kernel/lifecycle/docker_runner.py usa
+para cualquier otro código no confiable), vía
+SandboxExecutor.execute_trusted() — el script que invoca a pytest es
+código de PRIMERA PARTE y confiable (nunca cambia), lo que es no
+confiable es el ÁRBOL DE ARCHIVOS que ese pytest recorre, montado
+read-write en /project pero sin red (network_mode="none") y sin acceso
+al socket de Docker del host.
 
 apply() escribe el cambio al archivo real, guardando un backup
 timestamped para poder revertir con rollback() si algo se detecta mal
@@ -35,8 +57,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -45,6 +65,8 @@ from pathlib import Path
 
 from audit.audit_log import AuditEvent, audit_log
 from code_analysis.ast_validator import validate_code
+from kernel.lifecycle.executor import SandboxExecutor
+from kernel.lifecycle.selfmod_test_image_builder import SelfModTestImageBuilder
 from utils.config import settings
 from utils.logger import get_logger
 
@@ -69,6 +91,10 @@ _COPY_IGNORE = shutil.ignore_patterns(
 
 class PathTraversalError(Exception):
     """target_path intenta escapar del directorio del proyecto."""
+
+
+class SelfModTestRunError(Exception):
+    """El test suite no pudo correr dentro del sandbox (fallo de infraestructura, no de tests)."""
 
 
 @dataclass
@@ -101,9 +127,22 @@ class SelfModProposal:
 
 
 class SelfModificationManager:
-    def __init__(self, project_root: Path | None = None):
+    def __init__(
+        self,
+        project_root: Path | None = None,
+        executor: SandboxExecutor | None = None,
+        image_builder: SelfModTestImageBuilder | None = None,
+    ):
         self.project_root = (project_root or PROJECT_ROOT).resolve()
         self._proposals: dict[str, SelfModProposal] = {}
+        # Inyectables para tests (evita requerir un daemon de Docker
+        # real solo para probar la lógica de propose()/apply()/
+        # rollback() — ver tests/test_self_modification.py). En
+        # producción, ambos se construyen recién al primer uso real
+        # (_run_tests), no acá, para no exigir Docker con solo
+        # importar este módulo.
+        self._executor = executor
+        self._image_builder = image_builder
 
     def is_core_path(self, target_path: str) -> bool:
         return target_path.startswith(CORE_PATHS_HARDCODED) or settings.self_modification.is_core_path(target_path)
@@ -403,15 +442,71 @@ class SelfModificationManager:
         shutil.copytree(self.project_root, dest, ignore=_COPY_IGNORE)
 
     def _run_tests(self, root: Path, test_args: list[str]) -> TestRunResult:
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", *test_args],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=600,
+        """
+        Corre `python -m pytest test_args` DENTRO de un contenedor
+        Docker efímero (ver docstring del módulo para el porqué) — la
+        copia completa del proyecto en `root` (que incluye el código
+        PROPUESTO, potencialmente malicioso o alucinado) se monta
+        read-write en /project, sin red, sin socket de Docker, con los
+        mismos límites de recursos que cualquier otra ejecución no
+        confiable, pero ampliados (ver docker_runner.py) porque acá
+        corre el test suite completo, no un script chico.
+
+        `test_args` nunca llega desde afuera del proceso (ver
+        agent_core/routers/self_modification.py: SelfModProposeRequest
+        no tiene ese campo) — siempre es el default interno
+        `["-q", "--tb=short"]`, así que insertarlo tal cual en el
+        script generado es seguro.
+        """
+        if self._executor is None:
+            self._executor = SandboxExecutor()
+        if self._image_builder is None:
+            self._image_builder = SelfModTestImageBuilder()
+
+        image = self._image_builder.build_or_get_image()
+        script = self._build_test_runner_script(test_args)
+        result = self._executor.execute_trusted(
+            source_code=script,
+            extra_mounts={str(root): "/project"},
+            image=image,
+            network_mode="none",
+            timeout_seconds=600,
+            memory_limit_mb=2048,
+            cpu_limit=2.0,
+            pids_limit=256,
+            context={"self_modification_test_run": True},
         )
+        if result.status != "success":
+            # Falla de INFRAESTRUCTURA (Docker no responde, timeout del
+            # contenedor, límite de recursos excedido) — nunca "0 tests
+            # corridos, 0 fallaron" en silencio. Sin esto, propose()
+            # interpretaría un sandbox roto como "sin regresión" (0==0
+            # en ambas copias) y dejaría pasar la propuesta a
+            # pending_human_approval sin haber corrido un solo test de
+            # verdad.
+            raise SelfModTestRunError(
+                f"El test suite no pudo correr dentro del sandbox (status={result.status}): {result.stderr}"
+            )
         passed, failed, errors = self._parse_pytest_summary(result.stdout)
-        return TestRunResult(passed=passed, failed=failed, errors=errors, raw_output=result.stdout, exit_code=result.returncode)
+        return TestRunResult(
+            passed=passed, failed=failed, errors=errors,
+            raw_output=result.stdout + result.stderr, exit_code=result.exit_code or 0,
+        )
+
+    @staticmethod
+    def _build_test_runner_script(test_args: list[str]) -> str:
+        return (
+            "import subprocess\n"
+            "import sys\n"
+            "\n"
+            "result = subprocess.run(\n"
+            f"    [sys.executable, '-m', 'pytest', *{test_args!r}],\n"
+            "    cwd='/project', capture_output=True, text=True,\n"
+            ")\n"
+            "sys.stdout.write(result.stdout)\n"
+            "sys.stderr.write(result.stderr)\n"
+            "sys.exit(result.returncode)\n"
+        )
 
     @staticmethod
     def _parse_pytest_summary(output: str) -> tuple[int, int, int]:

@@ -8,17 +8,63 @@ DOS veces (baseline + candidato), lo cual sería lentísimo y frágil.
 Aquí se prueba la LÓGICA del pipeline (bloqueo de núcleo, detección de
 regresión, aplicación, rollback), no el contenido real de kal/.
 
-Nota: los tests que llegan a _run_tests() invocan un pytest real como
-subproceso — requieren que pytest esté instalado en el intérprete
-activo. Los que no llegan ahí (bloqueo de núcleo, código inseguro,
-path traversal) son más rápidos y no dependen de eso.
+Desde el fix de 2026-08-24 (ver docstring de self_modification.py),
+_run_tests() corre pytest DENTRO de un sandbox Docker real — la
+mayoría de estos tests inyectan `_FakeTestExecutor` (corre pytest
+directo contra el proyecto SINTÉTICO, sin Docker) para poder probar la
+LÓGICA de propose()/apply()/rollback() rápido y sin requerir un daemon
+de Docker. La verificación de que el sandbox REAL efectivamente
+contiene código malicioso vive en la clase
+TestRealSandboxContainsMaliciousTopLevelCode más abajo, marcada
+requires_docker.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+from dataclasses import dataclass, field
+
 import pytest
 
-from agent_core.self_modification import SelfModificationManager
+from agent_core.self_modification import SelfModificationManager, SelfModTestRunError
+from tests.conftest import requires_docker
 from utils.config import settings
+
+
+@dataclass
+class _FakeSandboxResult:
+    stdout: str
+    stderr: str = ""
+    exit_code: int = 0
+    status: str = "success"
+    resource_usage: dict = field(default_factory=dict)
+
+
+class _FakeTestExecutor:
+    """
+    Test double de SandboxExecutor: en vez de levantar un contenedor
+    Docker real, corre pytest directo en el host contra el path que
+    _run_tests() montaría en /project — el proyecto es siempre
+    SINTÉTICO (fixture `fake_project`), nunca código real no confiable,
+    así que esto no reintroduce el riesgo que motivó el fix.
+    """
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def execute_trusted(self, source_code, extra_mounts=None, **kwargs):
+        self.calls.append({"source_code": source_code, "extra_mounts": extra_mounts, **kwargs})
+        (host_path,) = extra_mounts.keys()
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "--tb=short"],
+            cwd=host_path, capture_output=True, text=True, timeout=60,
+        )
+        return _FakeSandboxResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode)
+
+
+class _FakeImageBuilder:
+    def build_or_get_image(self) -> str:
+        return "fake-image:unused"
 
 
 @pytest.fixture
@@ -43,7 +89,9 @@ def fake_project(tmp_path):
 
 @pytest.fixture
 def manager(fake_project):
-    return SelfModificationManager(project_root=fake_project)
+    return SelfModificationManager(
+        project_root=fake_project, executor=_FakeTestExecutor(), image_builder=_FakeImageBuilder(),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -239,3 +287,110 @@ def test_cannot_apply_same_proposal_twice(manager):
 
     with pytest.raises(ValueError):
         manager.apply(proposal.id, approved_by="otro")
+
+
+# --- _run_tests() ahora va DENTRO del sandbox, nunca en el proceso host
+# (ver docstring del módulo, fix del 2026-08-24) ---
+
+
+def test_run_tests_goes_through_the_sandbox_executor_not_a_bare_subprocess(manager, fake_project):
+    """
+    Confirma que propose() de verdad pasa por SandboxExecutor.execute_trusted()
+    (vía el _FakeTestExecutor inyectado) en vez de correr pytest directo
+    en el host — si _run_tests() alguna vez volviera a llamar
+    subprocess.run() a mano, este test seguiría pasando "de casualidad"
+    salvo por esta aserción explícita sobre las llamadas registradas.
+    """
+    manager.propose(target_path="mymodule.py", proposed_source="def add(a, b):\n    return a + b\n", justification="x")
+
+    assert len(manager._executor.calls) == 2  # baseline + candidato
+    call = manager._executor.calls[0]
+    assert call["network_mode"] == "none"
+    # El path montado es una COPIA temporal de fake_project (ver
+    # SelfModificationManager._copy_project), nunca fake_project mismo
+    # — solo confirmamos que se montó ALGO como /project, no un valor
+    # específico.
+    (mounted_container_path,) = call["extra_mounts"].values()
+    assert mounted_container_path == "/project"
+
+
+def test_run_tests_raises_on_sandbox_infrastructure_failure(manager):
+    """
+    BUG REAL ENCONTRADO EN REVISIÓN: sin este chequeo, un sandbox roto
+    (Docker caído, build de imagen fallido) se interpretaría como
+    "0 passed, 0 failed" — result.is_clean == True — y propose() dejaría
+    pasar la propuesta a pending_human_approval sin haber corrido un
+    solo test real.
+    """
+    class _BrokenExecutor:
+        def execute_trusted(self, **kwargs):
+            return _FakeSandboxResult(stdout="", stderr="daemon de Docker no responde", exit_code=None, status="error")
+
+    manager._executor = _BrokenExecutor()
+
+    with pytest.raises(SelfModTestRunError):
+        manager.propose(
+            target_path="mymodule.py", proposed_source="def add(a, b):\n    return a + b\n", justification="x",
+        )
+
+
+@requires_docker
+class TestRealSandboxContainsMaliciousTopLevelCode:
+    """
+    _run_tests() con Docker REAL (construye/reusa la imagen del test
+    runner la primera vez) — asumiendo el PEOR CASO, igual que
+    tests/test_sandbox_escape_resistance.py: código de nivel de módulo
+    que de alguna forma llegó a este punto sin haber sido detenido por
+    el denylist AST (que su propio docstring admite que no puede ser
+    exhaustivo contra un adversario que construye el AST para evadirlo).
+    Por eso acá se llama a manager._run_tests() directo, sin pasar por
+    propose()/validate_code() — la pregunta que responde no es "¿el
+    denylist lo detecta?" sino "¿aunque no lo detecte, el sandbox de
+    self-modification sigue conteniendo el daño?".
+    """
+
+    @staticmethod
+    def _project_with_top_level_code(tmp_path, malicious_code: str):
+        (tmp_path / "malicious.py").write_text(malicious_code, encoding="utf-8")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+        (tests_dir / "test_malicious.py").write_text(
+            "import malicious\n\n\ndef test_noop():\n    assert True\n", encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_top_level_network_access_is_blocked(self, tmp_path):
+        project = self._project_with_top_level_code(
+            tmp_path,
+            "import socket\n"
+            "try:\n"
+            "    socket.create_connection(('8.8.8.8', 53), timeout=3)\n"
+            "    print('RED_ALCANZADA')\n"
+            "except OSError as e:\n"
+            "    print('BLOQUEADO:', e)\n",
+        )
+        manager = SelfModificationManager(project_root=project)
+
+        result = manager._run_tests(project, ["-q", "-s", "--tb=short"])
+
+        assert "RED_ALCANZADA" not in result.raw_output
+        assert "BLOQUEADO" in result.raw_output
+
+    def test_top_level_code_cannot_read_files_outside_the_mounted_project(self, tmp_path):
+        project = self._project_with_top_level_code(
+            tmp_path,
+            "try:\n"
+            "    content = open('/etc/shadow').read()\n"
+            "    print('LECTURA_EXITOSA')\n"
+            "except PermissionError as e:\n"
+            "    print('BLOQUEADO:', e)\n"
+            "except FileNotFoundError:\n"
+            "    print('BLOQUEADO: archivo no existe en esta imagen')\n",
+        )
+        manager = SelfModificationManager(project_root=project)
+
+        result = manager._run_tests(project, ["-q", "-s", "--tb=short"])
+
+        assert "LECTURA_EXITOSA" not in result.raw_output
+        assert "BLOQUEADO" in result.raw_output

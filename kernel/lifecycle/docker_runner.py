@@ -113,6 +113,9 @@ class DockerSandboxRunner:
         output_dir: str | None = None,
         extra_mounts: dict[str, str] | None = None,
         timeout_seconds: int | None = None,
+        memory_limit_mb: int | None = None,
+        cpu_limit: float | None = None,
+        pids_limit: int | None = None,
     ) -> SandboxResult:
         """
         Ejecuta `source_code` en un contenedor efímero aislado.
@@ -154,10 +157,19 @@ class DockerSandboxRunner:
         servicio en sí nunca falló. Ver
         kernel/registry/sandboxed_skill.py, que sube este valor
         específicamente cuando la skill declara kernel_services.
+        memory_limit_mb/cpu_limit/pids_limit: sobrescriben los defaults
+        del sandbox (512m/1.0/64) SOLO para esta ejecución. Caso de uso
+        real: agent_core/self_modification.py corre el test suite
+        COMPLETO (fastapi+chromadb+~1100 tests colectando) dentro de
+        este sandbox — los límites pensados para un script chico de una
+        skill se quedan cortos ahí.
         """
         target_image = image or SANDBOX_IMAGE
         target_network_mode = network_mode or self.cfg.network_mode
         target_timeout_seconds = timeout_seconds or self.cfg.timeout_seconds
+        target_memory_limit_mb = memory_limit_mb or self.cfg.memory_limit_mb
+        target_cpu_limit = cpu_limit or self.cfg.cpu_limit
+        target_pids_limit = pids_limit or self.cfg.pids_limit
         with tempfile.TemporaryDirectory() as tmp_dir:
             workdir = Path(tmp_dir)
             self._prepare_workdir(workdir, source_code, workspace_files)
@@ -190,10 +202,10 @@ class DockerSandboxRunner:
                     tmpfs={"/tmp": "rw,noexec,nosuid,size=64m"},
                     working_dir="/workspace",
                     network_mode=target_network_mode,          # "none" por defecto
-                    mem_limit=f"{self.cfg.memory_limit_mb}m",
-                    memswap_limit=f"{self.cfg.memory_limit_mb}m",  # sin swap extra
-                    nano_cpus=int(self.cfg.cpu_limit * 1e9),
-                    pids_limit=self.cfg.pids_limit,
+                    mem_limit=f"{target_memory_limit_mb}m",
+                    memswap_limit=f"{target_memory_limit_mb}m",  # sin swap extra
+                    nano_cpus=int(target_cpu_limit * 1e9),
+                    pids_limit=target_pids_limit,
                     read_only=True,
                     # Mismo UID/GID que este proceso, no un valor
                     # hardcodeado — ver _prepare_workdir() para el motivo

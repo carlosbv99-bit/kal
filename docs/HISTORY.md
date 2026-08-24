@@ -7570,3 +7570,108 @@ context service tocados, 0 regresiones; suite completa corriendo.
 
 Nada de esto es una rama nueva ni cambia el comportamiento de kal —
 es metadata sobre una API que ya existía y ya funcionaba igual.
+
+## Self-modification: el test suite corría en el HOST, sin sandbox (2026-08-24)
+
+Un colaborador envió una auditoría adversaria del código (no una
+opinión — con archivo y línea concretos) señalando 5 fallos críticos.
+Antes de actuar sobre nada, cada afirmación se verificó contra el
+código real, no contra lo que decía la captura:
+
+1. **Docker socket `:ro` en `sandbox_runner`** (docker-compose.yml:33):
+   cierto que `:ro` no bloquea llamadas HTTP/API al daemon — pero el
+   "impacto" asumía que ya se controla el proceso `sandbox_runner`
+   completo, y ese servicio tiene una superficie mínima
+   (`kernel/api/sandbox_api.py`: un solo endpoint que delega a
+   `SandboxExecutor` → contenedores efímeros SEPARADOS sin el socket,
+   verificado por `test_docker_socket_not_visible_inside_container`).
+   Conclusión exagerada ("el aislamiento es una ilusión"), pero el
+   comentario `# solo este servicio lo toca` + `:ro` sí da una falsa
+   sensación de restricción que no existe — pendiente, no corregido en
+   este cambio (candidato: docker-socket-proxy que limite la API real).
+2. **pytest de self-modification en el host** — CONFIRMADO, real y
+   serio. Este es el que se corrigió (ver abajo).
+3. **pip install con `network_mode="bridge"`** (error_handling/strategies.py:219)
+   — cierto en teoría, pero gateado por `_requires_human_approval()`
+   y `"network"` SÍ está en `require_human_approval_for` por defecto
+   (config.yaml:280) — no explotable sin que un admin cambie esa
+   config explícitamente.
+
+### El fallo real: `agent_core/self_modification.py::_run_tests()`
+
+Corría `subprocess.run([sys.executable, "-m", "pytest", ...], cwd=str(root))`
+DIRECTO en el proceso host, dentro de `propose()`, ANTES de llegar a
+`pending_human_approval` — o sea, antes de que un humano viera nada.
+La única barrera era `validate_code()` (denylist AST), y ese módulo se
+documenta A SÍ MISMO como insuficiente ("esto es un filtro barato de
+primera línea, NO la garantía de seguridad — esa la da el aislamiento
+real en sandbox/") — pero ese aislamiento real nunca se aplicaba acá.
+pytest IMPORTA (ejecuta código de nivel de módulo) todo lo que
+colecciona: con ~1100 tests cubriendo casi todo el proyecto, es muy
+probable que algún test importe transitivamente el archivo propuesto.
+
+Verificación propia adicional, más allá de lo que señaló la auditoría:
+el denylist bloqueaba `open()` como builtin pero NO `pathlib` — código
+como `from pathlib import Path; Path('/etc/passwd').read_text()` pasaba
+`validate_code()` sin problema. Agregado a `FORBIDDEN_IMPORTS`
+(`code_analysis/denylist.py`), con test nuevo en `test_ast_validator.py`.
+
+### Fix real: sandboxear `_run_tests()`
+
+- `kernel/lifecycle/docker_runner.py::DockerSandboxRunner.run()` y
+  `kernel/lifecycle/executor.py::SandboxExecutor.execute_trusted()`
+  ganan overrides opcionales `memory_limit_mb`/`cpu_limit`/`pids_limit`
+  (mismo patrón que el `timeout_seconds` override que ya existía) — el
+  default del sandbox (512m/1.0 CPU/64 pids, pensado para un script
+  chico de una skill) se queda corto para correr el test suite
+  completo con fastapi+chromadb.
+- `kernel/lifecycle/selfmod_test_image_builder.py` (NUEVO): construye
+  (o reusa, cacheada por hash de contenido) una imagen Docker con
+  `requirements-core.txt` + `requirements-dev.txt` instalados — el
+  mismo set liviano que ya usa CI (`.github/workflows/ci.yml`), sin el
+  stack de ML pesado; los tests que lo necesitan se saltan solos con
+  `pytest.importorskip` igual que en CI. Mismo patrón de cacheo por
+  hash que `skill_image_builder.py`.
+- `agent_core/self_modification.py::_run_tests()`: ahora genera un
+  script chico y CONFIABLE (invoca pytest, nunca cambia — el código NO
+  confiable es el árbol de archivos que ese pytest recorre, no el
+  script en sí) y lo corre vía `SandboxExecutor.execute_trusted()`,
+  montando la copia del proyecto (`root`, con el cambio propuesto ya
+  aplicado) en `/project`, `network_mode="none"`, sin socket de Docker.
+  `SelfModificationManager` gana `executor`/`image_builder` inyectables
+  para tests, construidos perezosamente (nunca en `__init__`, para no
+  exigir un daemon de Docker con solo importar el módulo).
+- Nuevo: si el sandbox falla por razones de INFRAESTRUCTURA (Docker
+  caído, build de imagen roto) — `SelfModTestRunError` en vez de
+  interpretarlo en silencio como "0 passed, 0 failed" (`is_clean ==
+  True`), que hubiera dejado pasar una propuesta a
+  `pending_human_approval` sin haber corrido un solo test real.
+
+### Verificación
+
+`tests/test_self_modification.py`: la mayoría de los tests inyectan un
+executor falso (corre pytest directo contra el proyecto SINTÉTICO de
+`fake_project`, nunca código real) para seguir probando la LÓGICA del
+pipeline rápido y sin Docker. Nuevos: confirma que `propose()` pasa por
+`SandboxExecutor` con `network_mode="none"` (no un subprocess suelto);
+confirma que una falla de infraestructura levanta `SelfModTestRunError`.
+
+Verificación con Docker REAL, asumiendo el PEOR CASO (mismo criterio
+que `test_sandbox_escape_resistance.py`: código de nivel de módulo que
+de alguna forma llegó a `_run_tests()` sin haber sido detenido por el
+denylist) — `TestRealSandboxContainsMaliciousTopLevelCode`: un módulo
+con `socket.create_connection()` a nivel de import es bloqueado
+(`network_mode="none"`); un intento de leer `/etc/shadow` a nivel de
+import es bloqueado (aislamiento de filesystem del contenedor). Ambos
+corridos de verdad contra Docker real en esta máquina, no solo mocks.
+
+Suite completa (`pytest tests/ -q`), 0 regresiones.
+
+### Pendiente, no resuelto en este cambio
+
+El hallazgo #1 (docker.sock `:ro` en `sandbox_runner`) — el comentario
+da una falsa sensación de restricción. Candidato: reemplazar el bind
+mount directo por un docker-socket-proxy (p.ej. el de Tecnativa) que
+limite qué llamadas de la API de Docker se permiten, en vez de exponer
+la API completa. No implementado — evaluar cuando haya tiempo dedicado
+a esto específicamente, no como parte apurada de este fix.
