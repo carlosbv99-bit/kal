@@ -52,6 +52,12 @@ FORBIDDEN_IMPORTS = {
     "marshal",
     "importlib",  # permite importar cualquier módulo (incluidos os/subprocess)
                   # por nombre en runtime, evitando el chequeo de import literal
+    # BUG REAL ENCONTRADO EN REVISIÓN (2026-08-24): "open" está en
+    # FORBIDDEN_CALLS, pero pathlib.Path(...).write_text()/.read_text()/
+    # .open() da el mismo acceso a filesystem sin pasar por ese nombre
+    # de función — un `from pathlib import Path` no aparece como
+    # ast.Call a "open", así que se colaba. Mismo criterio que "shutil".
+    "pathlib",
 }
 
 # Atributos peligrosos (p.ej. acceso a __globals__, __subclasses__ para

@@ -96,6 +96,9 @@ class SandboxExecutor:
         granted_permissions: frozenset[Permission] | None = None,
         extra_mounts: dict[str, str] | None = None,
         timeout_seconds: int | None = None,
+        memory_limit_mb: int | None = None,
+        cpu_limit: float | None = None,
+        pids_limit: int | None = None,
     ) -> SandboxResult:
         """
         Igual que execute() (siempre audita, siempre respeta
@@ -139,7 +142,8 @@ class SandboxExecutor:
         result = self.runner.run(
             source_code, workspace_files=workspace_files, image=image,
             network_mode=network_mode, output_dir=output_dir, extra_mounts=extra_mounts,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout_seconds, memory_limit_mb=memory_limit_mb,
+            cpu_limit=cpu_limit, pids_limit=pids_limit,
         )
 
         audit_log.record(

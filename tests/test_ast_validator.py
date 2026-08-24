@@ -59,6 +59,17 @@ def test_importlib_dynamic_import_is_blocked():
     assert not result.is_safe
 
 
+def test_pathlib_file_io_bypass_is_blocked():
+    """
+    BUG REAL ENCONTRADO EN REVISIÓN (2026-08-24, auditoría de un
+    colaborador): "open" está en FORBIDDEN_CALLS, pero
+    pathlib.Path(...).write_text()/.read_text() da el mismo acceso a
+    filesystem sin generar un ast.Call a "open" — se colaba.
+    """
+    result = validate_code("from pathlib import Path\nPath('/etc/passwd').read_text()")
+    assert not result.is_safe
+
+
 def test_known_residual_gap_documented_not_silently_fixed():
     """
     Este test documenta (no oculta) un hueco conocido: el chequeo actual
