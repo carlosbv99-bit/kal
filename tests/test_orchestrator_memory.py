@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from agent_core import orchestrator as orchestrator_module
 from agent_core.orchestrator import app
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 class _FakeMemoryManager:

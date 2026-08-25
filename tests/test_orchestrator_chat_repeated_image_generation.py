@@ -24,7 +24,7 @@ from agent_core.llm.planner import Plan, PlanRunResult, PlanStep, PlanStepResult
 from agent_core.orchestrator import app
 from sdk.artifacts import Artifact
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def _scripted_result(steps: list[AgentStep], self_checked_tools: frozenset[str] = frozenset()) -> PlanRunResult:

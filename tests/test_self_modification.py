@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -38,6 +40,7 @@ class _FakeSandboxResult:
     exit_code: int = 0
     status: str = "success"
     resource_usage: dict = field(default_factory=dict)
+    output_files: dict = field(default_factory=dict)
 
 
 class _FakeTestExecutor:
@@ -46,7 +49,9 @@ class _FakeTestExecutor:
     Docker real, corre pytest directo en el host contra el path que
     _run_tests() montaría en /project — el proyecto es siempre
     SINTÉTICO (fixture `fake_project`), nunca código real no confiable,
-    así que esto no reintroduce el riesgo que motivó el fix.
+    así que esto no reintroduce el riesgo que motivó el fix. Genera un
+    reporte JUnit XML real (mismo formato que produciría el contenedor
+    real) para poder ejercitar _parse_junit_summary() de punta a punta.
     """
 
     def __init__(self):
@@ -55,11 +60,16 @@ class _FakeTestExecutor:
     def execute_trusted(self, source_code, extra_mounts=None, **kwargs):
         self.calls.append({"source_code": source_code, "extra_mounts": extra_mounts, **kwargs})
         (host_path,) = extra_mounts.keys()
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "--tb=short"],
-            cwd=host_path, capture_output=True, text=True, timeout=60,
+        with tempfile.TemporaryDirectory() as report_dir:
+            report_path = Path(report_dir) / "report.xml"
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", "--tb=short", f"--junit-xml={report_path}"],
+                cwd=host_path, capture_output=True, text=True, timeout=60,
+            )
+            output_files = {"report.xml": report_path.read_bytes()} if report_path.exists() else {}
+        return _FakeSandboxResult(
+            stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode, output_files=output_files,
         )
-        return _FakeSandboxResult(stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode)
 
 
 class _FakeImageBuilder:
@@ -327,6 +337,24 @@ def test_run_tests_raises_on_sandbox_infrastructure_failure(manager):
             return _FakeSandboxResult(stdout="", stderr="daemon de Docker no responde", exit_code=None, status="error")
 
     manager._executor = _BrokenExecutor()
+
+    with pytest.raises(SelfModTestRunError):
+        manager.propose(
+            target_path="mymodule.py", proposed_source="def add(a, b):\n    return a + b\n", justification="x",
+        )
+
+
+def test_run_tests_raises_when_junit_report_is_missing(manager):
+    """
+    status="success" pero sin report.xml (p.ej. pytest colapsó antes de
+    terminar de escribirlo) — mismo criterio que el test anterior: nunca
+    tratar la ausencia del reporte como "0 passed, 0 failed" en silencio.
+    """
+    class _NoReportExecutor:
+        def execute_trusted(self, **kwargs):
+            return _FakeSandboxResult(stdout="algo raro pasó", stderr="", exit_code=1, status="success", output_files={})
+
+    manager._executor = _NoReportExecutor()
 
     with pytest.raises(SelfModTestRunError):
         manager.propose(

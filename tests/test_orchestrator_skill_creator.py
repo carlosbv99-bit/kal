@@ -18,7 +18,7 @@ from agent_core.orchestrator import _ADMIN_TOKEN, app
 from agent_core.skill_creator import SkillCreatorManager
 from agent_core.routers import skill_creator as skill_creator_router
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 _HEADERS = {"X-Kal-Admin-Token": _ADMIN_TOKEN}
 
 _VALID_CODE = (

@@ -25,7 +25,7 @@ from agent_core import orchestrator as orchestrator_module
 from agent_core.llm.planner import Plan, PlanRunResult
 from agent_core.orchestrator import app
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def _scripted_result(status: str, final_answer: str) -> PlanRunResult:
