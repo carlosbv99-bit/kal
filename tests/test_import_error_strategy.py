@@ -125,6 +125,10 @@ def test_repair_proceeds_when_network_not_in_approval_list(monkeypatch):
     assert calls[0]["network_mode"] == "bridge"
     assert "requests" in calls[0]["script"]
     assert "import requests" in calls[0]["script"]  # el código original va incluido
+    # Recomendación de auditoría externa (2026-08-24): forzar wheel-only
+    # evita que `pip install` ejecute setup.py/build scripts arbitrarios
+    # de un paquete typosquateado que solo publique sdist.
+    assert "--only-binary" in calls[0]["script"]
 
 
 def test_invalid_package_name_never_reaches_runner(monkeypatch):

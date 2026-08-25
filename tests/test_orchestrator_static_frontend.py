@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from agent_core.orchestrator import app
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def test_index_html_is_served_without_cache():

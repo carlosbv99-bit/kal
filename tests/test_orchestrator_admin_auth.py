@@ -43,7 +43,7 @@ from fastapi.testclient import TestClient
 from agent_core.orchestrator import _ADMIN_TOKEN, app
 from agent_core.routers import llm_settings, vscode_integration
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 _GATED_REQUESTS = [
     ("POST", "/tools/no-existe-esta-herramienta/approve", {"approved_by": "alguien"}),
@@ -148,14 +148,14 @@ def test_admin_token_endpoint_rejects_non_loopback_by_default():
 
 
 def test_admin_token_endpoint_serves_the_real_token_from_loopback_ipv4():
-    loopback_client = TestClient(app, client=("127.0.0.1", 54321))
+    loopback_client = TestClient(app, base_url="http://localhost", client=("127.0.0.1", 54321))
     response = loopback_client.get("/admin-token")
     assert response.status_code == 200
     assert response.json() == {"token": _ADMIN_TOKEN}
 
 
 def test_admin_token_endpoint_serves_the_real_token_from_loopback_ipv6():
-    loopback_client = TestClient(app, client=("::1", 54321))
+    loopback_client = TestClient(app, base_url="http://localhost", client=("::1", 54321))
     response = loopback_client.get("/admin-token")
     assert response.status_code == 200
     assert response.json() == {"token": _ADMIN_TOKEN}
@@ -163,6 +163,6 @@ def test_admin_token_endpoint_serves_the_real_token_from_loopback_ipv6():
 
 def test_admin_token_endpoint_rejects_a_real_lan_address():
     """El caso real que el token protege: alguien en la LAN, no en la propia máquina."""
-    lan_client = TestClient(app, client=("192.168.1.50", 54321))
+    lan_client = TestClient(app, base_url="http://localhost", client=("192.168.1.50", 54321))
     response = lan_client.get("/admin-token")
     assert response.status_code == 403

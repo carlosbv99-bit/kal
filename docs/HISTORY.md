@@ -7675,3 +7675,117 @@ mount directo por un docker-socket-proxy (p.ej. el de Tecnativa) que
 limite qué llamadas de la API de Docker se permiten, en vez de exponer
 la API completa. No implementado — evaluar cuando haya tiempo dedicado
 a esto específicamente, no como parte apurada de este fix.
+
+## Auditoría del colaborador, ronda 2: propuesta de remediación completa (2026-08-24/26)
+
+El mismo colaborador insistió con un plan de remediación de 5 puntos
+("soluciones estándar de la industria"). Se evaluó cada uno por costo
+real vs. beneficio real para ESTE proyecto (hardware de un usuario,
+sin GPU, no multi-tenant), no por si "es lo que haría una empresa
+grande". De los 5, se implementaron los 4 de bajo costo/alto valor;
+gVisor/Firecracker, el allowlist AST estricto y el sistema de login
+con cookies se descartaron explícitamente por desproporcionados para
+este contexto (ver la conversación completa para el razonamiento).
+
+### 1. `--only-binary :all:` en ImportErrorStrategy
+
+`error_handling/strategies.py::_build_install_and_retry_script()` — el
+`pip install` que repara un ImportError ahora fuerza wheel-only, nunca
+sdist. Antes de este cambio, un nombre de paquete typosquateado
+(hallucinado por el LLM, parecido a uno real) que solo publicara sdist
+podía ejecutar su propio script de build (`setup.py`) arbitrario
+durante el propio `pip install` — con wheel-only eso deja de ser
+posible, instalar un `.whl` nunca ejecuta código del paquete. Ya venía
+con `--no-deps` (sin esto, además, instalaría transitivos sin control).
+Verificado en vivo, con Docker y red reales: el happy path existente
+(`test_task_executor_sandboxed.py`, instala `six` de PyPI de verdad)
+sigue pasando igual con la flag nueva.
+
+### 2. JUnit XML en vez de regex para self-modification
+
+`agent_core/self_modification.py::_run_tests()` — reemplaza el parseo
+por regex del resumen en texto de pytest ("3 failed, 12 passed...",
+frágil ante cambios de formato entre versiones) por un reporte
+`--junit-xml` estructurado, escrito dentro del sandbox y leído de
+vuelta al host vía el mecanismo `output_dir`/`output_files` que
+`docker_runner.py` ya tenía (no se usaba). Nuevo `_parse_junit_summary()`
+(stdlib `xml.etree.ElementTree`, sin dependencia nueva) suma
+`tests`/`failures`/`errors`/`skipped` de cada `<testsuite>`. Nuevo
+guard: si el sandbox devuelve `status="success"` pero pytest no llegó
+a escribir el reporte (crash, conflicto de plugins), `SelfModTestRunError`
+en vez de interpretarlo como "0 passed, 0 failed" en silencio — mismo
+criterio que el guard de infraestructura que ya existía.
+
+### 3. Validación de Host/Origin
+
+`agent_core/orchestrator.py` — dos middlewares nuevos sobre `app`:
+`TrustedHostMiddleware` (de Starlette, restringe el header `Host` a
+`localhost`/`127.0.0.1`) y un `_OriginValidationMiddleware` propio
+(rechaza cualquier pedido con header `Origin` presente que no sea
+exactamente uno de los orígenes locales esperados — deliberadamente
+NO exige que Origin esté presente, porque la mayoría de los clientes
+reales —la extensión de VS Code vía Node, curl— nunca lo mandan, y
+exigirlo rompería esos clientes sin ganar nada real).
+
+Importante: esto NO es lo que protege `/admin-token` (eso ya lo hace
+`request.client.host`, la IP real de la conexión, no falsificable por
+un cliente remoto) ni lo que cierra el SSRF del agente (eso ya lo hace
+`is_unsafe_ip()` desde el 2026-07-10) — es un vector DISTINTO: una
+página de OTRO origen abierta en el MISMO navegador del usuario
+intentando disparar pedidos contra `localhost:8000`.
+
+**Efecto secundario real, corregido en el mismo cambio**: `TestClient`
+(httpx) manda por defecto `Host: testserver`, que con el middleware
+nuevo pasa a devolver 400 — rompía silenciosamente CUALQUIER test que
+use `TestClient(app)` sin `base_url` explícito. 15 archivos de test
+actualizados a `TestClient(app, base_url="http://localhost")`
+(incluidas las 3 instancias con `client=(ip, puerto)` de
+`test_orchestrator_admin_auth.py`, que simulan la IP de conexión para
+probar `/admin-token` — parámetro independiente de `base_url`, ambos
+conviven sin conflicto). Nuevo `tests/test_orchestrator_host_origin_validation.py`
+para el middleware en sí.
+
+### 4. Docker socket proxy — implementado, con un límite real descubierto en la verificación
+
+`docker-compose.yml`: nuevo servicio `docker_socket_proxy`
+(`tecnativa/docker-socket-proxy`) interpuesto entre `sandbox_runner` y
+el socket real — `sandbox_runner` ahora apunta `DOCKER_HOST` al proxy
+en vez de montar `/var/run/docker.sock` directo. Habilitado solo
+`CONTAINERS`/`IMAGES`/`BUILD`/`POST` (lo mínimo que `sandbox_runner`
+usa de verdad); `NETWORKS`/`VOLUMES`/`EXEC`/`SWARM`/`SYSTEM`/`AUTH`/
+`SECRETS`/`PLUGINS` en 0.
+
+**Verificado en vivo, con la instancia real de la imagen (no
+documentación, no supuestos)**: `docker -H tcp://.../ volume ls` y
+`network ls` correctamente rechazados (403); una ejecución REAL de
+`DockerSandboxRunner` de kal (sin modificar) a través del proxy vía
+`DOCKER_HOST` funcionó de punta a punta; un build de imagen (mismo
+mecanismo que `skill_image_builder.py`) también funcionó a través del
+proxy.
+
+**Hallazgo importante, descubierto en esa misma verificación, no
+asumido**: con `CONTAINERS=1` (imprescindible para que `sandbox_runner`
+pueda operar), `docker run --privileged -v /:/host` **sigue
+funcionando A TRAVÉS del proxy** — probado en vivo, no en teoría. El
+proxy filtra por prefijo de URL/tipo de recurso, nunca inspecciona el
+CUERPO de un pedido (confirmado también contra la documentación del
+proyecto). O sea: esto **no cierra por sí solo** el escenario
+"`sandbox_runner` comprometido crea un contenedor privilegiado con la
+raíz del host montada" — esa garantía sigue dependiendo de que el
+CÓDIGO de `sandbox_runner` (`kernel/lifecycle/docker_runner.py`) nunca
+pida eso, que es cierto hoy pero no es una propiedad que el proxy
+imponga. Lo que el proxy sí cierra de verdad es el resto de la
+superficie de la API de Docker (volúmenes, redes, swarm, secrets,
+plugins) que `sandbox_runner` no necesita para nada — reducción de
+superficie real, pero no la garantía completa que originalmente se le
+atribuyó a esta mitigación. Documentado explícito en el propio
+`docker-compose.yml` para que nadie asuma más de lo que da.
+
+**No verificado**: la orquestación completa vía `docker compose up` —
+ni `docker compose` (plugin) ni `docker-compose` (standalone) están
+instalados en este entorno de desarrollo. Se verificó cada pieza por
+separado (el proxy solo, `DockerSandboxRunner` real contra el proxy vía
+`DOCKER_HOST`, un build real a través del proxy) pero no el stack
+completo levantado con `docker-compose.yml` tal cual queda en el repo.
+
+Suite completa (`pytest tests/ -q`): a confirmar tras este commit.

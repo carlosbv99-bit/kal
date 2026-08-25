@@ -25,18 +25,62 @@ services:
     # vía una API interna, para que un fallo en el agente no implique
     # acceso directo al daemon de Docker del host.
 
+  # Recomendación de una auditoría externa (2026-08-24, ver
+  # docs/HISTORY.md): interponer un proxy de control entre
+  # `sandbox_runner` y el daemon de Docker real, en vez de montarle el
+  # socket directo — reduce a qué PARTES de la API de Docker puede
+  # llegar `sandbox_runner` si su propio proceso alguna vez se
+  # compromete (nunca necesita Swarm/secrets/plugins/auth/volumes/redes
+  # para hacer su trabajo, ver kernel/lifecycle/docker_runner.py).
+  #
+  # LÍMITE VERIFICADO EN VIVO, no asumido: este proxy filtra por
+  # PREFIJO DE URL/tipo de recurso (CONTAINERS, IMAGES, etc.), nunca
+  # inspecciona el CUERPO de un pedido — probado contra una instancia
+  # real: con CONTAINERS=1 habilitado (imprescindible para que
+  # sandbox_runner pueda lanzar contenedores efímeros), un
+  # `docker run --privileged -v /:/host` sigue funcionando A TRAVÉS del
+  # proxy. O sea, esto NO cierra por sí solo el escenario "sandbox_runner
+  # comprometido crea un contenedor privilegiado con la raíz del host
+  # montada" — esa garantía depende de que el CÓDIGO de sandbox_runner
+  # nunca pida eso (docker_runner.py nunca setea privileged=True ni
+  # monta host paths arbitrarios), no de este proxy. Lo que el proxy sí
+  # cierra es el resto de la superficie de la API de Docker que
+  # sandbox_runner no necesita para nada. Ver docs/HISTORY.md para el
+  # detalle completo de esta verificación.
+  docker_socket_proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # el único servicio que toca el socket real
+    environment:
+      - CONTAINERS=1   # crear/listar/inspeccionar/parar/eliminar contenedores efímeros
+      - IMAGES=1        # pull/inspeccionar la imagen base y las imágenes cacheadas por skill
+      - BUILD=1         # skill_image_builder.py / selfmod_test_image_builder.py construyen imágenes
+      - POST=1          # interruptor maestro: sin esto, TODAS las escrituras se rechazan
+      - NETWORKS=0
+      - VOLUMES=0
+      - EXEC=0
+      - SWARM=0
+      - SYSTEM=0
+      - AUTH=0
+      - SECRETS=0
+      - PLUGINS=0
+    networks:
+      - agent_net
+    # Sin puertos publicados al host: solo alcanzable desde agent_net.
+
   sandbox_runner:
     build:
       context: .
       dockerfile: kernel/lifecycle/Dockerfile
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro  # solo este servicio lo toca
     environment:
+      - DOCKER_HOST=tcp://docker_socket_proxy:2375  # nunca el socket real, ver proxy arriba
       - SANDBOX_NETWORK_MODE=none
       - SANDBOX_MEMORY_LIMIT=512m
       - SANDBOX_CPU_LIMIT=1.0
       - SANDBOX_TIMEOUT_SECONDS=30
       - SANDBOX_PIDS_LIMIT=64
+    depends_on:
+      - docker_socket_proxy
     networks:
       - agent_net
     # Este servicio es el único con privilegios para lanzar contenedores

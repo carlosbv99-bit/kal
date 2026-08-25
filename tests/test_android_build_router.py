@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from agent_core.orchestrator import app
 from audit.audit_log import audit_log
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def test_installed_outcome_is_recorded_as_success():

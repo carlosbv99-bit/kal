@@ -26,8 +26,10 @@ import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from agent_core.context_service import ContextService
 from agent_core.conversation_engine import ConversationEngine
@@ -181,6 +183,45 @@ app = FastAPI(
         {"name": "Integración VS Code", "description": "Uso interno de la extensión de VS Code."},
     ],
 )
+
+# Recomendación de una auditoría externa (2026-08-24, ver docs/HISTORY.md):
+# validar Host/Origin como defensa adicional en profundidad. Nunca fue el
+# mecanismo real que protege /admin-token (ese usa request.client.host,
+# la IP real de la conexión — no falsificable por un cliente remoto, ver
+# más abajo) ni al agente (el SSRF vía browser/download_manager ya lo
+# cierra kernel/permissions/network_safety.py::is_unsafe_ip) — esto
+# cubre un vector DISTINTO: una página abierta en el MISMO navegador que
+# el usuario usa para kal, intentando disparar pedidos contra
+# localhost:8000 (rebinding de DNS / confusión de Host).
+_ALLOWED_LOCAL_HOSTNAMES = ("localhost", "127.0.0.1")
+_ALLOWED_ORIGINS = frozenset(f"http://{host}:8000" for host in _ALLOWED_LOCAL_HOSTNAMES)
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_ALLOWED_LOCAL_HOSTNAMES))
+
+
+class _OriginValidationMiddleware(BaseHTTPMiddleware):
+    """
+    Rechaza cualquier pedido con un header Origin presente que no sea
+    exactamente uno de los orígenes locales esperados. Deliberadamente
+    NO exige que Origin esté presente — la mayoría de los clientes
+    reales de esta API (la extensión de VS Code vía Node, curl, scripts)
+    nunca mandan ese header (es un concepto de navegador, no de HTTP en
+    general), así que exigirlo rompería esos clientes legítimos sin
+    ganar nada: un atacante que arma sus propios pedidos tampoco tiene
+    obligación de mandarlo. Lo que sí se gana es cerrar la puerta a que
+    JavaScript corriendo en una página de OTRO origen, en el navegador
+    del usuario, dispare pedidos contra esta API — ahí el navegador SÍ
+    agrega Origin, y no se puede falsificar desde JS de página.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin")
+        if origin is not None and origin not in _ALLOWED_ORIGINS:
+            return PlainTextResponse("Origin no permitido", status_code=403)
+        return await call_next(request)
+
+
+app.add_middleware(_OriginValidationMiddleware)
 
 # Segunda capa de defensa (la primera es que docker-compose ya solo
 # publica este puerto en 127.0.0.1, ver docker-compose.yml) para las

@@ -20,7 +20,7 @@ from agent_core.llm.planner import Plan, PlanRunResult, PlanStep, PlanStepResult
 from agent_core.orchestrator import app
 from utils.config import settings
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def _scripted_planning_result() -> PlanRunResult:

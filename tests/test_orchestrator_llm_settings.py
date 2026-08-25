@@ -18,7 +18,7 @@ from agent_core.llm_settings import LLMSettingsError
 from agent_core.orchestrator import _ADMIN_TOKEN, app
 from agent_core.routers import llm_settings
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 _HEADERS = {"X-Kal-Admin-Token": _ADMIN_TOKEN}
 
 

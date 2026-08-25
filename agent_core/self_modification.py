@@ -55,11 +55,11 @@ cubrieron).
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import tempfile
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,6 +71,12 @@ from utils.config import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Nombres del reporte JUnit XML de pytest dentro del sandbox — ver
+# _run_tests()/_build_test_runner_script(). output_dir es relativo a
+# /workspace (docker_runner.py ya sabe leerlo de vuelta al host).
+_REPORT_OUTPUT_DIR = "results"
+_REPORT_FILENAME = "report.xml"
 
 # Última barrera, independiente de config.yaml — igual criterio que en
 # el resto del proyecto: aunque la config fuera corrompida por código
@@ -474,6 +480,7 @@ class SelfModificationManager:
             memory_limit_mb=2048,
             cpu_limit=2.0,
             pids_limit=256,
+            output_dir=_REPORT_OUTPUT_DIR,
             context={"self_modification_test_run": True},
         )
         if result.status != "success":
@@ -487,7 +494,16 @@ class SelfModificationManager:
             raise SelfModTestRunError(
                 f"El test suite no pudo correr dentro del sandbox (status={result.status}): {result.stderr}"
             )
-        passed, failed, errors = self._parse_pytest_summary(result.stdout)
+        report_xml = result.output_files.get(_REPORT_FILENAME)
+        if report_xml is None:
+            # pytest en sí no llegó a escribir el reporte (crash antes de
+            # terminar, conflicto de plugins, etc.) — mismo criterio que
+            # arriba: nunca tratar "no hay reporte" como "0 passed, 0
+            # failed" en silencio.
+            raise SelfModTestRunError(
+                f"pytest no generó el reporte JUnit XML esperado dentro del sandbox. stdout/stderr:\n{result.stdout}\n{result.stderr}"
+            )
+        passed, failed, errors = self._parse_junit_summary(report_xml)
         return TestRunResult(
             passed=passed, failed=failed, errors=errors,
             raw_output=result.stdout + result.stderr, exit_code=result.exit_code or 0,
@@ -495,12 +511,19 @@ class SelfModificationManager:
 
     @staticmethod
     def _build_test_runner_script(test_args: list[str]) -> str:
+        # --junit-xml (recomendación de una auditoría externa, 2026-08-24,
+        # ver docs/HISTORY.md): reemplaza el parseo por regex del resumen
+        # en texto de pytest (frágil ante cambios de formato entre
+        # versiones) por un reporte estructurado — ver _parse_junit_summary().
+        # Se escribe DIRECTO en /workspace/{_REPORT_OUTPUT_DIR}, que
+        # docker_runner.py ya lee de vuelta al host vía output_files.
         return (
             "import subprocess\n"
             "import sys\n"
             "\n"
             "result = subprocess.run(\n"
-            f"    [sys.executable, '-m', 'pytest', *{test_args!r}],\n"
+            f"    [sys.executable, '-m', 'pytest', *{test_args!r},\n"
+            f"     '--junit-xml=/workspace/{_REPORT_OUTPUT_DIR}/{_REPORT_FILENAME}'],\n"
             "    cwd='/project', capture_output=True, text=True,\n"
             ")\n"
             "sys.stdout.write(result.stdout)\n"
@@ -509,21 +532,26 @@ class SelfModificationManager:
         )
 
     @staticmethod
-    def _parse_pytest_summary(output: str) -> tuple[int, int, int]:
+    def _parse_junit_summary(report_xml: bytes) -> tuple[int, int, int]:
         """
-        Parsea el resumen final de pytest (p.ej. "3 failed, 12 passed,
-        2 errors in 4.51s") con regex simple. Punto de fragilidad
-        conocido: si pytest cambia su formato de salida entre versiones
-        mayores, esto podría necesitar ajuste.
+        Cuenta passed/failed/errors desde el reporte JUnit XML de pytest
+        (atributos `tests`/`failures`/`errors`/`skipped` del elemento
+        <testsuite>, sumados si hay varios) — reemplaza un parseo previo
+        por regex sobre el texto legible del resumen ("3 failed, 12
+        passed..."), frágil ante cualquier cambio de formato entre
+        versiones de pytest. pytest no reporta "passed" como atributo
+        propio: se deriva restando failures/errors/skipped del total.
         """
-        passed = failed = errors = 0
-        if m := re.search(r"(\d+) passed", output):
-            passed = int(m.group(1))
-        if m := re.search(r"(\d+) failed", output):
-            failed = int(m.group(1))
-        if m := re.search(r"(\d+) error", output):
-            errors = int(m.group(1))
-        return passed, failed, errors
+        root = ET.fromstring(report_xml)
+        suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
+        total = failures = errors = skipped = 0
+        for suite in suites:
+            total += int(suite.get("tests", 0))
+            failures += int(suite.get("failures", 0))
+            errors += int(suite.get("errors", 0))
+            skipped += int(suite.get("skipped", 0))
+        passed = total - failures - errors - skipped
+        return passed, failures, errors
 
     def _audit(self, proposal: SelfModProposal, outcome: str, detail: str) -> None:
         audit_log.record(

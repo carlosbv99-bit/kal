@@ -269,7 +269,16 @@ class ImportErrorStrategy(RepairStrategy):
         return (
             "import subprocess, sys\n"
             "subprocess.check_call(\n"
+            # --only-binary :all: (recomendación de una auditoría externa,
+            # 2026-08-24, ver docs/HISTORY.md): rechaza paquetes que solo
+            # existen como sdist, forzando instalar desde wheel (.whl) —
+            # una wheel es un archivo ya construido, instalar una NUNCA
+            # ejecuta setup.py/build scripts del paquete. Sin esto, un
+            # nombre de paquete typosquateado (hallucinado por el LLM,
+            # parecido a uno real) que solo publique sdist ejecutaría su
+            # script de build arbitrario durante el propio `pip install`.
             "    [sys.executable, '-m', 'pip', 'install', '--no-deps', '--quiet',\n"
+            "     '--only-binary', ':all:',\n"
             f"     '--target', '/workspace/.deps', {package_name!r}]\n"
             ")\n"
             "sys.path.insert(0, '/workspace/.deps')\n"
