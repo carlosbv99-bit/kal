@@ -54,6 +54,19 @@ def test_vscode_only_tool_names_includes_android_build_and_screenshot():
     assert "android_build_and_screenshot" in _VSCODE_ONLY_TOOL_NAMES
 
 
+def test_create_text_file_is_available_to_both_clients():
+    """
+    A diferencia de propose_project_files (exclusiva de VS Code,
+    escribe recién del lado de la extensión), CreateTextFileTool sí
+    escribe un archivo real en el backend — tiene sentido para ambos
+    clientes (web, que hasta ahora no tenía NINGUNA forma de entregar
+    un archivo; y VS Code, como alternativa liviana cuando no hace
+    falta escribir dentro del workspace abierto).
+    """
+    assert "create_text_file" not in _MULTIMEDIA_TOOL_NAMES
+    assert "create_text_file" not in _VSCODE_ONLY_TOOL_NAMES
+
+
 def test_vscode_instruction_tells_the_model_never_to_claim_the_android_build_already_finished():
     """
     Pedido explícito del usuario (2026-07-30): monitorear visualmente el

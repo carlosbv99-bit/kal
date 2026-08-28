@@ -390,6 +390,7 @@ def _register_default_static_tools() -> None:
     from tool_integration.adapters.image_gen import ImageGenerationTool
     from tool_integration.adapters.skill_creator_tool import ProposeSkillTool
     from tool_integration.adapters.speech_to_text import SpeechToTextTool
+    from tool_integration.adapters.text_file import CreateTextFileTool
     from tool_integration.adapters.video_gen import VideoCompositionTool
     from tool_integration.adapters.vscode_android import AndroidBuildScreenshotTool
     from tool_integration.adapters.vscode_files import ImportResourceTool, ProposeProjectFilesTool, ReadWorkspaceFileTool
@@ -422,6 +423,7 @@ def _register_default_static_tools() -> None:
     tool_registry.register_static_tool(ReadWorkspaceFileTool())
     tool_registry.register_static_tool(AndroidBuildScreenshotTool())
     tool_registry.register_static_tool(ProposeSkillTool())
+    tool_registry.register_static_tool(CreateTextFileTool())
     tool_registry.load_skills()
 
 

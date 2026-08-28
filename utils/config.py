@@ -461,6 +461,18 @@ class DownloadsConfig(BaseModel):
     artifact_dir: str = "data/artifacts/downloads"
 
 
+class TextFileConfig(BaseModel):
+    """
+    Política de tool_integration/adapters/text_file.py (CreateTextFileTool)
+    — genera un archivo de texto/documento real y descargable (poemas,
+    notas, listas), mismo patrón de artifact_dir que imagen/audio/video.
+    """
+    artifact_dir: str = "data/artifacts/text_files"
+    # Tope generoso pero real — evita que un pedido mal interpretado (o
+    # adversarial) genere un archivo desproporcionadamente grande.
+    max_length_chars: int = 100_000
+
+
 class AgentConfig(BaseModel):
     name: str = "kal"
     max_concurrent_tasks: int = 4
@@ -494,6 +506,7 @@ class Settings(BaseModel):
     audit: AuditConfig
     signing: SigningConfig = SigningConfig()
     browser: BrowserConfig = BrowserConfig()
+    text_files: TextFileConfig = TextFileConfig()
 
 
 def load_settings(path: str | Path = "config/config.yaml") -> Settings:

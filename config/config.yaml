@@ -422,3 +422,10 @@ downloads:
     - "freesound.org"
     - "html5up.net"
     - "startbootstrap.com"
+
+# CreateTextFileTool (tool_integration/adapters/text_file.py) — genera
+# un archivo de texto/documento real y descargable (poemas, notas,
+# listas), mismo patrón de artifact_dir que imagen/audio/video.
+text_files:
+  artifact_dir: "data/artifacts/text_files"
+  max_length_chars: 100000
