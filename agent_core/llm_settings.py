@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import psutil
 import requests
 
 from agent_core.llm.openai_compatible_client import OpenAICompatibleClient
@@ -158,6 +159,17 @@ def update_llm_settings(
             "multimodal.vision.model en config.yaml, si es un modelo de visión)."
         )
 
+    # BUG REAL ENCONTRADO EN USO (2026-08-28): el usuario seleccionó
+    # deepseek-r1:14b (15.1GB) desde la pestaña Modelo mientras kal ya
+    # tenía otros modelos cargados — la máquina (14GB de RAM total) se
+    # quedó sin memoria real, GNOME mató procesos y VS Code se cayó.
+    # Pedido explícito del usuario: "si la memoria está siendo usada y
+    # no hay capacidad de cargar otro modelo, aunque el usuario lo
+    # pida, kal no debe cargarlo". Este chequeo corre ANTES de aceptar
+    # el cambio — nunca después, cuando ya sería tarde.
+    if provider == "ollama" and default_model is not None:
+        _ensure_enough_ram_to_load(default_model)
+
     if base_url is not None:
         _update_yaml_field("base_url", base_url)
         settings.llm.base_url = base_url
@@ -281,6 +293,77 @@ def _ollama_model_supports_tools(name: str) -> bool:
     arriesgarse a ofrecer una opción rota.
     """
     return "tools" in get_ollama_model_capabilities(name)
+
+
+def _available_ram_mb() -> float:
+    """Misma fuente que kernel/broker/resource_broker.py — RAM
+    REALMENTE disponible del sistema ahora mismo, no la total."""
+    return psutil.virtual_memory().available / (1024 * 1024)
+
+
+def _ollama_loaded_model_names() -> set[str]:
+    """Modelos que Ollama YA tiene cargados en RAM ahora mismo (`/api/ps`)
+    — cambiar a uno de estos no consume memoria NUEVA, así que no debe
+    bloquearse por este chequeo."""
+    try:
+        response = requests.get(f"{_OLLAMA_DEFAULT_BASE_URL}/api/ps", timeout=5)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return set()
+    return {m["name"] for m in response.json().get("models", [])}
+
+
+def _ollama_model_size_mb(name: str) -> float | None:
+    """Tamaño en disco de un modelo YA descargado (`/api/tags`, campo
+    `size` en bytes) — la mejor estimación disponible de cuánta RAM va
+    a pedir Ollama al cargarlo (los pesos ocupan aproximadamente lo
+    mismo en RAM que en disco). None si no se pudo determinar."""
+    try:
+        response = requests.get(f"{_OLLAMA_DEFAULT_BASE_URL}/api/tags", timeout=5)
+        response.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
+    for model in response.json().get("models", []):
+        if model.get("name") == name:
+            size_bytes = model.get("size")
+            return size_bytes / (1024 * 1024) if size_bytes is not None else None
+    return None
+
+
+def _ensure_enough_ram_to_load(name: str) -> None:
+    """
+    BUG REAL ENCONTRADO EN USO (2026-08-28): el usuario seleccionó
+    deepseek-r1:14b (15.1GB) desde la pestaña Modelo de la interfaz web
+    mientras Ollama ya tenía otros modelos cargados — la máquina (14GB
+    de RAM total) se quedó sin memoria real, GNOME mató procesos y
+    VS Code se cayó. El ResourceBroker (kernel/broker/resource_broker.py)
+    protege la RAM que kal mismo gestiona (sus propios pipelines
+    pesados vs. el modelo de chat), pero no tenía ningún chequeo ANTES
+    de aceptar un cambio de modelo pedido explícitamente por el
+    usuario — ahí no hay nada que "evictar", hay que directamente
+    rechazar el cambio si no entra.
+
+    Fail-closed (mismo criterio que _ollama_model_supports_tools):
+    si no se puede determinar el tamaño real del modelo, se rechaza
+    el cambio en vez de arriesgarse a cargarlo a ciegas.
+    """
+    if name in _ollama_loaded_model_names():
+        return  # ya está cargado — cambiar a este modelo no pide RAM nueva
+    size_mb = _ollama_model_size_mb(name)
+    if size_mb is None:
+        raise LLMSettingsError(
+            f"No se pudo determinar el tamaño de '{name}' para confirmar que hay RAM suficiente "
+            "antes de cargarlo — por seguridad, no se activa sin poder confirmarlo."
+        )
+    available_mb = _available_ram_mb()
+    min_headroom_mb = settings.resource_broker.min_available_ram_mb
+    if available_mb - size_mb < min_headroom_mb:
+        raise LLMSettingsError(
+            f"No hay RAM suficiente para cargar '{name}' ({size_mb:.0f}MB) sin arriesgar el "
+            f"sistema — disponible ahora: {available_mb:.0f}MB, mínimo que debe quedar libre "
+            f"después de cargarlo: {min_headroom_mb}MB. Liberá memoria (cerrando otros modelos u "
+            "otros programas) o elegí un modelo más chico."
+        )
 
 
 def _first_chat_capable_model(base_url: str, api_key: str) -> str | None:

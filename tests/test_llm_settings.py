@@ -237,6 +237,7 @@ def test_update_rejects_an_ollama_default_model_without_tool_support(_fake_paths
 
 def test_update_accepts_an_ollama_default_model_with_tool_support(_fake_paths, monkeypatch):
     monkeypatch.setattr(llm_settings, "_ollama_model_supports_tools", lambda name: True)
+    monkeypatch.setattr(llm_settings, "_ensure_enough_ram_to_load", lambda name: None)
 
     update_llm_settings(provider="ollama", default_model="qwen2.5-coder:14b")
 
@@ -611,6 +612,115 @@ def test_ollama_model_supports_tools_fails_closed_when_ollama_is_unreachable(mon
     monkeypatch.setattr(llm_settings.requests, "post", _raise)
 
     assert llm_settings._ollama_model_supports_tools("qwen2.5-coder:14b") is False
+
+
+# --- Chequeo de RAM antes de cargar un modelo Ollama nuevo ---
+#
+# BUG REAL ENCONTRADO EN USO (2026-08-28): el usuario seleccionó
+# deepseek-r1:14b (15.1GB) desde la pestaña Modelo mientras Ollama ya
+# tenía otros modelos cargados — la máquina (14GB de RAM total) se
+# quedó sin memoria real, GNOME mató procesos y VS Code se cayó. Pedido
+# explícito: "si la memoria está siendo usada y no hay capacidad de
+# cargar otro modelo, aunque el usuario lo pida, kal no debe cargarlo".
+
+
+def test_ensure_enough_ram_skips_the_check_when_the_model_is_already_loaded(monkeypatch):
+    """Cambiar a un modelo YA cargado no pide RAM nueva — no debe
+    siquiera consultar su tamaño."""
+    monkeypatch.setattr(llm_settings, "_ollama_loaded_model_names", lambda: {"qwen3.5:4b"})
+
+    def _explode(name):
+        raise AssertionError("no debería consultar el tamaño de un modelo ya cargado")
+
+    monkeypatch.setattr(llm_settings, "_ollama_model_size_mb", _explode)
+
+    llm_settings._ensure_enough_ram_to_load("qwen3.5:4b")  # no debe levantar nada
+
+
+def test_ensure_enough_ram_rejects_a_model_that_would_exceed_available_ram(monkeypatch):
+    monkeypatch.setattr(llm_settings, "_ollama_loaded_model_names", lambda: set())
+    monkeypatch.setattr(llm_settings, "_ollama_model_size_mb", lambda name: 15_000.0)  # ~deepseek-r1:14b
+    monkeypatch.setattr(llm_settings, "_available_ram_mb", lambda: 3_000.0)
+    monkeypatch.setattr(settings.resource_broker, "min_available_ram_mb", 2048)
+
+    with pytest.raises(LLMSettingsError, match="No hay RAM suficiente"):
+        llm_settings._ensure_enough_ram_to_load("deepseek-r1:14b")
+
+
+def test_ensure_enough_ram_accepts_a_model_that_fits_with_headroom_to_spare(monkeypatch):
+    monkeypatch.setattr(llm_settings, "_ollama_loaded_model_names", lambda: set())
+    monkeypatch.setattr(llm_settings, "_ollama_model_size_mb", lambda name: 4_000.0)  # ~qwen3.5:4b
+    monkeypatch.setattr(llm_settings, "_available_ram_mb", lambda: 10_000.0)
+    monkeypatch.setattr(settings.resource_broker, "min_available_ram_mb", 2048)
+
+    llm_settings._ensure_enough_ram_to_load("qwen3.5:4b")  # no debe levantar nada
+
+
+def test_ensure_enough_ram_fails_closed_when_the_model_size_cannot_be_determined(monkeypatch):
+    """Mismo criterio que _ollama_model_supports_tools: un modelo que no
+    se puede confirmar se rechaza, nunca se carga a ciegas."""
+    monkeypatch.setattr(llm_settings, "_ollama_loaded_model_names", lambda: set())
+    monkeypatch.setattr(llm_settings, "_ollama_model_size_mb", lambda name: None)
+
+    with pytest.raises(LLMSettingsError, match="No se pudo determinar el tamaño"):
+        llm_settings._ensure_enough_ram_to_load("un-modelo-que-no-existe")
+
+
+def test_ollama_model_size_mb_reads_the_size_field_from_api_tags(monkeypatch):
+    monkeypatch.setattr(
+        llm_settings.requests, "get",
+        lambda url, timeout: _fake_response(
+            {"models": [{"name": "qwen3.5:4b", "size": 4_294_967_296}, {"name": "otro", "size": 1}]}
+        ),
+    )
+
+    assert llm_settings._ollama_model_size_mb("qwen3.5:4b") == 4096.0
+
+
+def test_ollama_model_size_mb_returns_none_for_an_unknown_model(monkeypatch):
+    monkeypatch.setattr(
+        llm_settings.requests, "get",
+        lambda url, timeout: _fake_response({"models": [{"name": "otro", "size": 1}]}),
+    )
+
+    assert llm_settings._ollama_model_size_mb("no-esta-en-la-lista") is None
+
+
+def test_ollama_loaded_model_names_reads_from_api_ps(monkeypatch):
+    monkeypatch.setattr(
+        llm_settings.requests, "get",
+        lambda url, timeout: _fake_response({"models": [{"name": "qwen3.5:4b"}, {"name": "qwen2.5:3b"}]}),
+    )
+
+    assert llm_settings._ollama_loaded_model_names() == {"qwen3.5:4b", "qwen2.5:3b"}
+
+
+def test_ollama_loaded_model_names_fails_closed_to_empty_set_when_unreachable(monkeypatch):
+    def _raise(*a, **k):
+        raise requests.exceptions.ConnectionError("no route")
+
+    monkeypatch.setattr(llm_settings.requests, "get", _raise)
+
+    assert llm_settings._ollama_loaded_model_names() == set()
+
+
+def test_update_llm_settings_rejects_a_model_switch_without_enough_ram(_fake_paths, monkeypatch):
+    """
+    Reproduce el incidente real: provider=ollama + default_model de un
+    modelo grande, sin RAM suficiente — update_llm_settings() debe
+    rechazarlo ANTES de escribir nada a disco, mismo criterio que el
+    chequeo de tool-calling.
+    """
+    monkeypatch.setattr(llm_settings, "_ollama_model_supports_tools", lambda name: True)
+    monkeypatch.setattr(llm_settings, "_ollama_loaded_model_names", lambda: set())
+    monkeypatch.setattr(llm_settings, "_ollama_model_size_mb", lambda name: 15_000.0)
+    monkeypatch.setattr(llm_settings, "_available_ram_mb", lambda: 3_000.0)
+    monkeypatch.setattr(settings.resource_broker, "min_available_ram_mb", 2048)
+
+    with pytest.raises(LLMSettingsError, match="No hay RAM suficiente"):
+        update_llm_settings(provider="ollama", default_model="deepseek-r1:14b")
+
+    assert settings.llm.default_model == "qwen3-coder:30b"  # el de _FAKE_CONFIG_YAML, sin tocar
 
 
 def test_list_model_sources_excludes_local_ollama_models_without_tool_support(monkeypatch):

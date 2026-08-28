@@ -7853,3 +7853,72 @@ real, sanitización de nombre, tope de longitud, colisión de nombres),
 `test_client_provider.py` confirmando que el tool no está excluido
 para ningún cliente.
 
+## Incidente real: caída del sistema por selección de modelo sin chequeo de RAM (2026-08-28)
+
+Mientras corría la suite completa del cambio anterior, el usuario
+seleccionó `deepseek-r1:14b` (15.1GB) desde la pestaña Modelo de la
+interfaz web — la máquina (14GB de RAM total) se quedó sin memoria
+real, GNOME mató un proceso ("la memoria del dispositivo está casi
+llena") y VS Code se cayó (mismo proceso que aloja esta sesión, la
+corrida de tests en background se perdió sin dejar registro de
+finalización).
+
+**Diagnóstico real** (`ollama ps`, no supuesto): 3 modelos cargados
+simultáneamente — `qwen3.5:4b` (4.06GB), `qwen2.5:3b` (3.35GB, el del
+Conversation Engine) y `deepseek-r1:14b` (15.1GB) — sumando ~22.5GB en
+una máquina de 14GB. `deepseek-r1:14b` no es un modelo que kal cargue
+por sí mismo (no es `default_model` ni el del Conversation Engine) —
+lo cargó la selección manual del usuario. El ResourceBroker
+(`kernel/broker/resource_broker.py`) protege la RAM que KAL MISMO
+gestiona (sus propios pipelines pesados vs. su modelo de chat), pero
+no tenía ningún chequeo ANTES de aceptar un cambio de modelo pedido
+explícitamente — ahí no hay nada que evictar, hay que rechazar el
+pedido directamente.
+
+Pedido explícito del usuario: *"si la memoria está siendo usada y no
+hay capacidad de cargar otro modelo, aunque el usuario lo pida, kal no
+debe cargarlo"*.
+
+**Fix**: `agent_core/llm_settings.py::update_llm_settings()` — nuevo
+chequeo `_ensure_enough_ram_to_load(default_model)`, corre ANTES de
+aceptar cualquier cambio a `provider="ollama"` con un `default_model`
+nuevo (mismo punto donde ya corre la validación de tool-calling).
+- Si el modelo pedido YA está cargado (`/api/ps`), no hace falta RAM
+  nueva — se deja pasar sin chequeo de tamaño.
+- Si no, se consulta su tamaño real en disco (`/api/tags`, campo
+  `size`) y se compara contra la RAM disponible ahora
+  (`psutil.virtual_memory().available`, misma fuente que
+  ResourceBroker) menos el mismo margen de seguridad ya establecido
+  (`resource_broker.min_available_ram_mb`, 2048MB) — si no entra, se
+  rechaza con `LLMSettingsError` (400 desde el endpoint), sin escribir
+  nada a disco ni tocar `settings.llm` en memoria.
+- Fail-closed si no se puede determinar el tamaño del modelo (mismo
+  criterio que `_ollama_model_supports_tools`): se rechaza en vez de
+  cargarlo a ciegas.
+
+**Límite conocido, documentado no escondido**: el tamaño en DISCO
+(`/api/tags`) es una estimación, no el uso real de RAM en runtime —
+puede quedarse corto por el KV cache/contexto que Ollama reserva
+además de los pesos del modelo (confirmado en la verificación en vivo:
+`/api/tags` reportó 8572MB para deepseek-r1:14b, mientras que `/api/ps`
+con el modelo ya cargado había mostrado ~14.4GB reales antes del
+incidente). Sigue siendo una mejora real y sustancial sobre no tener
+ningún chequeo — y en la verificación en vivo, incluso con la
+estimación más chica, el pedido se rechazó igual.
+
+**Verificado en vivo contra el Ollama y la RAM reales de la máquina**
+(no solo mocks): con ~2.7GB disponibles reales, un pedido real de
+cambiar a `deepseek-r1:14b` fue rechazado (tanto llamando
+`_ensure_enough_ram_to_load()` directo como a través de
+`update_llm_settings()` completo — `default_model` nunca cambió).
+Cambiar a un modelo YA cargado (`qwen2.5:3b`) pasó sin problema, sin
+siquiera consultar su tamaño.
+
+12 tests nuevos en `test_llm_settings.py` (el chequeo en sí — ya
+cargado, rechaza por RAM, acepta con margen, fail-closed sin tamaño,
+`_ollama_model_size_mb`/`_ollama_loaded_model_names` parseando
+`/api/tags`/`/api/ps`, y la integración completa a través de
+`update_llm_settings()`); un test existente actualizado para mockear
+el chequeo nuevo. Suite completa (`pytest tests/ -q`, corrida sola, sin
+otra operación pesada en paralelo — lección directa de este mismo
+incidente): 1142 passed, 0 regresiones.
