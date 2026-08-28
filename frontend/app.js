@@ -370,6 +370,23 @@ function appendImageMessage(url, altText) {
   chatScroll.scrollTop = chatScroll.scrollHeight;
 }
 
+// ---------- Documentos de texto (CreateTextFileTool) en el chat ----------
+// A diferencia de una imagen, un documento se ofrece como descarga, no
+// se renderiza inline — el navegador ya sabe hacer esto con `download`.
+
+function appendDocumentMessage(url, filename) {
+  chatEmpty.style.display = "none";
+  const wrapper = el("div", "msg msg-agent");
+  const link = document.createElement("a");
+  link.className = "chat-document-message";
+  link.href = url;
+  link.download = filename || "documento.txt";
+  link.textContent = `📄 Descargar ${filename || "documento.txt"}`;
+  wrapper.appendChild(link);
+  chatScroll.appendChild(wrapper);
+  chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
 function appendAgentResult(result) {
   if (result.plan && result.plan.length > 1) {
     const planBox = el("div", "msg-steps");
@@ -394,6 +411,9 @@ function appendAgentResult(result) {
       // mensaje más del chat, sin que el usuario tenga que hacer nada.
       if (step.artifact && step.artifact.modality === "image") {
         appendImageMessage(step.artifact.url, "Imagen generada por kal");
+      }
+      if (step.artifact && step.artifact.modality === "document") {
+        appendDocumentMessage(step.artifact.url, step.artifact.filename);
       }
     }
     chatScroll.appendChild(stepsBox);

@@ -195,10 +195,12 @@ Reglas:
   así, seguí aclarando en tu respuesta final que la posición sigue siendo una estimación — nunca
   afirmes que el resultado es exacto.
 - run_code NUNCA puede crear archivos que el usuario se lleve (una página web, una app, un
-  proyecto con varios archivos): `import os` y `open()` están prohibidos a propósito en ese
-  sandbox. Si el pedido requiere ese tipo de archivo y tenés disponible propose_project_files,
-  usala en cambio. Si NO la tenés disponible, no intentes escribirlo con run_code de todos
-  modos — respondé con el código completo en la respuesta final en cambio.
+  proyecto con varios archivos, un documento de texto): `import os` y `open()` están prohibidos
+  a propósito en ese sandbox. Para un documento de texto simple (poema, notas, lista) usá
+  create_text_file si la tenés disponible. Para un proyecto con varios archivos de código usá
+  propose_project_files si la tenés disponible (solo VS Code). Si NO tenés ninguna de las dos
+  disponible, no intentes escribirlo con run_code de todos modos — respondé con el contenido
+  completo en la respuesta final en cambio.
 
 Ejemplos de cuándo NO llamar a ninguna herramienta:
 - "hola" / "¿quién sos?" / "quien eres" -> responder directo, sin llamar a NINGUNA herramienta (ni

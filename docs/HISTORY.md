@@ -7788,4 +7788,68 @@ separado (el proxy solo, `DockerSandboxRunner` real contra el proxy vía
 `DOCKER_HOST`, un build real a través del proxy) pero no el stack
 completo levantado con `docker-compose.yml` tal cual queda en el repo.
 
-Suite completa (`pytest tests/ -q`): a confirmar tras este commit.
+Suite completa (`pytest tests/ -q`): 1120 passed, 0 regresiones.
+
+## Nueva capacidad: create_text_file — cierra un hueco real encontrado en uso (2026-08-26)
+
+Un usuario le pidió a kal, desde el cliente WEB, "creá un .txt en
+Documentos con un poema". kal respondió que no podía — correctamente,
+en ese momento: `run_code` no tiene acceso al filesystem del host (por
+diseño) y `propose_project_files` (la única herramienta que "entrega"
+un archivo) está excluida estructuralmente para `client != vscode`
+(`agent_core/client_provider.py::_VSCODE_ONLY_TOOL_NAMES`). No fue una
+alucinación del modelo — se verificó contra el código real que la
+capacidad genuinamente no existía. Pero el mecanismo genérico de
+artifacts (el que ya sirve imagen/audio/video como descargas reales
+desde `data/artifacts/`) era totalmente reusable, así que se agregó la
+pieza que faltaba.
+
+**Nuevo**: `tool_integration/adapters/text_file.py::CreateTextFileTool`
+(`create_text_file`) — escribe un `.txt` real bajo
+`data/artifacts/text_files/` y devuelve `Artifact(modality="document", ...)`.
+Disponible para AMBOS clientes (web y VS Code) — a diferencia de
+`propose_project_files`, sí escribe un archivo real en el backend, así
+que tiene sentido incluso en VS Code cuando no hace falta escribir
+dentro del workspace abierto. Nueva `TextFileConfig` (`utils/config.py`
++ `config.yaml`: `text_files.artifact_dir`, `text_files.max_length_chars`
+— tope de 100.000 caracteres, defensa barata contra un pedido
+desproporcionado).
+
+**Piezas que hubo que tocar para que el modality nuevo llegue de punta
+a punta** (documentado ya en la investigación previa a este cambio,
+confirmado exacto):
+- `agent_core/routers/chat.py::_step_artifact()` — el filtro
+  `if modality != "image": return None` pasó a aceptar también
+  `"document"`, agregando el campo `"filename"` extra que el frontend
+  necesita para el link de descarga.
+- `agent_core/llm/agent_loop.py` (SYSTEM_PROMPT) — la regla existente
+  sobre `run_code`/`propose_project_files` ahora menciona
+  `create_text_file` como la opción correcta para un documento simple
+  (poema, notas, lista), reservando `propose_project_files` para un
+  proyecto con varios archivos de código.
+- `frontend/app.js`/`style.css` — nueva `appendDocumentMessage()` +
+  `.chat-document-message`, un link de descarga real (`<a download>`),
+  mismo patrón visual que `appendImageMessage()`.
+- `kernel/registry/registry.py` — registro del tool nuevo.
+
+**Bug propio encontrado en la verificación en vivo** (no en tests con
+mocks): el modelo a veces manda el nombre de archivo CON la extensión
+ya incluida (`"poema.txt"`) — sin chequearlo, el archivo final quedaba
+`poema.txt-<id>.txt` (extensión duplicada). `_safe_filename()` ahora
+recorta un `.txt` final antes de agregar el propio.
+
+**Verificado en vivo, de punta a punta, con Ollama real** (no solo
+tests con mocks): pedido real "creá un .txt con un poema corto sobre
+[tema]" desde `client=web` → el modelo eligió `create_text_file` solo
+(sin instrucción especial en el pedido), generó el poema, y un GET
+real a la URL devuelta (`/artifacts/text_files/...`) devolvió el
+contenido real con `content-type: text/plain`. Repetido después del fix
+de la extensión duplicada para confirmar el nombre de archivo limpio.
+
+19 tests nuevos: `test_text_file_tool.py` (el tool en sí — escritura
+real, sanitización de nombre, tope de longitud, colisión de nombres),
+`test_orchestrator_chat_document_artifact.py` (serialización de
+`_step_artifact` para `modality="document"`), más una aserción en
+`test_client_provider.py` confirmando que el tool no está excluido
+para ningún cliente.
+

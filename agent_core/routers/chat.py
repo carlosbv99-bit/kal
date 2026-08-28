@@ -300,12 +300,19 @@ def chat(req: ChatRequest):
                 "modality": "android_build_request",
                 "request_id": step.artifact.metadata.get("request_id"),
             }
-        if step.artifact.modality != "image":
+        if step.artifact.modality not in ("image", "document"):
             return None
         url = _artifact_url(step.artifact.uri)
         if url is None:
             return None
-        return {"modality": step.artifact.modality, "url": url, "path": step.artifact.uri}
+        result = {"modality": step.artifact.modality, "url": url, "path": step.artifact.uri}
+        if step.artifact.modality == "document":
+            # CreateTextFileTool (tool_integration/adapters/text_file.py):
+            # el frontend necesita el nombre real para el link de
+            # descarga (el nombre del archivo en disco incluye un sufijo
+            # uuid que no hace falta mostrarle al usuario).
+            result["filename"] = step.artifact.metadata.get("filename", Path(step.artifact.uri).name)
+        return result
 
     return {
         "session_id": session.id,
