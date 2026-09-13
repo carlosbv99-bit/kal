@@ -1,30 +1,21 @@
-# Núcleo del Kernel: lo mínimo para que kal arranque y atienda /chat con un
-# LLM (local u OpenAI-compatible), sin ninguna capacidad multimodal encima.
-# Validado en un venv limpio (ver docs/HISTORY.md, CI 2026-07-25): esta es
-# la lista real que hace falta para que la suite de tests colecte y corra,
-# no una suposición por análisis estático de imports.
+# Kernel puro: sin agente, sin capacidades multimodales. Extraído de
+# kal-in (2026-09), donde este archivo incluía además lo necesario para
+# agent_core (chromadb/sqlalchemy para memoria, Pillow/tenacity/
+# structlog/python-multipart para el agente) — verificado uno por uno
+# que el kernel NO los usa (grep real, no suposición) antes de sacarlos.
+# Validado en un venv limpio: la suite de tests (367 tests) colecta y
+# corre completa instalando SOLO esta lista.
 
 # --- Core ---
 pydantic>=2.6
 pydantic-settings>=2.2
 PyYAML>=6.0
 python-dotenv>=1.0
-requests>=2.31          # usado directamente por agent_core/llm/ollama_client.py
+requests>=2.31          # usado por kernel/lifecycle/docker_runner.py
 
-# --- Web / API ---
+# --- Web / API (kernel/api/sandbox_api.py) ---
 fastapi>=0.110
 uvicorn[standard]>=0.29
-python-multipart>=0.0.9  # requisito de FastAPI para UploadFile/Form (POST /uploads)
-
-# --- Memoria ---
-# Mediano plazo
-sqlalchemy>=2.0
-# Largo plazo — chromadb es NO perezoso (LongTermMemory._build_client() lo
-# importa en __init__, y MemoryManager se construye como singleton al
-# importar agent_core/orchestrator.py), así que va en core y no en
-# multimodal pese a ser parte del stack de memoria "pesada".
-chromadb>=0.4
-# qdrant-client>=1.8  # alternativa para producción
 
 # --- Sandbox ---
 docker>=7.0
@@ -33,12 +24,4 @@ docker>=7.0
 cryptography>=42.0
 
 # --- Utilidades ---
-tenacity>=8.2          # reintentos con backoff
-structlog>=24.1         # logging estructurado
 psutil>=5.9            # RAM disponible del sistema, ver kernel/broker/resource_broker.py
-
-# --- Imágenes ---
-# Pillow (no solo diffusers/rembg) se usa directo en varios módulos core
-# (download_manager.py, image_editing.py) y en tests sin importorskip —
-# va en core, no en multimodal.
-Pillow>=10.0

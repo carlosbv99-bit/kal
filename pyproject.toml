@@ -1,0 +1,27 @@
+[project]
+name = "kal"
+version = "0.1.0"
+description = "Kal: microkernel de seguridad para capacidades de agentes de IA — Access Manager, sandbox Docker, audit log con hash-chain, Kernel Service Bus. Sin agente, sin LLM, sin ML: extraído de kal-in (el agente de referencia, repo separado)."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = [
+    "kernel",
+    "kernel.api",
+    "kernel.broker",
+    "kernel.lifecycle",
+    "kernel.lifecycle.ebpf",
+    "kernel.permissions",
+    "kernel.registry",
+    "kernel.security",
+    "sdk",
+    "audit",
+    "utils",
+    "code_analysis",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

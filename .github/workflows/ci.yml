@@ -2,19 +2,9 @@ name: CI
 
 # Pipeline general (tests + lint) en cada push/PR — a diferencia de
 # validate-skills.yml (que solo corre cuando cambia skills/**), este
-# corre siempre. Instala requirements-core.txt + requirements-dev.txt a
-# propósito, SIN requirements-multimodal.txt (diffusers/accelerate/
-# piper-tts/faster-whisper/rembg/playwright/sentence-transformers/
-# moviepy/huggingface_hub — la parte ML pesada, varios GB): los tests
-# que las necesitan usan `pytest.importorskip(...)` y se saltan solos en
-# vez de fallar (ver tests/test_memory_manager.py, tests/test_image_gen.py,
-# etc.) — así el feedback rápido no depende de descargar modelos
-# pesados en cada corrida. chromadb y Pillow SÍ están en
-# requirements-core.txt pese a ser "multimodal" en espíritu — son
-# necesarios para que la suite entera colecte, no solo para memoria de
-# largo plazo (ver docs/HISTORY.md). La cobertura real end-to-end de la
-# parte pesada (SDXL-Turbo, whisper, piper, etc.) queda para un job
-# nocturno separado (nightly.yml, todavía no implementado).
+# corre siempre. Kernel puro: sin agente, sin ML — requirements-core.txt
+# es la lista completa real (verificada con grep antes de extraer este
+# repo de kal-in, ver docs/HISTORY.md), no una selección parcial.
 #
 # Docker SÍ está disponible por defecto en runners ubuntu-latest (sin
 # necesidad de servicios extra ni de construir una imagen) — los tests
@@ -41,12 +31,12 @@ jobs:
 
       # clamav (binario clamscan, no un daemon) — necesario para los
       # tests reales de escaneo de artefactos de skills (fail-closed
-      # por diseño, ver tool_integration/malware_scan.py); sin esto
-      # esos tests puntuales rechazarían el escaneo en vez de pasar.
+      # por diseño, ver kernel/security/malware_scan.py); sin esto esos
+      # tests puntuales rechazarían el escaneo en vez de pasar.
       - name: Instalar ClamAV
         run: sudo apt-get update && sudo apt-get install -y clamav
 
-      - name: Instalar dependencias (core + dev, sin el stack multimodal)
+      - name: Instalar dependencias
         run: pip install -r requirements-core.txt -r requirements-dev.txt
 
       - name: Lint (solo errores reales — sintaxis/pyflakes, no estilo)

@@ -1,0 +1,62 @@
+# Kal
+
+**A pure security microkernel for AI agent capabilities — no agent, no LLM, no ML bundled.**
+
+Kal was extracted from [kal-in](https://github.com/carlosbv99-bit/kal-in)
+(kal's own reference agent) in September 2026, once it became clear the
+two needed to be independently usable: a kernel that mediates what any
+agent — kal-in's own reference agent, or a third-party one — is allowed
+to do, without shipping a specific agent's tools bundled inside it. The
+first consumer of this separation is [Likay-OS](https://github.com/Kevindelb/Likay-OS),
+an operating system for AI agents that needs a kernel it can mount
+underneath *any* agent without the kernel colliding with that agent's
+own toolset.
+
+## What's in here
+
+- **Access Manager / Permission Cascade** (`kernel/permissions/`) —
+  tiered, deny-by-default access to filesystem and network, with
+  explicit human approval gates.
+- **Sandbox** (`kernel/lifecycle/`) — every untrusted skill runs in an
+  isolated, non-root Docker container, regardless of where it came
+  from.
+- **Tool Registry** (`kernel/registry/`) — generic registration,
+  versioning, rollback and cryptographic signature verification for
+  tools/skills. Deciding *which* tools exist by default is agent
+  policy, not kernel mechanism — this repo registers none.
+- **Audit Log** (`audit/`) — hash-chained, tamper-evident record of
+  every sensitive action.
+- **Kernel Service Bus** (`kernel/api/`) — generic dispatch-by-name
+  protocol + Unix socket server so a sandboxed skill can call out to a
+  service without ever seeing a real filesystem path.
+- **Resource Broker** (`kernel/broker/`) — tracks and evicts resources
+  under memory pressure; blind to anything an agent doesn't explicitly
+  register with it (see Likay-OS's roadmap for closing that gap for
+  externally-mediated agents).
+- **SDK** (`sdk/`) — the stable, versioned, 100%-stdlib public surface
+  a Skill or agent uses to talk to the kernel (`Tool`, `ToolManifest`,
+  `Artifact`, `Permission`) — never kernel internals directly.
+- **Static code analysis** (`code_analysis/`) — AST-level validation of
+  dynamically-proposed tool code before it ever reaches a sandbox.
+
+This repo has **zero** dependency on any LLM, ML library, or specific
+agent framework — verified, not assumed: `import agent_core` and
+`import tool_integration` both fail with `ModuleNotFoundError` here.
+
+## What's NOT in here
+
+Anything that decides *what an agent does* — the reasoning loop, tool
+implementations (image/audio/video generation, browser automation,
+memory), model selection, prompts — lives in
+[kal-in](https://github.com/carlosbv99-bit/kal-in), kal's own reference
+agent built on top of this kernel. A third-party agent could equally be
+built on top of this kernel instead.
+
+## Status
+
+Extracted with git history preserved for every file that moved here
+(`git log --follow` on any path under `kernel/`/`sdk/`/`audit/` shows
+its history from before the split). 367 tests, standalone, installing
+only `requirements-core.txt` — no agent code, no ML libraries.
+
+License: [Apache 2.0](LICENSE).
