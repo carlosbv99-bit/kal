@@ -31,7 +31,7 @@ operativo para agentes de IA que necesita un kernel que pueda montar
 debajo de *cualquier* agente sin que el kernel choque con el conjunto
 de herramientas propio de ese agente.
 
-## Qué hay acá
+## Qué hay aquí
 
 - **Access Manager / Cascada de Permisos** (`kernel/permissions/`) —
   acceso por niveles, deny-by-default, a filesystem y red, con
@@ -63,10 +63,10 @@ de herramientas propio de ese agente.
 
 Este repo tiene **cero** dependencia de cualquier LLM, librería de ML,
 o framework de agente específico — verificado, no asumido: tanto
-`import agent_core` como `import tool_integration` fallan acá con
+`import agent_core` como `import tool_integration` fallan aquí con
 `ModuleNotFoundError`.
 
-## Qué NO hay acá
+## Qué NO hay aquí
 
 Todo lo que decide *qué hace un agente* — el loop de razonamiento, las
 implementaciones de herramientas (generación de imagen/audio/video,
@@ -79,7 +79,7 @@ mismo kernel.
 ## Estado
 
 Extraído preservando el historial de git de cada archivo que se movió
-acá (`git log --follow` sobre cualquier ruta bajo `kernel/`/`sdk/`/
+aquí (`git log --follow` sobre cualquier ruta bajo `kernel/`/`sdk/`/
 `audit/` muestra su historia desde antes de la separación). 367 tests,
 autocontenido, instalando solo `requirements-core.txt` — sin código de
 agente, sin librerías de ML.
@@ -88,7 +88,7 @@ agente, sin librerías de ML.
 
 Es un proyecto joven, en desarrollo activo, y hay lugar de verdad para
 aportar — no hace falta haber escrito un framework de agentes para
-tener algo que sumar acá. Revisión de seguridad, probar el sandbox
+tener algo que sumar aquí. Revisión de seguridad, probar el sandbox
 contra casos que no se nos ocurrieron, y simplemente hacer preguntas
 difíciles sobre el modelo de amenazas son todos aportes genuinamente
 útiles.
@@ -96,8 +96,10 @@ difíciles sobre el modelo de amenazas son todos aportes genuinamente
 - Abre un [issue](https://github.com/carlosbv99-bit/kal/issues) para
   proponer algo, reportar un bug, o preguntar por dónde empezar.
 - Si quieres escribir o hablar sobre este proyecto, este README y el
-  código mismo son la fuente primaria — cada afirmación acá está
+  código mismo son la fuente primaria — cada afirmación aquí está
   pensada para poder verificarse contra lo que realmente hay en el
-  repo.
+  repo. Ese mismo nivel de minuciosidad es el método diario de
+  trabajo: cada cambio se revisa y se verifica en coordinación
+  permanente con Claude (Anthropic), no solo se documenta después.
 
 Licencia: [Apache 2.0](LICENSE).
