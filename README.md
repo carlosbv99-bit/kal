@@ -1,6 +1,21 @@
 # Kal
 
+🇬🇧 English | 🇪🇸 [Español](README.es.md)
+
+> A kernel doesn't ask an AI agent's code if it can be trusted — it
+> makes sure it never has to be.
+
 **A pure security microkernel for AI agent capabilities — no agent, no LLM, no ML bundled.**
+
+Every AI agent framework eventually has to answer the same question:
+when an agent's code goes wrong — a bad tool call, a compromised
+dependency, a prompt injection that talks it into something it
+shouldn't do — what actually stops it? Too often the honest answer is
+"nothing built in, we just trust the code." Kal is built around the
+opposite answer: a security microkernel that mediates everything an
+agent — or any piece of code running as one of its tools — is allowed
+to touch, enforced from outside that code, so no individual Skill has
+to be trusted for the whole system to stay safe.
 
 Kal was extracted from [kal-in](https://github.com/carlosbv99-bit/kal-in)
 (kal's own reference agent) in September 2026, once it became clear the
@@ -58,5 +73,19 @@ Extracted with git history preserved for every file that moved here
 (`git log --follow` on any path under `kernel/`/`sdk/`/`audit/` shows
 its history from before the split). 367 tests, standalone, installing
 only `requirements-core.txt` — no agent code, no ML libraries.
+
+## Get involved
+
+This is a young, actively developed project, and there's real room to
+contribute — you don't need to be the one who wrote an agent framework
+to have something to add here. Security review, testing the sandbox
+against cases we haven't thought of, and just asking hard questions
+about the threat model are all genuinely useful.
+
+- Open an [issue](https://github.com/carlosbv99-bit/kal/issues) to
+  propose something, report a bug, or ask where to start.
+- If you want to write or talk about this project, this README and
+  the code itself are the primary source — every claim here is meant
+  to be checkable against what's actually in the repo.
 
 License: [Apache 2.0](LICENSE).
