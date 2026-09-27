@@ -62,6 +62,10 @@ class LineTooLongError(Exception):
     """Una conexión mandó más de _MAX_LINE_BYTES sin un salto de línea."""
 
 
+class InvalidEncodingError(Exception):
+    """Una conexión mandó bytes que no son UTF-8 válido."""
+
+
 class KernelBusSocketServer:
     def __init__(
         self,
@@ -130,6 +134,9 @@ class KernelBusSocketServer:
                     except LineTooLongError:
                         self._audit_line_too_long()
                         continue
+                    except InvalidEncodingError as e:
+                        self._audit_invalid_encoding(str(e))
+                        continue
                     if line is None:
                         continue
 
@@ -161,7 +168,18 @@ class KernelBusSocketServer:
             if len(buf) > _MAX_LINE_BYTES:
                 raise LineTooLongError(f"línea de más de {_MAX_LINE_BYTES} bytes sin salto de línea")
         line, _, _ = buf.partition(b"\n")
-        return line.decode("utf-8")
+        try:
+            return line.decode("utf-8")
+        except UnicodeDecodeError as e:
+            # BUG REAL ENCONTRADO EN AUDITORÍA EXTERNA (B-4, 2026-09-26):
+            # sin este try/except, bytes que no son UTF-8 válido hacían
+            # que UnicodeDecodeError se propagara sin atrapar desde acá
+            # — matando el THREAD entero de _serve() (ver más abajo, sin
+            # try/except propio para esto), no solo esta conexión. Una
+            # skill que manda un pedido malformado (sea por bug propio o
+            # a propósito) no debería poder tumbar el resto de su
+            # sesión con el Kernel Service Bus.
+            raise InvalidEncodingError(str(e)) from e
 
     def _handle_line(self, line: str) -> str:
         try:
@@ -235,6 +253,16 @@ class KernelBusSocketServer:
             AuditEvent(
                 event_type="kernel_line_too_long",
                 summary=f"Skill '{self.skill_name}' mandó una línea de más de {_MAX_LINE_BYTES} bytes sin salto de línea — conexión cortada",
+                context={"skill": self.skill_name},
+                outcome="failure",
+            )
+        )
+
+    def _audit_invalid_encoding(self, detail: str) -> None:
+        audit_log.record(
+            AuditEvent(
+                event_type="kernel_invalid_encoding",
+                summary=f"Skill '{self.skill_name}' mandó bytes que no son UTF-8 válido ({detail}) — conexión cortada",
                 context={"skill": self.skill_name},
                 outcome="failure",
             )

@@ -391,3 +391,32 @@ vaciar sin que alguien note el motivo. Suite completa: 401 passed
 (1 test de `test_kernel_bus_socket_server.py` resultó flaky en una
 corrida — no relacionado, confirmado pasando 3/3 en aislamiento y en
 una segunda corrida completa limpia), 0 failed.
+
+**Un último hallazgo (B-4, BAJO en el informe original, pero
+kernel/api/socket_server.py SÍ es de este repo)**: `_read_line()` hacía
+`line.decode("utf-8")` sin try/except — bytes que no son UTF-8 válido
+(una skill con un bug propio, o a propósito) hacían que
+`UnicodeDecodeError` matara el THREAD ENTERO de `_serve()`, no solo esa
+conexión puntual: el resto de la sesión de esa skill con el Kernel
+Service Bus quedaba inutilizable (`ECONNREFUSED` en cualquier pedido
+siguiente), aunque `max_requests` todavía tuviera cupo. Mismo patrón ya
+establecido para `LineTooLongError`: nueva excepción propia
+(`InvalidEncodingError`), auditada (`kernel_invalid_encoding`), la
+conexión se corta pero el thread sigue vivo para las siguientes. 2
+tests nuevos (unit test directo de `_read_line`, más uno de punta a
+punta con un socket Unix real confirmando que una skill hostil no
+puede tumbar el resto de su propia sesión). Suite completa: 403
+passed, 0 failed.
+
+Con esto, se agotaron los hallazgos de `docs/SECURITY-AUDIT-2026-09-26.md`
+que aplican al kernel puro (`kernel/`, `sdk/`, `audit/`,
+`code_analysis/`) — el resto (C-1/C-2/C-4/C-5, A-2/A-3/A-4/A-6/A-7/
+A-8/A-9, la mayoría de los M-*/B-*) son de `agent_core/`,
+`tool_integration/`, `frontend/` o la extensión de VS Code, ninguno de
+los cuales existe en este repo. **Aceptado, no resuelto, decisión
+consciente de alcance**: M-12 (el hash-chain del log de auditoría es
+SHA-256 sin clave — íntegro contra errores/carreras, no auténtico
+contra quien pueda escribir el archivo) pide firmarlo con HMAC, lo que
+implica decidir una estrategia de gestión de esa clave nueva (dónde
+vive, cómo se rota) — un cambio de diseño real, no una corrección
+mecánica, que queda para una decisión explícita aparte.
