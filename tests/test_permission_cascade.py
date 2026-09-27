@@ -101,3 +101,25 @@ def test_cascade_only_reports_what_was_actually_requested():
     cascade = PermissionCascade(_FakeCascadeConfig())
     missing = cascade.missing_permissions(frozenset({Permission.FILESYSTEM_READ}), "skill")
     assert missing == frozenset()  # skill SÍ cubre filesystem_read
+
+
+# --- config.yaml real (no un fake): defaults que no deben aflojarse sin querer ---
+
+
+def test_default_config_denies_the_highest_impact_permissions_globally():
+    """
+    A-5 (auditoría externa Likay-OS, 2026-09-26): el tier "system" de
+    trust_tier_caps por sí solo incluye los 9 permisos, así que
+    missing_permissions() no rechaza nada por tier para ese nivel —
+    globally_denied es la ÚNICA capa que sigue aplicando incluso ahí.
+    Antes vacío por defecto en config/config.yaml; ancla contra que
+    alguien lo vuelva a vaciar sin darse cuenta del motivo.
+    """
+    from utils.config import settings
+
+    cascade = PermissionCascade(settings.permissions)
+    highest_impact = frozenset({Permission.DOCKER, Permission.CLIPBOARD, Permission.CAMERA, Permission.MICROPHONE})
+
+    missing = cascade.missing_permissions(highest_impact, "system")
+
+    assert missing == highest_impact

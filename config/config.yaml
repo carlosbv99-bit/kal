@@ -60,9 +60,27 @@ tool_integration:
 # los niveles presentes — "más restrictivo gana".
 permissions:
   # Techo del sistema entero: nadie por debajo puede otorgar un permiso
-  # listado acá, pase lo que pase. Vacío por defecto — no hay ninguna
-  # prohibición global todavía, cada instalación la ajusta a su criterio.
-  globally_denied: []
+  # listado acá, pase lo que pase — ni siquiera el tier "system", cuyo
+  # trust_tier_caps de abajo por sí solo incluye los 9 permisos (así
+  # que missing_permissions() no rechaza nada por tier para ese nivel).
+  #
+  # VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (A-5,
+  # 2026-09-26): antes vacío por defecto. docker/clipboard/camera/
+  # microphone denegados globalmente por defecto — son los 4 permisos
+  # de mayor impacto de un abuso silencioso (acceso al socket de
+  # Docker del host, portapapeles, cámara/micrófono) y ninguno tiene
+  # motor de enforcement real todavía (ver RUNTIME_ENFORCED en
+  # sdk/permissions.py) más allá de esta cascada — dejarlos sin negar
+  # acá significaba confiar en que cada consumidor de kal se acuerde
+  # de configurarlo por su cuenta. network/filesystem_write/gpu/browser
+  # quedan fuera de esta lista a propósito: tienen casos de uso
+  # legítimos frecuentes y ya están acotados por trust_tier_caps por
+  # nivel de confianza, no necesitan además un veto global.
+  globally_denied:
+    - docker
+    - clipboard
+    - camera
+    - microphone
   # Techo por CÓMO se registró la herramienta (nunca por lo que la propia
   # herramienta/skill se autodeclare) — ver
   # kernel/permissions/permission_cascade.py::trust_tier_for().

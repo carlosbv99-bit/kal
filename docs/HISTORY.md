@@ -368,3 +368,26 @@ puro, dead weight desde la extracción inicial.
 Verificado con un venv completamente nuevo instalando SOLO las
 versiones exactas recién pineadas: 400 tests passed (383 anteriores +
 17 nuevos), 0 failed. `ruff check .` (regla completa) limpio.
+
+**Un hallazgo más, revisado aparte por tocar un DEFAULT de config
+compartido**: A-5 ("la cascada de permisos es un no-op para casi todo
+el toolset real") — verificado que en kal específicamente el ÚNICO
+llamador real de `missing_permissions()` es el de tier "skill" (el fix
+de K-4 de hoy mismo); no hay ningún llamador para tier "system"/"agent"
+dentro de este repo (esa decisión vive en `agent_loop.py`, que no
+existe acá). Pero `trust_tier_caps.system` sí incluye los 9 permisos
+por diseño (documentado así desde la extracción), lo que hace que
+`globally_denied` sea la ÚNICA capa real de contención para ese tier —
+y estaba vacío por defecto. Corregido en `config/config.yaml`:
+`docker`/`clipboard`/`camera`/`microphone` denegados globalmente por
+defecto (los 4 de mayor impacto de un abuso silencioso, sin motor de
+enforcement propio más allá de esta cascada — ver
+`RUNTIME_ENFORCED` en `sdk/permissions.py`). `network`/
+`filesystem_write`/`gpu`/`browser` quedan fuera a propósito: tienen
+casos de uso legítimos frecuentes y ya están acotados por
+`trust_tier_caps` según nivel de confianza. Test nuevo que ancla este
+default contra la config REAL (no un fake), para que no se vuelva a
+vaciar sin que alguien note el motivo. Suite completa: 401 passed
+(1 test de `test_kernel_bus_socket_server.py` resultó flaky en una
+corrida — no relacionado, confirmado pasando 3/3 en aislamiento y en
+una segunda corrida completa limpia), 0 failed.
