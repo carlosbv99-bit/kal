@@ -1,271 +1,27 @@
 schema_version: 1
 
-agent:
-  name: "kal"
-  max_concurrent_tasks: 4
-
-context:
-  # Cuántos turnos previos de la sesión se mandan al LLM en cada
-  # llamada — ver agent_core/context_service.py.
-  max_recent_turns: 8
-
-llm:
-  # "ollama" (default): 100% local, sin red. "openai_compatible": usa
-  # agent_core/llm/openai_compatible_client.py contra CUALQUIER API con
-  # formato OpenAI — requiere LLM_API_KEY en .env (ver .env.example).
-  # Pensado para usuarios sin hardware para un modelo local grande (kal
-  # se distribuye a hardware muy distinto, no es un proyecto de uso
-  # personal). Ejemplos reales (base_url tiene que ser la URL COMPLETA
-  # que pide cada proveedor, no se le agrega nada por detrás):
-  #   Qwen (DashScope, modo compatible):
-  #     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     default_model: "qwen-plus"
-  #   Grok / xAI:
-  #     base_url: "https://api.x.ai/v1"
-  #     default_model: "grok-3"
-  #   OpenAI:
-  #     base_url: "https://api.openai.com/v1"
-  #     default_model: "gpt-4o-mini"
-  provider: "ollama"
-  base_url: "http://localhost:11434"
-  # qwen3.5:4b-q4_K_M (Alibaba, MoE liviano, 3.4GB cuantizado) reemplazó a
-  # qwen2.5-coder:14b (2026-07-30) tras comparación empírica en vivo, no
-  # supuesta — batería de 6 escenarios reales contra el toolset real de
-  # kal (adivinanza, leer un poema en voz alta ×3, "¿quién sos?", pedido
-  # vago, generación de imagen):
-  #   - qwen2.5-coder:14b: negó falsamente tener audio_generation
-  #     disponible, y llamó audio_generation 3 veces IDÉNTICAS para una
-  #     simple adivinanza sin necesitarlo (ver docs/HISTORY.md).
-  #   - qwen3.5:4b-q4_K_M: 6/6 escenarios correctos — cero negaciones
-  #     falsas, cero llamadas innecesarias, generó audio/imagen
-  #     correctamente en cada intento. Además MÁS LIVIANO que el modelo
-  #     que reemplaza (3.4GB vs ~9GB) — menos presión de RAM en una
-  #     máquina sin GPU dedicada (ver
-  #     project_resource_broker_ollama_eviction en la memoria del
-  #     proyecto sobre por qué esto importa acá).
-  # qwen3.5:9b-q4_K_M (6.6GB) también se probó y superó ampliamente al
-  # modelo anterior (5/6), pero el 4B tuvo mejor resultado en esta
-  # batería concreta pese a ser más chico — no asumir que "más grande
-  # es mejor" sin evidencia real para ESTA tarea (tool-calling
-  # confiable, no benchmarks de código en general).
-  default_model: "qwen3.5:4b-q4_K_M"
-  # BUG REAL ENCONTRADO EN USO (2026-07-20, VS Code): un pedido de varios
-  # pasos (propose_project_files + browser, con resultados de navegación
-  # ya en el contexto) hizo que qwen2.5-coder:14b en CPU tardara más de
-  # 120s en una sola respuesta — Ollama nunca colgó, el modelo grande
-  # simplemente necesitaba más tiempo. Subido a 300s para dar margen
-  # real sin esperar indefinidamente si algo se cuelga de verdad.
-  #
-  # BUG REAL ENCONTRADO EN USO (2026-07-30, VS Code): "crea un proyecto
-  # de agenda para android" agotó los 300s de arriba — generar de una
-  # sola respuesta el manifest + build.gradle + actividad principal +
-  # layout (varios archivos reales, ver la instrucción de "archivos
-  # mínimos indispensables" en agent_core/client_provider.py) con
-  # qwen3.5:4b-q4_K_M en CPU es más lento que un pedido de un solo
-  # archivo. Subido a 600s.
-  timeout_seconds: 600
-  max_agent_steps: 8                    # tope de iteraciones del loop antes de forzar una respuesta final
-  # Descomponer el objetivo en subtareas antes de ejecutar (ver
-  # agent_core/llm/planner.py). BUG REAL ENCONTRADO EN USO: con el modelo
-  # anterior (qwen2.5-coder:14b), el planner tendía a sobre-descomponer
-  # preguntas simples/conversacionales en pasos artificiales que terminaban
-  # llamando herramientas irrelevantes (navegador, generación de audio,
-  # etc.) — comparado en vivo: la misma pregunta con planner no terminaba
-  # ni en 90s y navegaba a dominios al azar; sin planner, respondía bien en
-  # ~97s con como mucho una llamada de herramienta de más. Se mantiene en
-  # false incluso con el modelo nuevo (no reevaluado todavía) —
-  # overrideable por request (ChatRequest.use_planner).
-  planning_enabled: false
-  # BUG REAL ENCONTRADO EN USO: con generación de imagen/audio/video corriendo
-  # en la misma máquina, Ollama puede quedar momentáneamente sin responder
-  # (recargando el modelo en VRAM/RAM) y un solo ConnectionError transitorio en
-  # un paso intermedio rompía TODA la tarea, aunque Ollama estuviera bien un
-  # segundo antes y un segundo después (ver agent_core/llm/ollama_client.py).
-  connection_retries: 2          # reintentos ante ConnectionError (no ante timeout ni error HTTP)
-  retry_backoff_seconds: 2.0     # pausa entre reintentos
-  # BUG REAL ENCONTRADO EN USO: "genera una raqueta de tenis" generó la
-  # imagen correcta una vez y después 3 imágenes más de paisajes sin
-  # relación en el mismo turno, sin llegar nunca a una respuesta final
-  # (agotó max_agent_steps). El modelo no ve el resultado visual, así
-  # que no es un reintento por calidad — pierde el hilo. La instrucción
-  # de prompt sola no alcanzó (ya estaba activa cuando pasó esto). Tope
-  # estructural: más allá de esta cantidad de llamadas a la MISMA
-  # herramienta en un turno, se rechaza sin ejecutar (cada generación
-  # real cuesta minutos de cómputo acá, no es gratis dejarlo correr).
-  max_tool_repeats: 3
-  # BUG REAL ENCONTRADO EN USO (2026-07-27): agent_loop.py nunca fijaba
-  # temperature — heredaba el default alto de Ollama (~0.8, pensado para
-  # charla creativa, no para decidir de forma confiable si hay que llamar
-  # una herramienta). Mismo prompt exacto probado dos veces seguidas ("lee
-  # este poema y entregame el audio", con audio_generation disponible):
-  # una vez el modelo respondió con una negación falsa de capacidad, sin
-  # ningún intento de tool call; la otra, llamó a audio_generation
-  # correctamente. Bajo pero no cero: prioriza confiabilidad en la
-  # decisión de usar herramientas sin volver la prosa de la respuesta
-  # final completamente robótica.
-  temperature: 0.3
-
-# Runtime Manager (2026-07-25, ver agent_core/runtime/ y docs/HISTORY.md):
-# cuántas ejecuciones concurrentes tolera cada runtime real ANTES de que
-# las siguientes esperen su turno — nunca una cifra de VRAM/memoria, un
-# número que ajustás según tu propio hardware. "ollama" en 1 por default:
-# una máquina sin VRAM dedicada no puede tener 2 modelos grandes cargados
-# a la vez (confirmado en vivo: varios pedidos concurrentes competían por
-# cargar/descargar modelos de 10-15GB, tardando minutos cada uno en vez de
-# segundos). "openai_compatible" mucho más alto — una API en la nube no
-# tiene este problema.
-runtimes:
-  ollama:
-    max_parallel: 1
-  openai_compatible:
-    max_parallel: 20
-
-memory:
-  short_term:
-    max_tokens: 8000
-    ttl_seconds: null          # vive solo mientras dura la tarea activa
-
-  mid_term:
-    backend: sqlite
-    ttl_days: 30
-    consolidation_interval_hours: 6   # cada cuánto se resume corto -> mediano
-
-  long_term:
-    backend: chroma
-    mode: embedded              # embedded (sin red, local) | http (vía docker-compose)
-    persist_path: "data/long_term/chroma_persist"
-    http_host: vector_store
-    http_port: 8000
-    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
-    promotion:
-      min_repetitions: 3        # nº de veces que un patrón debe repetirse
-      min_relevance_score: 0.75  # antes de promoverse a largo plazo
-
-error_handling:
-  max_repair_attempts: 3          # circuit breaker: tope antes de escalar a humano
-  strategies:
-    SyntaxError: auto_fix
-    RuntimeError: rollback_and_retry
-    ImportError: install_missing_module
-    ValidationError: reject_without_retry   # código rechazado por el denylist: determinista, nunca se reintenta
-
-multimodal:
-  image:
-    backend: local                       # local (diffusers, CPU) | api (OpenAI Images)
-    # SDXL-Turbo: destilado igual que sd-turbo (1-4 pasos, sin CFG), pero
-    # arquitectura SDXL — mejor calidad, nativo a 1024x1024. Mucho más
-    # pesado (~14GB de descarga fp32) y más lento por imagen en CPU que
-    # sd-turbo. Para volver al modelo liviano/rápido anterior: cambiar
-    # model a "stabilityai/sd-turbo" y height/width a 512.
-    model: "stabilityai/sdxl-turbo"
-    # BUG REAL ENCONTRADO EN USO (2026-07-27): con 2 pasos, un pedido
-    # simple generó una imagen que a primera vista parecía correcta,
-    # pero tenía una deformidad sutil (una tercera oreja). 4 es el
-    # máximo recomendado para SDXL-Turbo, sin costo de tiempo relevante.
-    num_inference_steps: 4
-    guidance_scale: 0.0                   # sdxl-turbo tampoco usa CFG, debe ir en 0
-    height: 1024
-    width: 1024
-    artifact_dir: "data/artifacts/images"
-    # backend: api -> requiere IMAGE_GEN_API_KEY en .env (ver .env.example)
-    api_model: "dall-e-3"
-    api_size: "1024x1024"
-
-  audio:
-    backend: local                       # local (piper-tts, ONNX/CPU) | api (OpenAI TTS)
-    voice_model: "es_ES-davefx-medium"    # nombre de voz de piper; se descarga la 1a vez
-    artifact_dir: "data/artifacts/audio"
-    # backend: api -> requiere AUDIO_GEN_API_KEY en .env (ver .env.example)
-    api_model: "tts-1-hd"
-    api_voice: "alloy"
-
-  video:
-    # No hay generación de video real viable localmente sin GPU. Esto
-    # es una COMPOSICIÓN: imágenes por escena (image backend de arriba)
-    # + narración (audio backend de arriba) + ffmpeg para unir con
-    # efecto de paneo simple (Ken Burns), no un modelo generativo de video.
-    fps: 24
-    seconds_per_scene: 4
-    artifact_dir: "data/artifacts/video"
-
-  stt:
-    backend: local                       # solo local por ahora (faster-whisper, CPU)
-    model_size: "tiny"                    # ~75MB; base/small/medium/large: más precisos, más pesados
-    language: null                        # null = auto-detección de idioma
-
-  vision:
-    backend: local                       # solo local por ahora, vía Ollama
-    # NO reusa llm.base_url a propósito: ese campo cambia si activás un
-    # perfil de nube (Groq/OpenAI/etc.) para el modelo de lenguaje del
-    # agente, pero el modelo de visión corre en el Ollama LOCAL siempre.
-    base_url: "http://localhost:11434"
-    # BUG REAL ENCONTRADO EN USO: llama3.2-vision (arquitectura "mllama")
-    # dejó de cargar en Ollama >=0.30.0 — regresión conocida y sin
-    # arreglo todavía (ver github.com/ollama/ollama/issues/16547).
-    # llava usa una arquitectura de visión distinta (CLIP), sí soportada.
-    model: "llava:13b"                    # necesita `ollama pull llava:13b` (no se auto-descarga)
-
-  image_editing:
-    artifact_dir: "data/artifacts/images_edited"
-    # Inpainting real con IA ("inpaint"): modelo de difusión COMPLETO
-    # (no distilado como sd-turbo) — mucho más lento en CPU, minutos por
-    # edición, no segundos. Se descarga (~5.5GB) la primera vez que se usa.
-    inpaint_model: "runwayml/stable-diffusion-inpainting"
-    inpaint_num_inference_steps: 25
-    inpaint_guidance_scale: 7.5
-
-  composition:
-    # Combinar imágenes ya generadas (overlay / side_by_side) — 100%
-    # Pillow, sin modelo nuevo. Ver tool_integration/adapters/image_composition.py.
-    artifact_dir: "data/artifacts/images_composed"
-
-  uploads:
-    # Imágenes que el usuario sube desde la interfaz (POST /uploads),
-    # no generadas por kal. Se convierten en el artefacto activo de la
-    # sesión automáticamente. max_size_mb evita que un archivo enorme
-    # se reciba sin límite.
-    artifact_dir: "data/artifacts/uploads"
-    max_size_mb: 20
-
-# BUG REAL ENCONTRADO EN USO: en una máquina sin GPU, los pipelines de
-# imagen/audio/STT de arriba se quedan cargados en RAM para siempre
-# tras el primer uso, compitiendo con Ollama por la misma RAM del
-# sistema (Ollama quedaba con "Connection refused" justo después de
-# generar una imagen). Ver kernel/broker/resource_broker.py.
+# BUG REAL ENCONTRADO EN USO (en kal-in, antes del split): en una
+# máquina sin GPU, un pipeline pesado cargado perezosamente (ver
+# kernel/broker/resource_broker.py) se queda en RAM para siempre tras
+# el primer uso, compitiendo por la misma RAM del sistema con
+# servicios chicos de uso frecuente.
 resource_broker:
-  # Libera un pipeline si nadie lo usó en este tiempo.
+  # Libera un recurso si nadie lo usó en este tiempo.
   idle_timeout_seconds: 300
   # Si la RAM disponible del sistema cae debajo de esto, libera TODOS
-  # los pipelines cargados de inmediato, sin esperar el timeout — esto
+  # los recursos cargados de inmediato, sin esperar el timeout — esto
   # aplica SIEMPRE, para todos los recursos, sin excepción (incluido
-  # el modelo de chat de abajo).
+  # el timeout más largo de abajo).
   min_available_ram_mb: 2048
-  # Diagnóstico de lentitud (2026-08-23): el modelo de chat es chico
-  # (~3-4GB) y se usa mucho más seguido que un pipeline de imagen/
-  # audio/STT (varios GB cada uno) — conviene mantenerlo cargado más
-  # tiempo antes de pagar el costo real de recargarlo (confirmado en
-  # vivo: ~21s con el modelo frío vs. ~4s ya caliente).
+  # Timeout PROPIO (más largo) para un servicio liviano de uso muy
+  # frecuente (p.ej. el modelo de chat de Ollama en kal-in) —
+  # conviene mantenerlo cargado más tiempo que un pipeline pesado.
   ollama_idle_timeout_seconds: 1800
-  # BUG REAL ENCONTRADO EN USO (2026-08-28): el chequeo de RAM baja de
-  # arriba solo se llamaba antes de un /chat o de cargar un pipeline
-  # pesado — nunca por su cuenta. Dos caídas reales de sistema pasaron
-  # con ningún pedido nuevo a kal disparando ese chequeo mientras la RAM
-  # se agotaba por otra causa. Este intervalo corre el MISMO chequeo de
-  # forma periódica, en background, independiente del tráfico real.
+  # BUG REAL ENCONTRADO EN USO: el chequeo de RAM baja de arriba solo
+  # se llamaba en momentos puntuales — nunca por su cuenta. Este
+  # intervalo corre el MISMO chequeo de forma periódica, en
+  # background, independiente del tráfico real.
   pressure_check_interval_seconds: 30
-
-# Primer paso opcional de /chat (ver agent_core/conversation_engine.py):
-# un modelo CHICO y siempre local clasifica intención/capacidades antes
-# de correr el planner/agent_loop completo — si la confianza es baja,
-# responde de inmediato con una aclaración sin gastar cómputo en el
-# pipeline pesado. Validado empíricamente (2026-07-21) contra
-# qwen2.5:3b/gemma3:4b/llama3.2:3b — qwen2.5:3b ganó en confiabilidad.
-conversation_engine:
-  enabled: true
-  base_url: "http://localhost:11434"    # SIEMPRE local, nunca el proveedor en la nube de llm.*
-  model: "qwen2.5:3b"                   # necesita `ollama pull qwen2.5:3b` (no se auto-descarga)
-  confidence_threshold: 0.5
-  temperature: 0.1                      # bajo a propósito: es una clasificación, no charla creativa
 
 sandbox:
   network_mode: none
@@ -293,18 +49,15 @@ tool_integration:
     - browser
     - docker
     - gpu
-    - core_module_modification   # agent_core/ y error_handling/ SIEMPRE
+    - core_module_modification
 
 # Cascada de permisos de varios niveles (ver kernel/permissions/permission_cascade.py::
 # PermissionCascade), inspirada en la cascada de 5 niveles de OpenClaw
 # (global -> proveedor -> agente -> sesión -> sandbox) pero adaptada a lo
 # que ya existe en kal: global (acá) -> nivel de confianza (acá) -> sesión
-# (por conversación, ver POST /chat: deny_permissions) -> manifiesto de la
+# (dependiente de cada consumidor del kernel) -> manifiesto de la
 # herramienta (ya existente). El resultado efectivo es la intersección de
-# los 4 niveles — "más restrictivo gana". Sin esto, el único chequeo de
-# permisos que existía era UNSUPPORTED_RUNTIME_PERMISSIONS de arriba (que
-# sigue igual, es un gate distinto e independiente: "¿se puede confinar
-# esto técnicamente?" vs. "¿este contexto concreto puede pedirlo?").
+# los niveles presentes — "más restrictivo gana".
 permissions:
   # Techo del sistema entero: nadie por debajo puede otorgar un permiso
   # listado acá, pase lo que pase. Vacío por defecto — no hay ninguna
@@ -314,9 +67,9 @@ permissions:
   # herramienta/skill se autodeclare) — ver
   # kernel/permissions/permission_cascade.py::trust_tier_for().
   trust_tier_caps:
-    # Adaptadores de primera parte (image_gen.py, browser.py, etc.),
-    # instanciados directo en kernel/registry/registry.py — el mismo
-    # nivel de confianza que ya tenían antes de que existiera esta cascada.
+    # Adaptadores de primera parte, instanciados directo en
+    # kernel/registry/registry.py — el mismo nivel de confianza que ya
+    # tenían antes de que existiera esta cascada.
     system:
       - filesystem_read
       - filesystem_write
@@ -354,35 +107,15 @@ permissions:
 # aprobación explícita, nunca al revés.
 filesystem_access:
   auto_allow:
-    # Crear/modificar dentro del workspace abierto (VS Code). Borrar/
-    # renombrar ahí, y cualquier acción fuera del workspace (home/
-    # external), siempre requieren aprobación humana.
-    # "read" agregado 2026-07-20 (read_workspace_file, ver
-    # tool_integration/adapters/vscode_files.py): leer un archivo que el
-    # usuario YA tiene visible en su propio árbol de VS Code es de
-    # riesgo bajo, muy distinto de crear/modificar — y exigir
-    # aprobación humana rompería el mecanismo encadenado (kal pide el
-    # archivo, la extensión se lo devuelve automáticamente en el mismo
-    # turno) que requiere una respuesta síncrona, no un "esperá a que
-    # un humano apruebe".
+    # Crear/modificar dentro del workspace abierto. Borrar/renombrar
+    # ahí, y cualquier acción fuera del workspace (home/external),
+    # siempre requieren aprobación humana. "read": leer un archivo que
+    # el usuario YA tiene visible en su propio árbol es de riesgo bajo,
+    # muy distinto de crear/modificar.
     workspace:
       - create
       - modify
       - read
-
-self_modification:
-  # Opt-in explícito. Hasta 2026-07-11 este flag existía pero
-  # SelfModificationManager.propose() nunca lo leía — quedaba siempre
-  # activo sin importar este valor (bug real, ver README). Ahora si se
-  # pone en false, propose() rechaza cualquier intento de entrada, antes
-  # de tocar disco o correr un solo test.
-  enabled: false
-  scope: "peripheral_only"   # nunca "core" — ver agent_core/orchestrator.py
-  requires_human_review:
-    - "agent_core/*"
-    - "error_handling/*"
-    - "kernel/*"
-  auto_rollback_on_regression: true
 
 audit:
   log_path: "logs/audit.log"
@@ -399,9 +132,9 @@ browser:
   # agregues acá los dominios en los que confiás (p.ej. "wikipedia.org").
   # Coincide con el mismo principio que sandbox.network_mode: "none" — nada
   # de red abierta por default en ningún rincón del proyecto.
-  # Habilitados a pedido del usuario (2026-07-15): fuentes de assets con
-  # licencias permisivas (CC0/MIT) para descargar imágenes, sonidos y
-  # plantillas web sin necesitar login.
+  # Habilitados a pedido del usuario: fuentes de assets con licencias
+  # permisivas (CC0/MIT) para descargar imágenes, sonidos y plantillas
+  # web sin necesitar login.
   allowed_domains:
     - "unsplash.com"      # imágenes, CC0
     - "pexels.com"        # imágenes, licencia Pexels (uso libre)
@@ -412,11 +145,9 @@ browser:
   artifact_dir: "data/artifacts/browser"
   user_agent: "kal-browser-agent/1.0"
 
-# Artifact Service (tool_integration/download_manager.py) — descarga
-# real de recursos (hoy solo imágenes, ver
-# tool_integration/adapters/vscode_files.py::ImportResourceTool).
-# SEPARADO de browser.allowed_domains a propósito (semántica distinta:
-# sin JS/cookies, con tope de tamaño real) aunque comparta los mismos
+# Artifact Service — descarga real de recursos externos. SEPARADO de
+# browser.allowed_domains a propósito (semántica distinta: sin
+# JS/cookies, con tope de tamaño real) aunque comparta los mismos
 # dominios reales ya confiados para este propósito.
 downloads:
   allow_http: false  # solo https por default
@@ -429,10 +160,3 @@ downloads:
     - "freesound.org"
     - "html5up.net"
     - "startbootstrap.com"
-
-# CreateTextFileTool (tool_integration/adapters/text_file.py) — genera
-# un archivo de texto/documento real y descargable (poemas, notas,
-# listas), mismo patrón de artifact_dir que imagen/audio/video.
-text_files:
-  artifact_dir: "data/artifacts/text_files"
-  max_length_chars: 100000

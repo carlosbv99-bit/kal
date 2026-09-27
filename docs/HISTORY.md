@@ -58,3 +58,64 @@ exitoso desde fuera del directorio del repo.
 
 `docs/HISTORY.md` y `README.md` reescritos desde cero (ver nota al
 principio de este archivo); `.gitignore` nuevo.
+
+## Limpieza de `utils/config.py`/`config/config.yaml`: capacidades de agente removidas del kernel (2026-09-27)
+
+Pregunta directa del usuario al revisar el repo recién extraído: ¿es
+correcto que las capacidades de audio/video estén en el kernel, o
+deberían estar en kal-in? La extracción inicial (arriba, 2026-09-13)
+ya había recortado `requirements-*.txt` a lo que el kernel realmente
+usa, pero **nunca se hizo el mismo ejercicio con el esquema de
+config** — `utils/config.py`/`config/config.yaml` seguían siendo una
+copia literal, sin editar, de la config completa de kal-in.
+
+Verificado con grep real (no supuesto) qué secciones de `Settings`
+consulta de verdad algo en `kernel/`/`sdk/`/`audit/`/`code_analysis/`/
+`scripts/`: solo `sandbox`, `tool_integration`, `permissions`,
+`filesystem_access`, `resource_broker`, `downloads`, `browser`,
+`signing`. Cero usos de `llm`, `memory`, `multimodal` (imagen/audio/
+video/STT/visión/edición/composición/uploads), `conversation_engine`,
+`context`, `text_files`, `agent`, `runtimes`, `error_handling`,
+`self_modification` — todas estas son configuración de kal-in (el
+agente), nunca del kernel. `self_modification` en particular es un
+caso límite interesante: el kernel sí tiene un mecanismo real
+relacionado (`kernel/lifecycle/selfmod_test_image_builder.py`, la
+imagen Docker para correr tests de una auto-modificación propuesta,
+más el vocabulario de eventos de auditoría en `audit/audit_log.py`),
+pero la DECISIÓN de si una auto-modificación se permite
+(`SelfModificationConfig.enabled/scope/is_core_path()`) es pura lógica
+de agente (`agent_core/self_modification.py`/`agent_core/orchestrator.py`
+en kal-in) — el kernel ofrece el primitivo aislado, no decide cuándo
+usarlo.
+
+Eliminadas de `utils/config.py`: `LLMConfig`, `RuntimeSlotConfig`,
+`RuntimesConfig`, `ShortTermConfig`, `MidTermConfig`, `PromotionConfig`,
+`LongTermConfig`, `MemoryConfig`, `ErrorHandlingConfig`,
+`ImageGenConfig`, `AudioGenConfig`, `VideoGenConfig`, `STTConfig`,
+`VisionConfig`, `ImageEditingConfig`, `ImageCompositionConfig`,
+`UploadsConfig`, `MultimodalConfig`, `ConversationEngineConfig`,
+`SelfModificationConfig`, `TextFileConfig`, `AgentConfig`,
+`ContextConfig` — y los campos correspondientes de `Settings`. Mismo
+recorte aplicado a `config/config.yaml` (las secciones `llm`,
+`runtimes`, `memory`, `error_handling`, `multimodal`,
+`conversation_engine`, `context`, `self_modification`, `text_files`,
+`agent` ya no existen ahí). De paso, se corrigieron comentarios/
+docstrings que referenciaban rutas de kal-in que no existen en este
+repo (`tool_integration/services.py`, `agent_core/orchestrator.py`,
+etc.) para que no confundan a quien lea este repo de forma aislada.
+
+Verificado: `settings = load_settings()` carga sin error contra el
+`config.yaml` recortado; `ruff check --select=E9,F .` (el chequeo real
+de CI) y `ruff check utils/config.py config/` (regla completa, solo en
+los archivos tocados) pasan limpio; suite completa sin cambios,
+367/367 passed — nada en `kernel/`/`sdk/`/`audit/`/`code_analysis/`/
+`scripts/`/`tests/` dependía de ninguno de estos campos, confirmando
+que era puro resto sin terminar de limpiar de la extracción inicial,
+no una dependencia real oculta.
+
+Nota aparte, no corregida en esta sesión (fuera de alcance de esta
+pregunta puntual): este repo recién clonado nunca pasó por un
+`ruff check .` de regla completa (solo el `--select=E9,F` angosto de
+CI) — a diferencia de kal-in, que sí tuvo ese pase (ver
+`docs/HISTORY.md` de kal-in, 2026-09-27). Queda pendiente como parte
+de la auditoría externa de este repo todavía sin hacer.
