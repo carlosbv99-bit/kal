@@ -42,5 +42,18 @@ jobs:
       - name: Lint (solo errores reales — sintaxis/pyflakes, no estilo)
         run: python -m ruff check --select=E9,F .
 
+      # Agregado 2026-09-27, preparando una auditoría externa. Corrido en
+      # vivo antes de agregarlo: "No known vulnerabilities found" contra
+      # requirements-core.txt + requirements-dev.txt — el dependency set
+      # chico del kernel puro (sin chromadb/diffusers/etc.) ayuda acá. No
+      # bloqueante todavía a propósito, mismo criterio que kal-in: para
+      # que una vulnerabilidad nueva en cualquier dependencia no pase
+      # desapercibida, sin que el build dependa de si ya existe un fix
+      # publicado para ella.
+      - name: Auditoría de dependencias (reporta, no bloquea todavía)
+        run: |
+          pip install -q pip-audit
+          pip-audit -r requirements-core.txt -r requirements-dev.txt || true
+
       - name: Tests
         run: python -m pytest tests/ -q

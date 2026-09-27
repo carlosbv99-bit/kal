@@ -1,9 +1,9 @@
 {
   "algorithm": "ed25519",
-  "author_public_key": "dbd2101054b9032867e31079f882efcaa1223233edf290991b2a5fe7a87828e1",
-  "signature": "7f756550de36b385ea2913be3740941ea4f3dd3981372efbbb048c4caf44f25fabbe5ff4055ab3e65b63a493313204dd71692d9bbc121d2c4d7f341cc9fbb004",
+  "author_public_key": "3a77fa5aac75e9f43dc3f300b1e96ea1baa4a4800cd34503a91f4cbd8c724f79",
+  "signature": "70c147f7ff6d0c34d5879eac3830fc35d164c699f4f0a3d4e38fb525627638ccad03069f209a1bf512cdf0c604185078a817bbb596355dfcc48db4e8f564fd07",
   "files": {
     "skill.yaml": "9ce27da7760f16806cf687b2602e1f8df75e177a4eacd2884dac90b9e2cfecb2",
-    "tool.py": "a1070b6e8d9fdf0a8d45e1c480a41eb8e72bc01cc3771d95dc2b662e8c693c31"
+    "tool.py": "ecd8b4fa1fe950e6cefd9abf7c6f62b846512fa733f9b0a619a7514ff1a9138a"
   }
 }

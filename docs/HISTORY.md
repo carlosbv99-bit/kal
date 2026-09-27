@@ -119,3 +119,107 @@ pregunta puntual): este repo recién clonado nunca pasó por un
 CI) — a diferencia de kal-in, que sí tuvo ese pase (ver
 `docs/HISTORY.md` de kal-in, 2026-09-27). Queda pendiente como parte
 de la auditoría externa de este repo todavía sin hacer.
+
+## Revisión y limpieza completa para una auditoría externa (2026-09-27)
+
+Mismo pase que ya se le hizo a kal-in: lint completo, triage de
+seguridad, `CONTRIBUTING.md`, `pip-audit`, revisión de docs — con un
+hallazgo real y grave en el medio.
+
+**Vulnerabilidad real encontrada y corregida — `kernel/lifecycle/docker_runner.py`
+estaba desactualizado respecto a kal-in en DOS fixes de seguridad
+reales**, porque este repo se extrajo (2026-09-13) antes de que
+existieran:
+- **kal-in issue #4 (2026-09-21)**: `containers.run()` dispara un pull
+  IMPLÍCITO de la imagen si no está cacheada — sin red (o con red
+  caída a mitad de pull), esa llamada podía colgar SIN NINGÚN
+  timeout propio; `container.wait(timeout=...)` solo acota la espera
+  de un contenedor que YA arrancó, nunca esta llamada. Confirmado en
+  un entorno real de Likay-OS sin red: varios minutos sin respuesta ni
+  error visible. Este repo todavía tenía la versión SIN el fix — el
+  mismo hueco, sin corregir, desde la extracción.
+- **K-2, auditoría externa Likay-OS (2026-09-26)**: `_collect_output_files()`
+  usaba `p.is_file()` (sigue symlinks) + `rglob("*")` sin restricción
+  sobre el bind mount de salida — escribible por el código NO
+  CONFIABLE que corre dentro del contenedor. Ese código podía crear un
+  symlink apuntando a cualquier archivo del HOST (una clave de firma,
+  un token, `/proc/self/environ`) y el proceso host lo seguía sin
+  darse cuenta: **lectura arbitraria de archivos del host por un
+  agente hostil**, explotable de verdad en este repo hasta ahora.
+
+Portados ambos fixes completos desde el `origin/main` actual de
+kal-in (incluida una tercera mejora, encontrada y corregida en la
+sesión de auditoría de kal-in de hoy mismo: el thread de fondo de
+`containers.run()` puede completar DESPUÉS de que ya se devolvió el
+timeout, dejando un contenedor huérfano sin quien lo mate/remueva —
+ahora se limpia vía `future.add_done_callback()`), junto con sus 7
+tests de regresión (`tests/test_docker_runner_pull_timeout.py`,
+`tests/test_docker_runner_output_collection.py`, antes inexistentes
+acá). Los 12 tests de `docker_runner.py` pasan, incluido el que corre
+contra Docker real.
+
+**Lint amplio (`ruff check .`) — de 87 hallazgos a 0**: 74
+auto-corregibles (mismas categorías que kal-in: imports desordenados,
+`noqa` obsoletos, modernización de tipos), 13 triados a mano —
+6 `BLE001` (todos fail-open/fail-safe ya deliberados, documentados con
+`# noqa` + motivo, sin cambio de comportamiento), 2 `PLW1510`
+(`check=False` explícito, el returncode ya se interpretaba a mano),
+1 `RUF015`, 2 `C408` mecánicos. Mismos archivos, casi línea por línea,
+que los ya triados en kal-in — tiene sentido: son las mismas skills y
+la misma infraestructura de market, copiadas en el split.
+
+**Bug real de firmas, y una pérdida real de una clave privada**: el
+`ruff --fix` de arriba tocó los 7 `skills/*/tool.py` (reordenamiento
+de imports) — mismo bug que ya se había encontrado en kal-in hoy: sin
+volver a firmar, `validate_all_skills()` reportaba las 7 con "firma
+tampered". Al intentar re-firmar con la MISMA identidad de siempre
+(`data/keys/kal_project/` para 6, `data/keys/` para
+`download_via_kernel`), se confirmó que esas claves privadas ya no
+existen en ningún lado accesible: vivían solo en el directorio de
+trabajo que se reemplazó por el clon fresco de este mismo repo, más
+temprano en esta sesión (ver la sección de arriba) — un archivo
+untracked/gitignored no sobrevive ese reemplazo, a diferencia del
+propio historial de git. Impacto real, acotado: ninguna firma YA
+hecha se invalida (la verificación solo necesita la clave PÚBLICA, que
+queda embebida en cada `skill.sig` ya commiteado) — el único costo es
+que estas 7 skills no pueden re-firmarse bajo la misma identidad de
+autor de acá en más. Con confirmación del usuario, se generaron
+keypairs nuevas (mismos dos `--key-dir` de siempre, para mantener la
+misma separación organizativa) y se re-firmaron las 7; `validate_all_skills()`
+vuelve a devolver `[]`.
+
+**`CONTRIBUTING.md`/`CONTRIBUTING.es.md` — no existían, creados desde
+cero** (a diferencia de kal-in, que solo estaban desactualizados).
+Mismo formato/estructura que los de kal-in, pero con la sección "Dónde
+vive cada cosa" recortada a lo que este repo realmente tiene
+(`kernel/`, `sdk/`, `audit/`, `code_analysis/`, `skills/`, `tests/` —
+sin `agent_core/`/`tool_integration/`, que no existen acá). Enlazados
+desde README.md/README.es.md ("Get involved"/"Cómo colaborar"), que no
+los mencionaban.
+
+**`pip-audit` agregado a CI** — corrido en vivo antes de agregarlo:
+"No known vulnerabilities found" contra `requirements-core.txt` +
+`requirements-dev.txt` (el dependency set chico del kernel puro ayuda
+acá — sin chromadb ni el resto del stack ML de kal-in). No bloqueante,
+mismo criterio que kal-in: para que una vulnerabilidad nueva no pase
+desapercibida, sin bloquear el build por una sin fix disponible.
+
+**Decisiones tomadas sin cambio de código, documentadas**:
+- Sin script de empaquetado tipo `create_package.py` (el de kal-in):
+  este repo pesa 2.5MB sin `.venv`/`.git`, no tiene `.env`, no tiene
+  `node_modules` ni ningún directorio pesado que excluir — `git
+  archive` alcanza tal cual para entregárselo a un auditor externo.
+  Construir un script dedicado acá sería una abstracción sin un
+  problema real que resolver.
+- Dependencias con rangos abiertos (`>=`) en `requirements-*.txt`,
+  nunca versiones exactas — mismo patrón y misma decisión ya tomada en
+  kal-in: pinnear es un cambio de política más grande, con riesgo real
+  de romper algo, fuera de alcance de esta limpieza.
+- Sin `.env` en el historial de git (confirmado, este repo nunca tuvo
+  uno para empezar — no hay claves de proveedores en un kernel sin
+  LLM).
+
+Suite completa corrida después de todos los cambios (docker_runner.py,
+socket_server.py, skill_market.py, skills.py, malware_scan.py,
+generate_market_page.py, validate_skills.py) — ver el commit para el
+resultado exacto.

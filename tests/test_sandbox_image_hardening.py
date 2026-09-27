@@ -22,7 +22,7 @@ def _minimal_image_built() -> bool:
         client = docker.from_env()
         client.images.get(MINIMAL_IMAGE)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 — probe de "¿existe la imagen?" para saltear el test si no
         return False
 
 

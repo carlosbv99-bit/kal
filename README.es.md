@@ -95,6 +95,9 @@ difíciles sobre el modelo de amenazas son todos aportes genuinamente
 
 - Abre un [issue](https://github.com/carlosbv99-bit/kal/issues) para
   proponer algo, reportar un bug, o preguntar por dónde empezar.
+- Ver [CONTRIBUTING.es.md](CONTRIBUTING.es.md) para cómo armar un
+  entorno de desarrollo, correr los tests, y dónde en el código entra
+  un cambio dado.
 - Si quieres escribir o hablar sobre este proyecto, este README y el
   código mismo son la fuente primaria — cada afirmación aquí está
   pensada para poder verificarse contra lo que realmente hay en el

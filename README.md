@@ -84,6 +84,9 @@ about the threat model are all genuinely useful.
 
 - Open an [issue](https://github.com/carlosbv99-bit/kal/issues) to
   propose something, report a bug, or ask where to start.
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up a dev
+  environment, run the tests, and where in the codebase a given
+  change belongs.
 - If you want to write or talk about this project, this README and
   the code itself are the primary source — every claim here is meant
   to be checkable against what's actually in the repo. That same level

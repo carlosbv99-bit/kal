@@ -24,8 +24,11 @@ import tempfile
 from pathlib import Path
 
 from kernel.registry.skills import MANIFEST_FILENAME, SkillManifest, parse_manifest
+from utils.logger import get_logger
 
 DEFAULT_REF = "main"
+
+logger = get_logger(__name__)
 
 
 class MarketError(Exception):
@@ -35,7 +38,7 @@ class MarketError(Exception):
 def _clone(market_url: str, ref: str, dest: Path) -> None:
     result = subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", ref, market_url, str(dest)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, check=False,
     )
     if result.returncode != 0:
         raise MarketError(f"No se pudo clonar '{market_url}' (rama/ref '{ref}'): {result.stderr.strip()}")
@@ -54,8 +57,11 @@ def list_market_skills(market_url: str, ref: str = DEFAULT_REF) -> list[SkillMan
         for manifest_path in sorted(skills_dir.glob(f"*/{MANIFEST_FILENAME}")):
             try:
                 manifests.append(parse_manifest(manifest_path))
-            except Exception:
-                continue  # manifiesto roto en el market: se ignora al listar, no rompe el resto
+            except Exception as e:  # noqa: BLE001 — fail-open deliberado: un
+                # manifiesto roto en el market no debe ocultar el resto de las
+                # skills disponibles, pero el motivo queda registrado.
+                logger.debug(f"Manifiesto roto en el market ({manifest_path}), se ignora al listar: {e}")
+                continue
         return manifests
 
 
