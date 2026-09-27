@@ -223,3 +223,72 @@ Suite completa corrida después de todos los cambios (docker_runner.py,
 socket_server.py, skill_market.py, skills.py, malware_scan.py,
 generate_market_page.py, validate_skills.py) — ver el commit para el
 resultado exacto.
+
+## 4 vulnerabilidades reales más, encontradas construyendo un chequeo de drift (2026-09-27)
+
+Al construir (en kal-in) un chequeo automático que compara la copia
+embebida del kernel en kal-in contra el estado real de este repo —
+para acortar el tipo de ventana que dejó pasar el hallazgo de
+`docker_runner.py` de la sección anterior — el chequeo encontró
+inmediatamente que faltaban 4 fixes MÁS de la misma auditoría externa
+("5 vulnerabilidades reales de kernel/sandbox", Likay-OS 2026-09-26),
+nunca portados a este repo:
+
+- **K-1**: `manifest.name` de una skill (`skill.yaml`) se usaba SIN
+  sanitizar para armar `SandboxedSkillTool.artifact_dir` — un `name`
+  tipo `"../../../../.venv/lib/pythonX.Y/site-packages"` permitía
+  crear directorios FUERA de `data/artifacts/skills/`, path traversal
+  que combinado con una escritura posterior ahí es RCE diferido al
+  próximo arranque del intérprete. Corregido en dos capas:
+  `kernel/registry/skills.py::load_skills()` rechaza el nombre
+  temprano (nunca activa la skill), `SandboxedSkillTool.__init__`
+  valida de nuevo por si algún otro llamador la instancia directo.
+- **K-4**: la cascada de permisos (`PermissionCascade`, "más
+  restrictivo gana") solo se aplicaba en el LLAMADOR
+  (`agent_loop.py`, que no existe en este repo) — el kernel mismo
+  nunca la exigía, así que cualquier otro consumidor de
+  `SandboxedSkillTool` heredaba cero cascada. Ahora
+  `SandboxedSkillTool.execute()` la exige directamente, tier `skill`
+  hardcodeado (estructuralmente siempre ese tier, no hace falta
+  preguntarle a `trust_tier_for()`).
+- **K-5**: la firma de una skill solo se verificaba UNA VEZ, al cargar
+  (tiempo de arranque) — pero el contenido de `skills/<x>/` se relee
+  del disco en CADA `execute()` posterior. Quien pudiera escribir ahí
+  entre la carga y una ejecución posterior (el proceso no tiene por
+  qué reiniciarse) corría código nunca verificado, mientras la
+  auditoría seguía diciendo "verified". Ahora se re-verifica en cada
+  `execute()`, fresco contra el disco real.
+- **K-6**: mismo patrón que K-1 pero para el NOMBRE de una herramienta
+  dinámica propuesta por el agente (`ToolRegistry.propose_dynamic_tool()`),
+  usado sin sanitizar en `ToolVersionStore._tool_dir()`. Corregido en
+  dos capas igual que K-1: `registry.py` rechaza temprano,
+  `versioning.py::_tool_dir()` valida de nuevo para cualquier otro
+  llamador de esa clase.
+
+Los 4 fixes + sus tests de regresión se portaron completos desde el
+`origin/main` actual de kal-in (`kernel/registry/registry.py`,
+`sandboxed_skill.py`, `skills.py`, `versioning.py` + los 4 archivos de
+test correspondientes), con un solo ajuste real: la ruta de
+`malware_scan` se mantuvo en `kernel/security/malware_scan.py` (la
+ubicación correcta en este repo) en vez de
+`tool_integration/malware_scan.py` (kal-in todavía no reorganizó ese
+módulo hacia el kernel — ver el hallazgo de "FALTA en kal-in" más
+abajo). Suite completa: 383 passed, 0 failed.
+
+**Corrección importante sobre el hallazgo anterior**: la sección previa
+de este mismo archivo dio a entender que "kal está al día" tras portar
+el fix de `docker_runner.py` — eso fue incompleto. Solo se revisó ese
+archivo puntual (el que motivó la sesión), nunca un diff sistemático
+del resto de `kernel/`. Este chequeo de drift es, en parte, la
+corrección de ese proceso: de acá en más, un fix real que no se porta
+se detecta solo, no depende de que alguien piense en revisarlo a mano.
+
+**Hallazgo aparte, sin resolver todavía — decisión pendiente, no un
+bug**: el chequeo también reporta que `kernel/security/malware_scan.py`
+(y su `__init__.py`) no tienen equivalente en kal-in, porque ahí ese
+mismo módulo todavía vive en `tool_integration/malware_scan.py`. No es
+una vulnerabilidad — ambos repos escanean malware igual — es una
+diferencia de organización que kal-in arrastra de antes del split.
+Migrar `tool_integration/malware_scan.py` a `kernel/` en kal-in es un
+cambio real (mover el módulo, actualizar sus imports) que no se hizo
+en esta sesión — decisión del usuario, ver conversación.
