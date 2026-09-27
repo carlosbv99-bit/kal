@@ -420,3 +420,69 @@ contra quien pueda escribir el archivo) pide firmarlo con HMAC, lo que
 implica decidir una estrategia de gestión de esa clave nueva (dónde
 vive, cómo se rota) — un cambio de diseño real, no una corrección
 mecánica, que queda para una decisión explícita aparte.
+
+## Segunda auditoría externa, independiente — 4 hallazgos más, 3 en fixes de HOY MISMO (2026-09-27)
+
+**Corrección importante sobre la sección anterior**: "se agotaron los
+hallazgos que aplican al kernel puro" era una conclusión apurada. El
+usuario trajo `docs/AUDITORIA-SEGURIDAD-2026-09-27.md`, una auditoría
+externa completamente independiente de todo lo de arriba — con
+verificación empírica (PoC ejecutados, no solo lectura) — y encontró
+1 alto, 8 medios y 9 bajos. Antes de tocar código, se verificó cada
+hallazgo relevante contra el repo real (reproducción propia, no
+confianza ciega en el informe): los 5 que se intentaron reproducir
+(A-1, M-1, M-2, M-3, M-6) se confirmaron exactamente como se
+describen. Se corrigieron los 4 primeros en esta sesión:
+
+- **A-1 (ALTA)**: `scripts/install_from_market.py` nunca validaba
+  `args.skill_name` (input de línea de comandos) — mismo patrón EXACTO
+  que K-1/K-6, esta vez en el instalador de market en vez de en el
+  registry. PoC propio reproducido: sin el fix, `--skill-name
+  "../.audit_pwned"` escribe y HABILITA una skill fuera de `skills/`.
+  Fix: `validate_skill_name()` (renombrada, pública — antes
+  `_validate_skill_name()`, mismo criterio que `is_valid_tool_name` en
+  versioning.py: una sola fuente de verdad para dos llamadores) +
+  segunda capa de contención antes de `copytree`. 2 tests nuevos.
+- **M-1**: `DynamicSandboxedTool.execute()` (tier "agent") nunca
+  consultaba la cascada de permisos — a diferencia de
+  `SandboxedSkillTool.execute()` (tier "skill", K-4, arreglado
+  hoy más temprano en ESTA MISMA sesión). Reparé solo la mitad
+  del problema en K-4: el otro wrapper que existe en el mismo
+  archivo se quedó sin el chequeo. `globally_denied` documentado
+  como "pase lo que pase" era falso para herramientas dinámicas
+  hasta este fix. 2 tests nuevos.
+- **M-2**: el middleware de tamaño de body de `sandbox_api.py`
+  (agregado HOY MISMO como parte del fix de C-3) crasheaba con
+  `ValueError` sin atrapar ante un `Content-Length` no numérico —
+  alcanzable ANTES de la autenticación, por cualquiera que llegue al
+  puerto. Corregido con `try/except`; también se corrigió el
+  docstring, que daba a entender (incorrectamente) que este
+  middleware corre después de la autenticación. 2 tests nuevos — uno
+  de ellos ancla explícitamente contra la regresión que casi se
+  introduce al arreglar esto (un `return` mal ubicado habría rechazado
+  TODO pedido con `Content-Length` presente, incluidos los legítimos;
+  se detectó corriendo los tests existentes antes de dar el fix por
+  terminado).
+- **M-3**: `diagnose_chain()` (agregado HOY MISMO como parte del fix de
+  A-10 #2) atrapaba `JSONDecodeError` pero no `KeyError` — una línea
+  que ES JSON válido pero le faltan las claves esperadas seguía
+  reventando exactamente la herramienta que un humano usaría para
+  investigar una manipulación del log. `tail()` no necesitó el mismo
+  fix: nunca accede a claves específicas, solo devuelve el dict tal
+  cual. 1 test nuevo.
+
+**Lección explícita**: 3 de los 4 hallazgos corregidos son gaps en
+código que esta misma sesión escribió HOY, no deuda técnica vieja —
+un caso borde no testeado (Content-Length no numérico), una simetría
+rota (arreglar un wrapper y no el otro), y un catch demasiado angosto
+(JSONDecodeError sin KeyError). Ninguno se habría encontrado con más
+tests "obvios" — hizo falta una segunda revisión independiente,
+adversarial, con PoCs reales. Suite completa: 410 passed, 0 failed.
+`ruff check .` limpio.
+
+Quedan del mismo informe, sin empezar: M-4 (grants persistidos sin
+validación + `data/keys` escribible por grupo), M-5 (`extra_mounts` sin
+validar), M-6 (verificado: `is_unsafe_ip` es código muerto, cero
+llamadores reales), M-7 (`sandbox_runner` corre como root),
+M-8 (mensaje de firma engañoso: "verificada" implica autoría, no solo
+integridad), y B-1 a B-10.

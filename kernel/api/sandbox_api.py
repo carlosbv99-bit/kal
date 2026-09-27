@@ -38,10 +38,14 @@ _MAX_BODY_BYTES = 1024 * 1024
 class _MaxBodySizeMiddleware:
     """
     Rechaza temprano por `Content-Length` declarado, antes de que
-    FastAPI/Pydantic lean el body completo a memoria. No cubre un
-    cliente que mienta el header o transmita en streaming sin
-    Content-Length — deny-by-default en el caso común, no una defensa
-    exhaustiva contra un cliente que ya pasó la autenticación de abajo.
+    FastAPI/Pydantic lean el body completo a memoria. Corre ANTES que
+    cualquier dependencia de la ruta (incluida `_verify_token` de abajo)
+    — un middleware ASGI siempre corre antes del routing/las
+    dependencias, nunca después — así que esto es una defensa PRE-AUTH,
+    alcanzable por cualquiera que llegue al puerto, no solo por quien ya
+    tiene el token. No cubre un cliente que mienta el header o
+    transmita en streaming sin Content-Length — deny-by-default en el
+    caso común, no una defensa exhaustiva.
     """
 
     def __init__(self, app, max_bytes: int):
@@ -52,10 +56,24 @@ class _MaxBodySizeMiddleware:
         if scope["type"] == "http":
             headers = dict(scope.get("headers", []))
             content_length = headers.get(b"content-length")
-            if content_length is not None and int(content_length) > self.max_bytes:
-                response = JSONResponse({"detail": "Body demasiado grande"}, status_code=413)
-                await response(scope, receive, send)
-                return
+            if content_length is not None:
+                # BUG REAL ENCONTRADO EN AUDITORÍA EXTERNA (M-2,
+                # 2026-09-27): un Content-Length no numérico (p.ej.
+                # b"not-a-number") hacía que int() lanzara ValueError
+                # SIN ATRAPAR acá — un crash alcanzable por cualquiera
+                # que llegue al puerto, ANTES de la autenticación (ver
+                # el comentario de arriba). Tratado igual que un body
+                # demasiado grande: rechazo limpio, nunca un 500.
+                try:
+                    declared_size = int(content_length)
+                except ValueError:
+                    response = JSONResponse({"detail": "Content-Length inválido"}, status_code=400)
+                    await response(scope, receive, send)
+                    return
+                if declared_size > self.max_bytes:
+                    response = JSONResponse({"detail": "Body demasiado grande"}, status_code=413)
+                    await response(scope, receive, send)
+                    return
         await self.app(scope, receive, send)
 
 

@@ -106,6 +106,60 @@ def test_cascade_only_reports_what_was_actually_requested():
 # --- config.yaml real (no un fake): defaults que no deben aflojarse sin querer ---
 
 
+# --- M-1 (auditoría externa, 2026-09-27): DynamicSandboxedTool.execute()
+# no consultaba la cascada en absoluto — a diferencia de
+# SandboxedSkillTool.execute() (K-4), network_mode se derivaba SOLO de
+# manifest.permissions. globally_denied documentado como "pase lo que
+# pase" era falso para este wrapper. ---
+
+
+class _FakeSandbox:
+    """Doble de prueba: registra si execute() se llegó a invocar."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def execute(self, source_code, context=None, network_mode=None, image=None, granted_permissions=None):
+        self.calls.append({"network_mode": network_mode})
+        from kernel.lifecycle.docker_runner import SandboxResult
+        return SandboxResult(status="success", stdout="ok", stderr="", exit_code=0)
+
+
+def test_dynamic_tool_execute_is_denied_when_cascade_forbids_the_permission(monkeypatch):
+    import kernel.registry.registry as registry_module
+
+    restrictive_cascade = PermissionCascade(_FakeCascadeConfig(globally_denied=["network"]))
+    monkeypatch.setattr(registry_module, "permission_cascade", restrictive_cascade)
+
+    manifest = ToolManifest(name="agente_con_red", description="d", created_by="agent", requires_network=True)
+    fake_sandbox = _FakeSandbox()
+    tool = DynamicSandboxedTool(manifest, "print('hola')", sandbox=fake_sandbox)
+
+    artifact = tool.execute()
+
+    assert artifact.metadata["status"] == "error"
+    assert "network" in artifact.metadata["stderr"]
+    # La cascada debe rechazar ANTES de tocar el sandbox — nunca se
+    # ejecuta código con menos permisos de los que la herramienta asume.
+    assert fake_sandbox.calls == []
+
+
+def test_dynamic_tool_execute_still_works_when_cascade_allows_it(monkeypatch):
+    import kernel.registry.registry as registry_module
+
+    permissive_cascade = PermissionCascade(_FakeCascadeConfig())  # default: agent cubre network
+    monkeypatch.setattr(registry_module, "permission_cascade", permissive_cascade)
+
+    manifest = ToolManifest(name="agente_con_red", description="d", created_by="agent", requires_network=True)
+    fake_sandbox = _FakeSandbox()
+    tool = DynamicSandboxedTool(manifest, "print('hola')", sandbox=fake_sandbox)
+
+    artifact = tool.execute()
+
+    assert artifact.metadata["status"] == "success"
+    assert fake_sandbox.calls == [{"network_mode": "bridge"}]
+
+
 def test_default_config_denies_the_highest_impact_permissions_globally():
     """
     A-5 (auditoría externa Likay-OS, 2026-09-26): el tier "system" de

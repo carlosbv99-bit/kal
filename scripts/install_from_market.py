@@ -44,6 +44,7 @@ from kernel.registry.skills import (
     audit_skill_enable_change,
     parse_manifest,
     set_skill_enabled,
+    validate_skill_name,
 )
 
 DEFAULT_MARKET_URL = "https://github.com/carlosbv99-bit/kal.git"
@@ -76,6 +77,21 @@ def main() -> None:
 
         if not args.skill_name:
             parser.error("falta el nombre de la skill (o usá --list para ver las disponibles)")
+
+        # VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (2026-09-27,
+        # A-1): args.skill_name (input de línea de comandos, viene de
+        # afuera del proceso) se usaba SIN NINGUNA sanitización para armar
+        # local_dest — a diferencia de manifest.name (siempre validado por
+        # validate_skill_name() antes de cargar/activar una skill LOCAL).
+        # Un --skill-name "../../.venv/lib/pythonX.Y/site-packages/algo"
+        # escribía y HABILITABA una skill fuera de skills/ por completo —
+        # mismo patrón exacto que K-1/K-6, solo que en el instalador de
+        # market en vez de en el registry. Rechazado temprano, antes de
+        # tocar la red o el filesystem.
+        name_error = validate_skill_name(args.skill_name)
+        if name_error is not None:
+            print(f"ERROR: {name_error}")
+            raise SystemExit(1)
 
         local_dest = DEFAULT_SKILLS_DIR / args.skill_name
         if local_dest.exists():
@@ -114,6 +130,14 @@ def main() -> None:
                     return
 
             DEFAULT_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+            # Segunda capa de defensa, mismo criterio que
+            # SandboxedSkillTool.__init__ y ToolVersionStore._tool_dir():
+            # nunca confiar en un solo chequeo para una escritura a disco
+            # derivada de input externo, aunque validate_skill_name() de
+            # arriba ya lo cubra estructuralmente (la regex no admite '/').
+            if not local_dest.resolve().is_relative_to(DEFAULT_SKILLS_DIR.resolve()):
+                print(f"ERROR: '{args.skill_name}' resuelve fuera de skills/ — rechazado.")
+                raise SystemExit(1)
             shutil.copytree(staging_dir, local_dest)
 
         set_skill_enabled(local_dest, True)

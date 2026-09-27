@@ -124,7 +124,7 @@ class SandboxedSkillTool(Tool):
         # DEFENSA EN PROFUNDIDAD (K-1, auditoría externa Likay-OS
         # 2026-09-26): kernel/registry/skills.py::load_skills() ya
         # rechaza un manifest.name inválido ANTES de instanciar este
-        # Tool (_validate_skill_name) — este chequeo es la segunda capa,
+        # Tool (validate_skill_name) — este chequeo es la segunda capa,
         # para cualquier otro llamador que construya SandboxedSkillTool
         # directamente (tests, un futuro path de carga distinto) sin
         # pasar por esa validación. containment_root.mkdir() va ANTES

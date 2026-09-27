@@ -124,3 +124,53 @@ def test_execute_rejects_a_body_larger_than_the_limit(client, sandbox_api_module
         headers={"x-sandbox-token": "el-secreto-correcto"},
     )
     assert response.status_code == 413
+
+
+def test_non_numeric_content_length_is_rejected_without_a_500(sandbox_api_module):
+    """
+    M-2 (auditoría externa, 2026-09-27): un Content-Length no numérico
+    (b"not-a-number") hacía que int() lanzara ValueError SIN ATRAPAR
+    DENTRO DEL MIDDLEWARE — un crash alcanzable ANTES de la
+    autenticación por cualquiera que llegue al puerto (un middleware
+    ASGI corre antes que las Depends() de la ruta). Se prueba el
+    middleware directo: la librería cliente (httpx2/TestClient) no deja
+    mandar un Content-Length arbitrario a mano, así que no alcanza para
+    reproducir esto de punta a punta.
+    """
+    import asyncio
+
+    sent = {}
+
+    async def fake_app(scope, receive, send):
+        sent["reached_app"] = True
+
+    async def fake_send(message):
+        sent.setdefault("messages", []).append(message)
+
+    middleware = sandbox_api_module._MaxBodySizeMiddleware(fake_app, max_bytes=sandbox_api_module._MAX_BODY_BYTES)
+    scope = {"type": "http", "headers": [(b"content-length", b"not-a-number")]}
+
+    asyncio.run(middleware(scope, None, fake_send))
+
+    assert "reached_app" not in sent
+    status_messages = [m for m in sent["messages"] if m["type"] == "http.response.start"]
+    assert status_messages[0]["status"] == 400
+
+
+def test_a_legitimate_content_length_still_reaches_the_app(sandbox_api_module):
+    """Ancla contra una regresión inversa: rechazar SIEMPRE que
+    Content-Length esté presente, en vez de solo cuando es inválido o
+    demasiado grande."""
+    import asyncio
+
+    sent = {}
+
+    async def fake_app(scope, receive, send):
+        sent["reached_app"] = True
+
+    middleware = sandbox_api_module._MaxBodySizeMiddleware(fake_app, max_bytes=sandbox_api_module._MAX_BODY_BYTES)
+    scope = {"type": "http", "headers": [(b"content-length", b"42")]}
+
+    asyncio.run(middleware(scope, None, None))
+
+    assert sent.get("reached_app") is True

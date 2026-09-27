@@ -157,7 +157,7 @@ def test_path_traversal_in_manifest_name_is_rejected(tmp_path):
     "../../../../tmp/pwned" hacía que el propio proceso del agente
     creara directorios FUERA de la raíz de artefactos. Esta es la
     segunda capa de defensa (la primera, kernel/registry/skills.py::
-    _validate_skill_name, rechaza esto antes de llegar acá al cargar
+    validate_skill_name, rechaza esto antes de llegar acá al cargar
     una skill real) — protege a cualquier otro llamador que construya
     SandboxedSkillTool directamente.
     """

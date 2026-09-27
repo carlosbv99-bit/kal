@@ -288,6 +288,29 @@ def test_diagnose_chain_reports_a_corrupted_line_as_a_break_without_raising(log)
     assert corrupt_breaks[0].hash_ok is False
 
 
+def test_diagnose_chain_reports_valid_json_missing_expected_keys_as_a_break_without_raising(log):
+    """
+    M-3 (auditoría externa, 2026-09-27): una línea que ES JSON válido
+    pero no tiene las claves esperadas (JSON de otra herramienta,
+    tampering manual, una escritura parcial que casualmente parsea)
+    hacía que entry["prev_hash"] lanzara KeyError SIN ATRAPAR — la
+    herramienta que un humano usaría para investigar una manipulación
+    era la primera en dejar de funcionar.
+    """
+    log.record(_event(summary="uno"))
+    with open(log.path, "a", encoding="utf-8") as f:
+        f.write('{"esto": "es json valido pero no tiene la forma esperada"}\n')
+    log.record(_event(summary="dos"))
+
+    diagnosis = log.diagnose_chain()
+
+    assert diagnosis.is_valid is False
+    assert diagnosis.total_entries == 3
+    corrupt_breaks = [b for b in diagnosis.breaks if b.event_type == "<línea corrupta>"]
+    assert len(corrupt_breaks) == 1
+    assert corrupt_breaks[0].index == 1
+
+
 # --- Correlation ID (ver utils/correlation.py) — propagación automática 2026-07-20 ---
 
 

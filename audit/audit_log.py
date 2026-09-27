@@ -260,17 +260,32 @@ class AuditLog:
         for i, line in enumerate(lines):
             try:
                 entry = json.loads(line)
-            except json.JSONDecodeError:
+                chain_ok = entry["prev_hash"] == prev
+                recomputed = AuditEvent(
+                    event_type=entry["event_type"],
+                    summary=entry["summary"],
+                    context=entry["context"],
+                    outcome=entry["outcome"],
+                    timestamp=entry["timestamp"],
+                    prev_hash=entry["prev_hash"],
+                ).compute_hash()
+                hash_ok = recomputed == entry["event_hash"]
+            except (json.JSONDecodeError, KeyError) as e:
                 # VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA
-                # (A-10 #2, misma causa que _read_last_hash): sin este
-                # try/except, UNA línea corrupta hacía que la propia
-                # herramienta de diagnóstico reventara al leerla —
-                # justo la que alguien usaría para investigar por qué
-                # algo se ve mal. Se registra como ruptura (nunca se
-                # puede verificar contenido de lo que no se puede ni
-                # parsear) y se sigue diagnosticando el resto del
-                # archivo con el último hash válido conocido.
-                logger.error(f"Entrada {i} de {AUDIT_LOG_PATH} corrupta, no es JSON válido: {line!r}")
+                # (A-10 #2 + M-3, 2026-09-27): sin este try/except, UNA
+                # línea corrupta (JSON inválido, A-10 #2) O una línea
+                # que SÍ es JSON válido pero le faltan las claves
+                # esperadas (M-3 — JSON de otra herramienta, tampering
+                # manual, escritura parcial que casualmente parsea)
+                # hacía que la propia herramienta de diagnóstico
+                # reventara al leerla — justo la que alguien usaría
+                # para investigar por qué algo se ve mal. Se registra
+                # como ruptura (nunca se puede verificar contenido de
+                # lo que no se puede ni parsear/leer) y se sigue
+                # diagnosticando el resto del archivo con el último
+                # hash válido conocido (nunca se avanza `prev` acá,
+                # mismo criterio que la rama de abajo).
+                logger.error(f"Entrada {i} de {AUDIT_LOG_PATH} corrupta ({type(e).__name__}): {line!r}")
                 breaks.append(
                     ChainBreak(
                         index=i, event_type="<línea corrupta>", outcome="<no parseable>",
@@ -278,17 +293,6 @@ class AuditLog:
                     )
                 )
                 continue
-
-            chain_ok = entry["prev_hash"] == prev
-            recomputed = AuditEvent(
-                event_type=entry["event_type"],
-                summary=entry["summary"],
-                context=entry["context"],
-                outcome=entry["outcome"],
-                timestamp=entry["timestamp"],
-                prev_hash=entry["prev_hash"],
-            ).compute_hash()
-            hash_ok = recomputed == entry["event_hash"]
 
             if not chain_ok or not hash_ok:
                 breaks.append(
