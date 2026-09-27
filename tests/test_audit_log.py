@@ -242,6 +242,52 @@ def test_diagnose_chain_break_records_index_and_event_type(log):
     assert diagnosis.breaks[0].event_type == "sandbox_execution"
 
 
+# --- A-10 #2 (auditoría externa Likay-OS, 2026-09-26): una línea corrupta
+# (escritura parcial por crash/kill -9) no debe dejar el sistema entero
+# SIN auditoría de ahí en más ---
+
+
+def test_record_after_a_corrupted_last_line_does_not_raise_and_keeps_auditing(log):
+    log.record(_event(summary="antes de la corrupción"))
+    with open(log.path, "a", encoding="utf-8") as f:
+        f.write("esto no es json valido, una escritura a medias\n")
+
+    # No debe propagar JSONDecodeError — la auditoría sigue funcionando.
+    event = log.record(_event(summary="después de la corrupción"))
+
+    assert event.prev_hash == "genesis_after_corruption"
+    lines = log.path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3  # la línea corrupta se conserva, no se borra
+
+
+def test_tail_skips_a_corrupted_line_instead_of_raising(log):
+    log.record(_event(summary="uno"))
+    with open(log.path, "a", encoding="utf-8") as f:
+        f.write("linea corrupta\n")
+    log.record(_event(summary="dos"))
+
+    entries = log.tail()
+
+    assert [e["summary"] for e in entries] == ["dos", "uno"]
+
+
+def test_diagnose_chain_reports_a_corrupted_line_as_a_break_without_raising(log):
+    log.record(_event(summary="uno"))
+    with open(log.path, "a", encoding="utf-8") as f:
+        f.write("linea corrupta\n")
+    log.record(_event(summary="dos"))
+
+    diagnosis = log.diagnose_chain()
+
+    assert diagnosis.is_valid is False
+    assert diagnosis.total_entries == 3
+    corrupt_breaks = [b for b in diagnosis.breaks if b.event_type == "<línea corrupta>"]
+    assert len(corrupt_breaks) == 1
+    assert corrupt_breaks[0].index == 1
+    assert corrupt_breaks[0].chain_ok is False
+    assert corrupt_breaks[0].hash_ok is False
+
+
 # --- Correlation ID (ver utils/correlation.py) — propagación automática 2026-07-20 ---
 
 

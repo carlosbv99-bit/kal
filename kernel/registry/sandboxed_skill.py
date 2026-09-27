@@ -34,7 +34,9 @@ resto del código de la skill puede importar libremente `sdk.*`, nunca
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import tempfile
 import uuid
 from pathlib import Path
@@ -254,10 +256,34 @@ class SandboxedSkillTool(Tool):
         de nada al runner (ya se leyó en load_skills()) y __pycache__
         puede tener .pyc de una versión de Python distinta a la de la
         imagen del contenedor.
+
+        VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (A-1,
+        2026-09-26): la versión anterior usaba `path.is_file()` (sigue
+        symlinks) sobre `rglob("*")` — el mismo patrón que K-2 en
+        `docker_runner.py::_collect_output_files`, pero del lado de
+        ENTRADA en vez de salida. Un symlink dentro de `skills/<x>/`
+        apuntando a un archivo del HOST (`/etc/passwd`,
+        `data/keys/.../skill_author_key`, `.env`) hacía que el proceso
+        HOST leyera ese contenido y lo empaquetara como
+        `workspace_files` dentro del contenedor — si la skill además
+        declara `Permission.NETWORK`, puede exfiltrarlo. `rglob("*")`
+        en Python ≥3.13 además sigue symlinks a DIRECTORIOS, no solo a
+        archivos. Mismo fix en dos capas que K-2: `os.lstat` (nunca
+        sigue symlinks) para descartar cualquier entrada que no sea un
+        archivo REGULAR, más un chequeo de que la ruta REAL resuelva
+        dentro de `skill_dir` (cubre el caso de un directorio
+        intermedio symlinkeado).
         """
         files: dict[str, str | bytes] = {}
+        resolved_root = self.skill_dir.resolve()
         for path in self.skill_dir.rglob("*"):
-            if not path.is_file():
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if not path.resolve().is_relative_to(resolved_root):
                 continue
             if path.name == "skill.yaml" or "__pycache__" in path.parts or path.suffix == ".pyc":
                 continue

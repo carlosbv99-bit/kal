@@ -76,6 +76,25 @@ class DockerSandboxRunner:
         return self._client
 
     @staticmethod
+    def _join_within(base: Path, relative: str) -> Path:
+        """
+        `base / relative`, pero rechaza cualquier resultado que resuelva
+        FUERA de `base` — auditoría externa (2026-09-26, "footgun
+        latente" relacionado a A-1): tanto `workspace_files` como
+        `output_dir` aceptaban claves con `../` sin normalizar. Hoy los
+        únicos llamadores reales alimentan esto con rutas fijas de
+        primera parte (nunca explotable in situ), pero un llamador
+        futuro o un refactor podría convertir esto en escritura
+        arbitraria fuera del directorio temporal — defensa en
+        profundidad, mismo criterio que K-1/K-6 en otros módulos de
+        este mismo kernel.
+        """
+        joined = (base / relative).resolve()
+        if not joined.is_relative_to(base.resolve()):
+            raise ValueError(f"'{relative}' resuelve fuera del workdir permitido — rechazado.")
+        return joined
+
+    @staticmethod
     def _prepare_workdir(
         workdir: Path, source_code: str, workspace_files: dict[str, str | bytes] | None
     ) -> None:
@@ -110,7 +129,7 @@ class DockerSandboxRunner:
         script_path.write_text(source_code, encoding="utf-8")
 
         for filename, content in (workspace_files or {}).items():
-            file_path = workdir / filename
+            file_path = DockerSandboxRunner._join_within(workdir, filename)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(content, bytes):
                 file_path.write_bytes(content)
@@ -185,12 +204,21 @@ class DockerSandboxRunner:
         target_pids_limit = pids_limit or self.cfg.pids_limit
         with tempfile.TemporaryDirectory() as tmp_dir:
             workdir = Path(tmp_dir)
-            self._prepare_workdir(workdir, source_code, workspace_files)
+            try:
+                self._prepare_workdir(workdir, source_code, workspace_files)
 
-            output_path = None
-            if output_dir:
-                output_path = workdir / output_dir
-                output_path.mkdir(parents=True, exist_ok=True)
+                output_path = None
+                if output_dir:
+                    output_path = self._join_within(workdir, output_dir)
+                    output_path.mkdir(parents=True, exist_ok=True)
+            except ValueError as e:
+                # workspace_files/output_dir con una clave que escapa del
+                # workdir (ver _join_within) — error de programación del
+                # LLAMADOR, no de la ejecución en sí, pero se devuelve
+                # como SandboxResult igual que ImageNotFound/APIError de
+                # abajo, en vez de propagar, por consistencia.
+                logger.error(f"Ruta de workspace_files/output_dir inválida: {e}")
+                return SandboxResult("error", "", str(e), None)
 
             volumes = {str(workdir): {"bind": "/workspace", "mode": "rw"}}
             for host_path, container_path in (extra_mounts or {}).items():

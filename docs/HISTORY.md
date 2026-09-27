@@ -283,12 +283,88 @@ del resto de `kernel/`. Este chequeo de drift es, en parte, la
 corrección de ese proceso: de acá en más, un fix real que no se porta
 se detecta solo, no depende de que alguien piense en revisarlo a mano.
 
-**Hallazgo aparte, sin resolver todavía — decisión pendiente, no un
-bug**: el chequeo también reporta que `kernel/security/malware_scan.py`
-(y su `__init__.py`) no tienen equivalente en kal-in, porque ahí ese
-mismo módulo todavía vive en `tool_integration/malware_scan.py`. No es
-una vulnerabilidad — ambos repos escanean malware igual — es una
-diferencia de organización que kal-in arrastra de antes del split.
-Migrar `tool_integration/malware_scan.py` a `kernel/` en kal-in es un
-cambio real (mover el módulo, actualizar sus imports) que no se hizo
-en esta sesión — decisión del usuario, ver conversación.
+**Hallazgo aparte, resuelto en esta misma sesión**: el chequeo también
+reportó que `kernel/security/malware_scan.py` (y su `__init__.py`) no
+tenían equivalente en kal-in, porque ahí ese mismo módulo todavía vivía
+en `tool_integration/malware_scan.py`. No era una vulnerabilidad —
+ambos repos escaneaban malware igual — era una diferencia de
+organización que kal-in arrastraba de antes del split. Con
+confirmación del usuario, se migró en kal-in (`git mv` + imports
+actualizados) — ver `docs/HISTORY.md` de kal-in para el detalle.
+
+## Auditoría externa completa de kal-in aplicada a kal: 3 hallazgos más, todos reales (2026-09-27)
+
+Al revisar el contenido de la carpeta vieja de kal-in (pedido del
+usuario: "mira los dos pendientes"), apareció `docs/SECURITY-AUDIT-2026-09-26.md`
+— una auditoría de seguridad externa completa (5 críticos + 10 altos +
+12 medios + 6 bajos) que nunca se había mencionado en esta sesión hasta
+ahora. La mayoría de los hallazgos son específicos de kal-in (agente,
+LLM, memoria, frontend, extensión VS Code) y no aplican acá — pero
+varios SÍ son del kernel puro, y kal los tenía sin corregir porque este
+repo se extrajo antes de que existiera esa auditoría:
+
+- **A-1 (relacionado a K-2)**: `kernel/registry/sandboxed_skill.py::_collect_skill_files()`
+  usaba `path.is_file()` (sigue symlinks) sobre `rglob("*")` — mismo
+  patrón que K-2 en `docker_runner.py`, pero del lado de ENTRADA: un
+  symlink dentro de `skills/<x>/` apuntando a un archivo del HOST
+  (una clave de firma, `.env`, `/etc/passwd`) hacía que el proceso
+  HOST lo leyera y lo empaquetara en `workspace_files` — exfiltrable
+  si la skill declara `Permission.NETWORK`. Mismo fix en dos capas que
+  K-2: `os.lstat` + descartar no-regulares + chequeo de que la ruta
+  real resuelva dentro de `skill_dir`. 2 tests nuevos (symlink a
+  archivo, symlink a subdirectorio — Python ≥3.13 sigue symlinks a
+  directorios en `rglob`).
+- **C-3 (CRÍTICO en el informe original)**: `kernel/api/sandbox_api.py::/execute`
+  ejecutaba código arbitrario SIN NINGUNA autenticación, alcanzable
+  desde cualquier proceso en la misma red que `sandbox_runner` — el
+  único freno era el denylist AST (heurístico, no exhaustivo, por su
+  propio docstring) más el aislamiento de Docker. Fix: token
+  compartido vía header (`SANDBOX_API_TOKEN` en el entorno,
+  `secrets.compare_digest` comparado como BYTES — ver M-6 del mismo
+  informe: comparar como `str` no-ASCII lanza `TypeError` sin atrapar,
+  un 500 alcanzable sin auth) + límite de tamaño de body (1 MiB,
+  rechazado por `Content-Length` antes de que Pydantic lea el body
+  completo). Fail-closed: sin `SANDBOX_API_TOKEN` configurado, TODO
+  pedido se rechaza. Primer test de este archivo en todo el repo (7
+  tests nuevos) — hizo falta agregar `httpx2` a `requirements-dev.txt`
+  (requerido por `fastapi.testclient.TestClient`, mismo paquete que ya
+  usa kal-in).
+- **A-10 #2**: `audit/audit_log.py::_read_last_hash()` hacía
+  `json.loads()` sobre la última línea SIN try/except — una línea
+  corrupta (escritura parcial por un crash/`kill -9` a mitad de
+  `record()`, el propio docstring de la clase documenta múltiples
+  escritores concurrentes) hacía que ESA excepción se propagara sin
+  atrapar, y TODO evento posterior fallaba igual: el sistema quedaba
+  SIN auditoría de ahí en más, silenciosamente. Mismo patrón encontrado
+  además en `tail()` y `diagnose_chain()` (ninguno de los dos estaba
+  en el informe original, pero comparten la misma causa) — las tres
+  funciones ahora atrapan `JSONDecodeError`, loguean fuerte con la
+  línea cruda, y siguen funcionando (nueva cadena a partir de la
+  corrupción, en vez de romperse por completo). 3 tests nuevos.
+
+**Hallazgo propio, no del informe — "footgun latente" que el informe sí
+mencionó de pasada para A-1** ("`_prepare_workdir`/`output_dir` aceptan
+claves con `../` sin normalizar"): agregado `DockerSandboxRunner._join_within()`,
+un helper compartido que rechaza cualquier `workspace_files`/`output_dir`
+que resuelva fuera del workdir temporal. Hoy ningún llamador real pasa
+input no confiable acá (rutas fijas de primera parte), así que no era
+explotable in situ — pero es exactamente el tipo de defensa en
+profundidad que ya se aplicó en K-1/K-6 de sesiones anteriores. 5 tests
+nuevos.
+
+**M-9 (dependencias)**: ambos workflows de CI (`ci.yml`,
+`validate-skills.yml`) pineaban `actions/checkout`/`actions/setup-python`
+por tag mutable (`@v4`/`@v5`) en vez de SHA — corregido, SHAs
+verificados con `git ls-remote` contra los tags reales (`v4.4.0`,
+`v5.6.0` — casualmente los mismos que Likay-OS ya había verificado en
+su propia re-auditoría). Además, `requirements-core.txt`/`requirements-dev.txt`
+pasaron de rangos abiertos (`>=`) a versiones EXACTAS — pineadas a lo
+que ya estaba instalado y ya verificado contra la suite completa en
+este mismo cambio (cero riesgo de comportamiento nuevo). De paso,
+sacado `pydantic-settings`: nunca se usó en ningún módulo del kernel
+(verificado con grep) — `utils/config.py` usa `pydantic.BaseModel`
+puro, dead weight desde la extracción inicial.
+
+Verificado con un venv completamente nuevo instalando SOLO las
+versiones exactas recién pineadas: 400 tests passed (383 anteriores +
+17 nuevos), 0 failed. `ruff check .` (regla completa) limpio.

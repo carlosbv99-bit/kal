@@ -110,6 +110,45 @@ def test_execute_collects_skill_files_but_not_manifest(tool):
     assert not any(k.endswith("skill.yaml") for k in files)
 
 
+def test_a_symlink_inside_the_skill_dir_pointing_outside_is_never_read(tool, tmp_path):
+    """
+    A-1 (auditoría externa Likay-OS, 2026-09-26): `_collect_skill_files`
+    usaba `path.is_file()` (sigue symlinks) sobre `rglob("*")` — un
+    symlink dentro de `skills/<x>/` apuntando a un archivo del HOST
+    (una clave de firma, `.env`, `/etc/passwd`) hacía que el proceso
+    HOST lo leyera y lo empaquetara en `workspace_files`, exfiltrable
+    si la skill declara Permission.NETWORK. Mismo patrón que K-2 en
+    docker_runner.py, pero del lado de entrada.
+    """
+    skill_tool, fake = tool
+    secreto = tmp_path / "secreto_del_host.txt"
+    secreto.write_bytes(b"informacion sensible del host, nunca deberia salir del host")
+    (skill_tool.skill_dir / "robado.txt").symlink_to(secreto)
+
+    skill_tool.execute()
+
+    files = fake.calls[0]["workspace_files"]
+    assert "skill/tool.py" in files
+    assert not any(k.endswith("robado.txt") for k in files)
+
+
+def test_a_symlinked_subdirectory_inside_the_skill_dir_is_never_traversed(tool, tmp_path):
+    """Defensa adicional: un directorio INTERMEDIO symlinkeado (no solo
+    el archivo hoja) tampoco debe filtrar contenido del host — Python
+    >=3.13 hace que rglob("*") siga symlinks a directorios."""
+    skill_tool, fake = tool
+    fuera = tmp_path / "fuera_del_skill_dir"
+    fuera.mkdir()
+    (fuera / "otro_secreto.txt").write_bytes(b"tambien sensible")
+    (skill_tool.skill_dir / "subcarpeta").symlink_to(fuera, target_is_directory=True)
+
+    skill_tool.execute()
+
+    files = fake.calls[0]["workspace_files"]
+    assert "skill/tool.py" in files
+    assert not any("otro_secreto" in k for k in files)
+
+
 def test_path_traversal_in_manifest_name_is_rejected(tmp_path):
     """
     K-1 (auditoría externa Likay-OS, 2026-09-26): manifest.name se

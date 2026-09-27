@@ -3,25 +3,36 @@
 # agent_core (chromadb/sqlalchemy para memoria, Pillow/tenacity/
 # structlog/python-multipart para el agente) — verificado uno por uno
 # que el kernel NO los usa (grep real, no suposición) antes de sacarlos.
-# Validado en un venv limpio: la suite de tests (367 tests) colecta y
+# Validado en un venv limpio: la suite de tests (367+ tests) colecta y
 # corre completa instalando SOLO esta lista.
+#
+# Versiones EXACTAS (no rangos abiertos) desde el 2026-09-27, auditoría
+# externa (M-9: "dependencias sin cota superior... sin lockfile"). Se
+# pinearon a lo YA instalado y YA verificado contra la suite completa
+# en este mismo cambio — cero riesgo de comportamiento nuevo, solo
+# cierra la superficie de que una versión futura (compatible en
+# apariencia por el rango abierto) rompa algo sin que nadie lo note
+# hasta producción. Actualizar una versión acá es una decisión
+# explícita: bump + correr la suite, nunca automático.
+# `pydantic-settings` se sacó (2026-09-27): nunca se usó en ningún
+# módulo del kernel (verificado con grep) — utils/config.py usa
+# pydantic.BaseModel puro, nunca pydantic_settings.BaseSettings.
 
 # --- Core ---
-pydantic>=2.6
-pydantic-settings>=2.2
-PyYAML>=6.0
-python-dotenv>=1.0
-requests>=2.31          # usado por kernel/lifecycle/docker_runner.py
+pydantic==2.13.5
+PyYAML==6.0.3
+python-dotenv==1.2.3
+requests==2.34.2          # usado por kernel/lifecycle/docker_runner.py
 
 # --- Web / API (kernel/api/sandbox_api.py) ---
-fastapi>=0.110
-uvicorn[standard]>=0.29
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
 
 # --- Sandbox ---
-docker>=7.0
+docker==7.2.0
 
 # --- Firmas digitales de herramientas dinámicas ---
-cryptography>=42.0
+cryptography==50.0.1
 
 # --- Utilidades ---
-psutil>=5.9            # RAM disponible del sistema, ver kernel/broker/resource_broker.py
+psutil==7.2.2            # RAM disponible del sistema, ver kernel/broker/resource_broker.py

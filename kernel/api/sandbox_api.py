@@ -7,18 +7,78 @@ tenga acceso al socket de Docker del host (ver docker-compose.yml).
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+import os
+import secrets
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field
+from starlette.responses import JSONResponse
 
 from kernel.lifecycle.executor import SandboxExecutor
 
+# VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (C-3, 2026-09-26):
+# /execute ejecutaba código arbitrario SIN NINGUNA autenticación,
+# alcanzable desde cualquier proceso en la misma red que sandbox_runner
+# — el único freno era el denylist AST (code_analysis/), que su propio
+# docstring ya declara heurístico, no exhaustivo, más el aislamiento de
+# Docker (real, pero no debería ser la ÚNICA capa para un endpoint de
+# "ejecutá este código"). Fail-closed por diseño, mismo criterio que el
+# resto del proyecto (sandbox.network_mode="none", browser.allowed_domains
+# vacío, etc.): sin SANDBOX_API_TOKEN configurado en el entorno, TODO
+# pedido a /execute se rechaza — nunca "abierto por default" mientras
+# alguien se olvida de configurar el secreto.
+SANDBOX_API_TOKEN = os.environ.get("SANDBOX_API_TOKEN")
+
+# Mismo hallazgo (C-3): sin límite de tamaño de body. 1 MiB es de sobra
+# para el código fuente real de una skill/herramienta dinámica — un
+# body más grande no tiene ningún caso de uso legítimo hoy.
+_MAX_BODY_BYTES = 1024 * 1024
+
+
+class _MaxBodySizeMiddleware:
+    """
+    Rechaza temprano por `Content-Length` declarado, antes de que
+    FastAPI/Pydantic lean el body completo a memoria. No cubre un
+    cliente que mienta el header o transmita en streaming sin
+    Content-Length — deny-by-default en el caso común, no una defensa
+    exhaustiva contra un cliente que ya pasó la autenticación de abajo.
+    """
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            content_length = headers.get(b"content-length")
+            if content_length is not None and int(content_length) > self.max_bytes:
+                response = JSONResponse({"detail": "Body demasiado grande"}, status_code=413)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Sandbox Runner")
+app.add_middleware(_MaxBodySizeMiddleware, max_bytes=_MAX_BODY_BYTES)
 executor = SandboxExecutor()
+
+
+def _verify_token(x_sandbox_token: str | None = Header(default=None)) -> None:
+    # BUG REAL ENCONTRADO EN LA MISMA AUDITORÍA (M-6): secrets.compare_digest
+    # lanza TypeError con un string no-ASCII — comparar como bytes (la
+    # codificación UTF-8 nunca falla) evita ese 500 sin capturar, que
+    # además saltearía la autenticación en vez de rechazarla si no se
+    # atrapara la excepción.
+    expected = (SANDBOX_API_TOKEN or "").encode("utf-8")
+    provided = (x_sandbox_token or "").encode("utf-8")
+    if not SANDBOX_API_TOKEN or not x_sandbox_token or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Token de sandbox_runner inválido o no configurado")
 
 
 class ExecuteRequest(BaseModel):
     source_code: str
-    context: dict = {}
+    context: dict = Field(default_factory=dict)
 
 
 @app.get("/health")
@@ -26,7 +86,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/execute")
+@app.post("/execute", dependencies=[Depends(_verify_token)])
 def execute(req: ExecuteRequest):
     result = executor.execute(req.source_code, req.context)
     return {
