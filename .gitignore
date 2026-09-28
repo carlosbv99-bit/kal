@@ -8,3 +8,14 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# B-6 (auditoría externa, 2026-09-27): nunca hubo un .env en el
+# historial de git (confirmado con git log --all), pero .gitignore no
+# lo excluía explícitamente — a un `git add -A` descuidado le faltaba
+# esta única red de seguridad. /data/ ya cubre data/keys/ (claves de
+# firma, token admin), esto es una capa aparte para secretos en la
+# raíz del repo.
+.env
+.env.*
+*.pem
+*.key

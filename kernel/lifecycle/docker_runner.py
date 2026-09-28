@@ -68,6 +68,22 @@ class DockerSandboxRunner:
         # llamada puntual, nunca el arranque de la aplicación.
         self._client: docker.DockerClient | None = None
         self.cfg = settings.sandbox
+        # HALLAZGO REAL DE AUDITORÍA EXTERNA (B-5, 2026-09-27): run()
+        # fija user=f"{os.getuid()}:{os.getgid()}" (evita el chmod 0777
+        # histórico, ver _prepare_workdir) — buena decisión, PERO si el
+        # proceso de kal corre como uid 0, el contenedor sandboxeado
+        # TAMBIÉN corre como root, sin ninguna advertencia. cap_drop=ALL
+        # + no-new-privileges + read_only reducen mucho el impacto real,
+        # pero conviene que quien opera esto lo sepa explícitamente en
+        # vez de descubrirlo si algo escapa del sandbox. Una sola vez
+        # por instancia (no por ejecución, para no inundar el log).
+        if os.getuid() == 0:
+            logger.warning(
+                "DockerSandboxRunner: este proceso corre como root (uid 0) — los contenedores "
+                "sandboxeados TAMBIÉN correrán como root dentro del contenedor (user=uid:gid del "
+                "proceso), aunque con cap_drop=ALL/no-new-privileges/read_only. Correr kal como "
+                "un usuario sin privilegios es la mitigación real."
+            )
 
     @property
     def client(self) -> docker.DockerClient:
@@ -235,7 +251,7 @@ class DockerSandboxRunner:
         target_memory_limit_mb = memory_limit_mb or self.cfg.memory_limit_mb
         target_cpu_limit = cpu_limit or self.cfg.cpu_limit
         target_pids_limit = pids_limit or self.cfg.pids_limit
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory(dir=self.cfg.workdir_root) as tmp_dir:
             workdir = Path(tmp_dir)
             try:
                 self._prepare_workdir(workdir, source_code, workspace_files)

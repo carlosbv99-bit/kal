@@ -1,12 +1,18 @@
 """
-Chequeos de seguridad de red compartidos entre cualquier código que
-haga que kal se conecte a un destino elegido por el usuario/modelo
-(hoy: tool_integration/adapters/browser.py vía Playwright,
-tool_integration/download_manager.py vía requests). Extraído de
-browser.py — el download manager necesita EXACTAMENTE la misma
-protección (allowlist de dominios + rechazo de IPs privadas/reservadas
-por DNS rebinding), duplicarla en dos lugares hubiera sido el mismo
-bug esperando pasar dos veces en vez de una.
+Chequeos de seguridad de red — infraestructura del kernel EXPUESTA
+para que un consumidor externo (kal-in: tool_integration/adapters/
+browser.py vía Playwright, tool_integration/download_manager.py vía
+requests; ninguno de los dos existe en este repo, kernel puro) los use
+antes de conectarse a un destino elegido por el usuario/modelo.
+
+HALLAZGO REAL DE AUDITORÍA EXTERNA (M-6, 2026-09-27): is_unsafe_ip()
+no tiene NINGÚN llamador dentro de este repo — kal en sí nunca hace
+una conexión de red saliente por su cuenta (solo orquesta contenedores
+Docker), así que no hay ningún punto propio donde aplicarlo. Confirmado
+que sí tiene consumidores reales en kal-in (browser.py,
+download_manager.py, llm_settings.py) — no es código muerto en un
+sentido arquitectónico, es infraestructura de kernel para quien SÍ
+hace conexiones de red reales, análogo a network_access_manager.py.
 """
 from __future__ import annotations
 

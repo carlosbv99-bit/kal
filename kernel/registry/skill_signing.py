@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Literal
 
@@ -57,14 +59,35 @@ def _skill_files(skill_dir: Path) -> list[Path]:
     __pycache__/.pyc — no son contenido real, pueden variar entre
     versiones de Python sin que la skill haya cambiado) — EXCLUYE
     además el propio skill.sig, que no puede firmarse a sí mismo.
+
+    HALLAZGO REAL DE AUDITORÍA EXTERNA (B-2, 2026-09-27): usaba
+    `p.is_file()` (sigue symlinks) — el mismo patrón que A-1/K-2, que
+    ya se corrigió en `SandboxedSkillTool._collect_skill_files()` pero
+    quedó SIN corregir acá. No es lectura arbitraria de archivos del
+    host hacia el exterior (acá solo se calcula un SHA-256, nunca se
+    devuelve el contenido a nadie), pero sí significa que un symlink
+    dentro de `skills/<x>/` hace que la firma "canonice" contenido del
+    HOST que no es parte real del paquete — y que esa firma se vuelva
+    `tampered` si ese archivo externo cambia, sin que nadie tocara la
+    skill en sí. Mismo fix en dos capas que A-1/K-2: `os.lstat` +
+    descartar no-regulares + chequeo de que la ruta real resuelva
+    dentro de `skill_dir`.
     """
-    return [
-        p for p in skill_dir.rglob("*")
-        if p.is_file()
-        and "__pycache__" not in p.parts
-        and p.suffix != ".pyc"
-        and p.name != SIGNATURE_FILENAME
-    ]
+    resolved_root = skill_dir.resolve()
+    files = []
+    for p in skill_dir.rglob("*"):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if not p.resolve().is_relative_to(resolved_root):
+            continue
+        if "__pycache__" in p.parts or p.suffix == ".pyc" or p.name == SIGNATURE_FILENAME:
+            continue
+        files.append(p)
+    return files
 
 
 _MANIFEST_FILENAME = "skill.yaml"

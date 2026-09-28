@@ -68,6 +68,10 @@ EventType = Literal[
     "network_access_escalated",
     "android_build_completed",
     "android_build_failed",
+    "skill_permission_denied",
+    "skill_execution_signature_invalid",
+    "skill_execution_socket_error",
+    "kernel_invalid_encoding",
 ]
 
 

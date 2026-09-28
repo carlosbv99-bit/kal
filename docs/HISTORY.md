@@ -406,7 +406,13 @@ conexión se corta pero el thread sigue vivo para las siguientes. 2
 tests nuevos (unit test directo de `_read_line`, más uno de punta a
 punta con un socket Unix real confirmando que una skill hostil no
 puede tumbar el resto de su propia sesión). Suite completa: 403
-passed, 0 failed.
+passed, 0 failed (con `TMPDIR` dentro del workspace del repo — un
+`TMPDIR` por defecto largo, tipo `/tmp/pytest-of-<usuario>/...`, puede
+superar el límite de ~104 bytes de una ruta `AF_UNIX` en Linux para
+los tests de socket real de `sandboxed_skill`/`socket_server`,
+haciendo fallar esos pocos por una limitación del entorno, no del
+código; ver B-3, que agregó `workdir_root` para el mismo problema en
+el contenedor real).
 
 Con esto, se agotaron los hallazgos de `docs/SECURITY-AUDIT-2026-09-26.md`
 que aplican al kernel puro (`kernel/`, `sdk/`, `audit/`,
@@ -554,3 +560,160 @@ este proyecto, sintaxis inválida, no es parte de este trabajo).
 Quedan del mismo informe, sin empezar: M-6 (verificado: `is_unsafe_ip`
 es código muerto, cero llamadores reales — decisión pendiente: usarlo
 o documentar el gap), y B-1 a B-10 (todos BAJOS).
+
+## Fix: M-6 y B-1 a B-10 de la segunda auditoría externa (2026-09-28)
+
+Cierre del resto de `docs/AUDITORIA-SEGURIDAD-2026-09-27.md`. Mismo
+proceso que las rondas anteriores: verificar cada hallazgo contra el
+código real (no confiar en el texto del informe a ciegas) antes de
+corregir, test de regresión confirmado genuino con `git stash`/`git
+stash pop` (falla sin el fix, pasa con él) para cada uno.
+
+- **M-6**: `ToolManifest.allowed_domains` (`sdk/skill.py`) se declara y
+  se serializa (`kernel/registry/registry.py`), pero no se aplica en
+  ningún lado — `Permission.NETWORK` concede `network_mode="bridge"`
+  completo (todo internet, sin allowlist ni proxy de egreso) sin mirar
+  este campo. `network_safety.py::is_unsafe_ip()` (SSRF a IPs
+  privadas/loopback/link-local) es infraestructura real del kernel,
+  exportada para quien construya un mecanismo de red — no código
+  muerto, solo sin consumidor DENTRO de este repo (kal-in sí lo usa,
+  confirmado con grep). Decisión: documentar el hueco explícitamente
+  en ambos módulos en vez de construir un filtrado de egreso completo
+  sin caso de uso real todavía (sobre-ingeniería) — el docstring de
+  `network_safety.py` también dejó de afirmar que
+  `tool_integration/adapters/browser.py`/`download_manager.py` viven
+  en este repo (no viven, son de kal-in).
+- **B-2**: `skill_signing.py::_skill_files()` (la lista de archivos que
+  se hashean al firmar/verificar una skill) usaba `p.is_file()`, que
+  SIGUE symlinks — tercera vez que aparece esta misma clase de bug en
+  la sesión (ver A-1/K-2). Un symlink dentro de la carpeta de la skill
+  podía apuntar a contenido fuera de ella sin que la firma lo reflejara
+  correctamente. Mismo patrón ya establecido:
+  `os.lstat`+`stat.S_ISREG`+`.resolve().is_relative_to()`. 2 tests
+  nuevos.
+- **B-3**: `DockerSandboxRunner` montaba el workdir vía
+  `tempfile.TemporaryDirectory()` sin control de directorio base — en
+  un setup con el daemon de Docker corriendo en otro host/VM (Docker
+  Desktop, `DOCKER_HOST` remoto), el daemon no puede ver una ruta bajo
+  `/tmp` del CLIENTE. Nuevo `SandboxConfig.workdir_root` (opcional,
+  `None` = comportamiento actual sin cambios) para apuntar el bind
+  mount a un directorio que el daemon sí pueda resolver. 3 tests
+  nuevos.
+- **B-4**: en `sandboxed_skill.py::execute()`, `tempfile.mkdtemp()` y
+  `socket_server.start()` estaban FUERA del `try:` — si `start()`
+  fallaba (p.ej. `OSError: AF_UNIX path too long`, el mismo límite de
+  ~104 bytes del B-4 anterior de esta sesión), el tempdir creado
+  quedaba huérfano en disco y la excepción cruda se propagaba en vez
+  de convertirse en un `Artifact` de error. Reestructurado dentro del
+  `try`, nuevo `except OSError` que audita (`skill_execution_socket_error`,
+  agregado al `EventType`) y limpia. 1 test nuevo.
+- **B-5**: `DockerSandboxRunner.__init__` ahora advierte (log warning)
+  si el propio proceso de kal corre como `uid 0` — el contenedor
+  sandboxeado hereda ese UID (`user=f"{getuid()}:{getgid()}"`), así
+  que correr kal como root hace que el contenedor TAMBIÉN corra como
+  root adentro (mitigado pero no eliminado por
+  `cap_drop=ALL`/`no-new-privileges`/`read_only`). 2 tests nuevos.
+- **B-6**: `.gitignore` no excluía explícitamente `.env`/`.env.*`/
+  `*.pem`/`*.key` — nunca hubo ninguno de estos en el historial de git
+  (confirmado con `git log --all`), pero quedaba a merced de que nadie
+  los agregara sin querer. Agregados los patrones, verificado antes
+  que ningún archivo YA trackeado coincidiera.
+- **B-7**: `KernelServiceBus` guardaba `artifact_paths` (URI opaco ->
+  ruta real de host) en un único dict PLANO, global al proceso, sin
+  scoping por skill ni límite de tamaño. Una skill que obtuviera (o
+  adivinara) el UUID de un artefacto generado por OTRA skill podía
+  pasarlo como parámetro propio y `_resolve_input_artifacts()` se lo
+  resolvía igual — no explotable HOY en este repo (`ALLOWED_ACTIONS`
+  vacío en todo el árbol, cero servicios reales registrados), pero sí
+  en kal-in, el consumidor real. Ahora `dict[skill_name, dict[uri,
+  ruta]]`, con `_MAX_ARTIFACTS_PER_SKILL = 200` y descarte FIFO del más
+  viejo. `resolve_artifact()`/`dispatch()` toman `skill_name`
+  opcional (sin él, cae en su propio scope `""`, igual de aislado). 4
+  tests nuevos, incluida la comprobación cruzada explícita (skill B no
+  puede resolver un artefacto de skill A).
+- **B-9**: tres partes.
+  1. `generate_market_page.py::_badge_for_signature()` mostraba
+     "unsigned" tanto para una skill sin firmar como para una
+     ALTERADA después de firmarse ("tampered") — la señal de
+     seguridad más importante de las tres quedaba oculta al humano
+     que mira la página antes de instalar (`install_from_market.py`
+     sí bloquea "tampered", fail-closed, pero esta página es lo
+     primero que se mira). Badge distintivo nuevo (rojo, "signature
+     invalid (tampered)"). 1 test nuevo.
+  2. `docs/index.html` nunca se había generado ni commiteado, a pesar
+     de que el propio docstring del script describe ese flujo
+     ("se corre a mano, se commitea el resultado, GitHub Pages lo
+     sirve desde /docs"). Confirmado que GitHub Pages no está
+     habilitado en este repo (nada 404 en producción), pero es una
+     entrega prometida y nunca completada — generado y commiteado
+     ahora.
+  3. `data/tool_versions/herramienta_de_prueba/` (restos de tests,
+     mencionados en el informe como "firmados con una clave perdida"):
+     verificado que `/data/` está en `.gitignore` desde siempre y
+     estos archivos NUNCA estuvieron trackeados (`git ls-files` vacío)
+     — el hallazgo no aplica a este repo tal cual está, es contenido
+     puramente local de quien lo corrió. La afirmación de HISTORY.md
+     "367/403 tests passed" del informe resultó ser una mezcla de dos
+     números de DOS entradas distintas de este mismo archivo (367 de
+     la extracción inicial, 403 de una ronda posterior) — la entrada
+     real de 403 si dependía del `TMPDIR` (rutas `AF_UNIX` largas por
+     defecto pueden superar el límite de ~104 bytes), aclarado ahí
+     mismo.
+- **B-10**: dos partes.
+  1. `skill_market.py::_clone()` armaba `git clone --depth 1 --branch
+     <ref> <market_url> <dest>` sin separador `--` — un `market_url`
+     que empezara con "-" podía interpretarse como una OPCIÓN de git
+     en vez de como el repositorio a clonar (inyección de argumentos).
+     No explotable hoy con el `--market` fijo por defecto de
+     `install_from_market.py` (un humano lo pasa a mano), pero un
+     primitivo real si `market_url` viniera de una fuente menos
+     confiable a futuro. Agregado `--` antes de las rutas posicionales.
+     1 test nuevo, verificado que reproduce el error exacto de git
+     ("unknown option") sin el fix.
+  2. `.github/workflows/validate-skills.yml` instalaba
+     `pip install pyyaml python-dotenv pydantic cryptography` ad-hoc,
+     sin pinear y duplicando un subconjunto de `requirements-core.txt`
+     (que ya es superset de lo que `validate_skills.py` importa).
+     Reemplazado por `pip install -r requirements-core.txt`, igual que
+     `ci.yml` — hereda el pineo exacto de M-9 en vez de tener una
+     segunda lista de versiones que mantener sincronizada a mano.
+- **B-1**: dos formas reales de llamar a un builtin prohibido evadían
+  el visitor AST, confirmadas empíricamente antes de corregir:
+  `builtins.__import__('os')` (el nodo Call tiene `func=ast.Attribute`,
+  no `ast.Name` — `visit_Call()` solo compara `node.func.id` para
+  nodos Name) y `__builtins__.eval(...)` (disponible sin ningún
+  import; ni el nombre del atributo ni el import están en las listas).
+  Cerrados: `"builtins"` agregado a `FORBIDDEN_IMPORTS`, y
+  `visit_Attribute()` ahora bloquea cualquier atributo cuya BASE sea
+  el nombre `__builtins__`, sin importar cuál atributo puntual sea. 3
+  tests nuevos. Una tercera forma (`e = eval; e(...)`, renombrar el
+  builtin a una variable nueva) NO se corrigió — resolverla de verdad
+  requeriría análisis de alias real, desproporcionado para lo que este
+  módulo es (filtro barato de primera línea, nunca la garantía real);
+  documentado explícitamente en `denylist.py` y con un test que prueba
+  que sigue sin bloquearse, matching el patrón ya establecido de
+  `test_known_residual_gap_documented_not_silently_fixed`. La garantía
+  real sigue siendo el aislamiento de Docker
+  (`tests/test_sandbox_escape_resistance.py`), no este validador.
+
+**B-8 (LOW, diferido a propósito, sin código)**: `AuditLog._read_last_hash()`
+relee el archivo entero bajo lock exclusivo en cada `record()` — con
+un log que solo crece, sin rotación, el costo es cuadrático y serializa
+a todos los escritores mientras lee. El comportamiento ACTUAL es
+correcto (sin condición de carrera, sin pérdida de datos), solo
+potencialmente lento a gran escala — severidad BAJA, confirmada por el
+propio informe. La corrección correcta (mantener el hash del último
+evento en un sidecar pequeño, actualizado dentro de la MISMA sección
+crítica bajo el lock de `audit.log`) es alcanzable pero no trivial de
+verificar bien (análisis de qué pasa si el proceso muere entre las dos
+escrituras) para una ganancia que no importa hasta que el log crezca
+mucho — se deja anotado, no implementado, siguiendo el mismo criterio
+que ya se usó para no apurar M-12 (HMAC del audit log) antes en esta
+sesión.
+
+Suite completa: 447 passed, 0 failed. `ruff check .` limpio (mismo
+`audio_controls.py` excluido, no relacionado con este trabajo).
+
+Con esto se agotan todos los hallazgos aplicables al kernel puro de
+`docs/AUDITORIA-SEGURIDAD-2026-09-27.md`, salvo B-8 (diferido,
+documentado arriba).

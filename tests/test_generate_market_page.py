@@ -70,6 +70,26 @@ def test_signed_skill_shows_verified_badge(tmp_path):
     assert 'badge unsigned">unsigned' not in html_out  # el badge en sí, no la clase CSS (que siempre está definida)
 
 
+# --- B-9 (auditoría externa, 2026-09-27): "tampered" tenía su propio
+# badge distintivo, distinto de "unsigned" — antes, un paquete alterado
+# DESPUÉS de firmarse se mostraba idéntico a uno que nunca se firmó,
+# ocultando la señal de seguridad más importante de las tres ---
+
+
+def test_tampered_skill_shows_a_distinct_badge_not_unsigned(tmp_path):
+    skills_dir = tmp_path / "skills"
+    skill_dir = _make_skill(skills_dir, "greeter")
+    SkillSigner(key_dir=tmp_path / "keys").write_signature(skill_dir)
+    # Alterar el contenido DESPUÉS de firmar -> "tampered", no "unsigned".
+    (skill_dir / "tool.py").write_text("class GreetTool:\n    pass  # modificado\n", encoding="utf-8")
+
+    html_out = render_market_html(skills_dir)
+
+    assert 'badge tampered">' in html_out
+    assert "tampered" in html_out.lower()
+    assert 'badge unsigned">unsigned' not in html_out
+
+
 def test_install_command_is_shown_per_skill(tmp_path):
     skills_dir = tmp_path / "skills"
     _make_skill(skills_dir, "greeter")

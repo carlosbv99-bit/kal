@@ -139,6 +139,11 @@ class DynamicSandboxedTool(Tool):
             logger.warning(detail)
             return Artifact(modality="text", uri="", metadata={"status": "error", "stderr": detail})
 
+        # HALLAZGO REAL DE AUDITORÍA EXTERNA (M-6, 2026-09-27):
+        # manifest.allowed_domains (ver sdk/skill.py) NUNCA se consulta
+        # acá — Permission.NETWORK concede "bridge" (internet completo),
+        # todo o nada, sin allowlist de dominios. Ver el docstring de
+        # ToolManifest.allowed_domains para el detalle completo.
         network_mode = "bridge" if Permission.NETWORK in self.manifest.permissions else None
         result = self.sandbox.execute(
             self.source_code,

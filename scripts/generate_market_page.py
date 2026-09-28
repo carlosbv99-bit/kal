@@ -56,6 +56,7 @@ _PAGE_TEMPLATE = """<!doctype html>
   .badge {{ display: inline-block; font-size: 0.78rem; border-radius: 999px; padding: 0.2rem 0.7rem; margin-right: 0.4rem; }}
   .badge.verified {{ background: #0f3d21; color: #7ee2a8; border: 1px solid #1a5c34; }}
   .badge.unsigned {{ background: #3d2c0f; color: #e2b77e; border: 1px solid #5c451a; }}
+  .badge.tampered {{ background: #3d1414; color: #f28b82; border: 1px solid #6c1f1f; }}
   dl {{ display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0 0 0.9rem; font-size: 0.88rem; }}
   dt {{ color: #8b949e; }}
   dd {{ margin: 0; }}
@@ -103,8 +104,20 @@ _CARD_TEMPLATE = """<article class="card">
 
 
 def _badge_for_signature(signature_status: str) -> str:
+    # HALLAZGO REAL DE AUDITORÍA EXTERNA (B-9, 2026-09-27): antes, todo
+    # lo que no fuera "verified" caía en el mismo badge "unsigned" —
+    # un paquete "tampered" (skill.sig presente pero que NO verifica
+    # contra el contenido actual: alguien lo alteró después de
+    # firmarlo) se mostraba EXACTAMENTE igual que uno que nunca se
+    # firmó, ocultando la señal de seguridad más importante de las
+    # tres (ver verify_skill_signature() en kernel/registry/
+    # skill_signing.py). install_from_market.py sí lo bloquea
+    # (fail-closed), pero esta página es lo primero que un humano mira
+    # antes de decidir instalar algo.
     if signature_status == "verified":
         return '<span class="badge verified">&check; signature verified</span>'
+    if signature_status == "tampered":
+        return '<span class="badge tampered">&#9888; signature invalid (tampered)</span>'
     return '<span class="badge unsigned">unsigned</span>'
 
 

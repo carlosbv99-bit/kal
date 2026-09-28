@@ -89,6 +89,51 @@ def test_known_residual_gap_documented_not_silently_fixed():
     assert result.is_safe  # esto es código inocuo real, no un bypass
 
 
+# --- B-1 (auditoría externa, 2026-09-27, ambas confirmadas
+# empíricamente ANTES de corregir): dos formas reales de llamar a un
+# builtin prohibido que evadían FORBIDDEN_CALLS/FORBIDDEN_ATTRIBUTES ---
+
+
+def test_calling_a_forbidden_builtin_via_the_builtins_module_is_blocked():
+    """
+    `builtins.__import__('os')`: el nodo Call tiene func=ast.Attribute
+    (`builtins.__import__`), no ast.Name — visit_Call() solo compara
+    node.func.id para nodos Name, así que esta forma pasaba sin ser
+    detectada. Cerrado agregando "builtins" a FORBIDDEN_IMPORTS (sin
+    poder importar el módulo, no se puede llegar a su atributo).
+    """
+    result = validate_code("import builtins\nbuiltins.__import__('os')")
+    assert not result.is_safe
+
+
+def test_calling_a_forbidden_builtin_via_bare_dunder_builtins_is_blocked():
+    """
+    `__builtins__.eval(...)`: disponible SIN ningún import (es el
+    namespace global implícito), así que bloquear "builtins" como
+    import no alcanza acá — el propio nombre __builtins__ como BASE de
+    un atributo ahora se bloquea sin importar qué atributo puntual sea.
+    """
+    result = validate_code("__builtins__.eval('1+1')")
+    assert not result.is_safe
+
+    result2 = validate_code("__builtins__.__import__('os')")
+    assert not result2.is_safe
+
+
+def test_aliasing_a_forbidden_builtin_evades_the_static_check():
+    """
+    Hueco documentado, NO corregido (ver denylist.py): `e = eval;
+    e('1+1')` evade FORBIDDEN_CALLS porque el chequeo compara el
+    nombre literal en el sitio de la llamada, sin resolver a qué
+    objeto está atado ese nombre — resolverlo de verdad requeriría
+    análisis de alias real, desproporcionado para un filtro barato de
+    primera línea. La garantía real es Docker (ver
+    test_sandbox_escape_resistance.py), no este validador.
+    """
+    result = validate_code("e = eval\ne('1+1')")
+    assert result.is_safe  # documentado como hueco conocido, no un bypass "corregido"
+
+
 def test_class_traversal_trick_blocked_by_static_layer():
     """
     ().__class__.__bases__[0].__subclasses__() es el escape clásico de
