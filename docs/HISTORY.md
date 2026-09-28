@@ -480,9 +480,77 @@ tests "obvios" — hizo falta una segunda revisión independiente,
 adversarial, con PoCs reales. Suite completa: 410 passed, 0 failed.
 `ruff check .` limpio.
 
-Quedan del mismo informe, sin empezar: M-4 (grants persistidos sin
-validación + `data/keys` escribible por grupo), M-5 (`extra_mounts` sin
-validar), M-6 (verificado: `is_unsafe_ip` es código muerto, cero
-llamadores reales), M-7 (`sandbox_runner` corre como root),
-M-8 (mensaje de firma engañoso: "verificada" implica autoría, no solo
-integridad), y B-1 a B-10.
+## Segunda auditoría externa, continuación — M-4/M-5/M-7/M-8 (2026-09-27/28)
+
+Siguiendo el mismo informe (`docs/AUDITORIA-SEGURIDAD-2026-09-27.md`),
+se corrigieron los 4 hallazgos MEDIOS que quedaban pendientes.
+
+- **M-4**: `_load_persisted_grants()` (`kernel/permissions/access_manager.py`)
+  hacía `json.loads()` sin try/except — un archivo de grants corrupto
+  (disco lleno a mitad de escritura) inutilizaba el motor de decisión
+  ENTERO, no solo el grant afectado. Fail-safe: ante cualquier problema
+  de lectura/parseo se trata como "sin grants persistidos" (la
+  dirección segura — sin grants, `evaluate()` cae a
+  `requires_approval`, nunca a `auto_allowed`), y un grant individual
+  con forma inválida se descarta solo a él. Además: `data/keys/`
+  (claves de firma, token admin, grants persistidos) quedaba con lo
+  que diera el umask del proceso — **verificado en este entorno real:
+  0775, escribible por grupo** — cualquier otro usuario del mismo
+  grupo podía reemplazar una clave privada o escribir sus propios
+  grants (incluido uno con `resource_key: null`, que autoriza
+  CUALQUIER recurso). Nuevo helper compartido
+  `utils/secure_dir.py::ensure_private_dir()` (fuerza 0700, sea que el
+  directorio se acabe de crear o ya existiera de una instalación
+  anterior) aplicado en `signing.py`, `skill_signing.py`,
+  `access_manager.py`, `audit_log.py` (`logs/`) y `admin_token.py` — 5
+  módulos que creaban directorios sensibles sin este chequeo. 12 tests
+  nuevos.
+- **M-5**: `extra_mounts` (`docker_runner.py`) montaba `host_path` ->
+  `container_path` sin ninguna validación — a diferencia de
+  `workspace_files`/`output_dir`, que ya usan `_join_within()` desde
+  la limpieza anterior. Nuevo `_validate_extra_mounts()`: `host_path`
+  debe ser absoluto y existir de verdad, `container_path` debe estar
+  confinado a `/workspace/`. Verificado que el único llamador real
+  (el socket del Kernel Service Bus en `sandboxed_skill.py`) sigue
+  funcionando con Docker real (6/6 tests end-to-end). **Confirmado en
+  vivo, sin el fix**: montar `/etc` como `extra_mounts` funcionaba de
+  verdad contra Docker real (el test que lo prueba falla con
+  `'success' == 'error'` al revertir el fix, no con un error de
+  Docker). 7 tests nuevos.
+- **M-7**: `kernel/lifecycle/Dockerfile` creaba el usuario `sandbox`
+  pero nunca lo activaba (`USER sandbox` ausente) — el único servicio
+  con acceso al socket de Docker del host corría como root. **Bug real
+  encontrado verificando el fix**: agregar solo `USER sandbox` sin más
+  rompía el servicio por completo (`/app` quedaba `root:root` por los
+  `COPY` previos, `utils/logger.py` crea `logs/` al importarse y
+  fallaba con `PermissionError`) — confirmado construyendo la imagen
+  de verdad y corriéndola. Fix completo: `chown -R sandbox:sandbox
+  /app` antes de `USER sandbox`. Verificado de punta a punta con un
+  build y `docker run` reales: `whoami` → `sandbox`, `GET /health` →
+  200. De paso, el `pip install` ad-hoc y sin pinear (`docker fastapi
+  "uvicorn[standard]"`) se reemplazó por `COPY requirements-core.txt`
+  + instalar desde ahí — una sola fuente de verdad con el resto del
+  proyecto (mismo espíritu que M-9), en vez de una lista paralela que
+  podía desalinearse. Sin test de pytest (es un Dockerfile, no código
+  Python) — verificación fue build+run reales, documentada acá.
+- **M-8**: el mensaje "Firma: verificada (el paquete no cambió desde
+  que **su autor** lo firmó)" (`install_from_market.py`,
+  `enable_skill.py`) implica que se verificó LA IDENTIDAD del autor —
+  falso: "verified" solo prueba que el contenido no cambió desde que
+  ALGUIEN (cualquiera puede generar su propio keypair) lo firmó con
+  ESA clave. Nuevo `signer_fingerprint()` en `skill_signing.py` + los
+  dos scripts ahora muestran el fingerprint y aclaran explícitamente
+  que la firma NO confirma autoría — un humano puede comparar ese
+  fingerprint contra lo que el autor real haya publicado en otro
+  canal. Mismo ajuste en la tagline de `generate_market_page.py`. 4
+  tests nuevos, incluido uno que reproduce el escenario exacto de A-1
+  (re-firmar con una clave de atacante da "verified" igual, pero el
+  fingerprint expuesto permite notar que cambió).
+
+Suite completa: 430 passed, 0 failed. `ruff check .` limpio (excluido
+`audio_controls.py` en la raíz del repo — código Qt no relacionado con
+este proyecto, sintaxis inválida, no es parte de este trabajo).
+
+Quedan del mismo informe, sin empezar: M-6 (verificado: `is_unsafe_ip`
+es código muerto, cero llamadores reales — decisión pendiente: usarlo
+o documentar el gap), y B-1 a B-10 (todos BAJOS).

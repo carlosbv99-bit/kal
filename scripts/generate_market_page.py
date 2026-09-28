@@ -72,7 +72,10 @@ _PAGE_TEMPLATE = """<!doctype html>
   <p class="tagline">
     Sandboxed capabilities for the Kal microkernel. Every skill listed
     here is signature-verified before install — installing from this
-    market never proceeds on an unsigned or altered package.
+    market never proceeds on an unsigned or altered package. That
+    proves the package wasn't tampered with after signing — it does
+    <strong>not</strong> vouch for who signed it; anyone can generate
+    their own key and sign their own skill.
   </p>
   <p class="install-hint">Install any of these with:<br><code>python3 scripts/install_from_market.py &lt;name&gt;</code></p>
 </header>

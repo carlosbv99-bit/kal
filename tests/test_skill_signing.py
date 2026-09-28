@@ -9,7 +9,11 @@ integridad del paquete, no autoridad del autor.
 """
 from __future__ import annotations
 
-from kernel.registry.skill_signing import SkillSigner, verify_skill_signature
+from kernel.registry.skill_signing import (
+    SkillSigner,
+    signer_fingerprint,
+    verify_skill_signature,
+)
 from kernel.registry.skills import set_skill_enabled
 
 
@@ -171,6 +175,17 @@ def test_private_key_file_has_restrictive_permissions(tmp_path):
     assert oct(key_path.stat().st_mode)[-3:] == "600"
 
 
+def test_key_dir_has_restrictive_permissions(tmp_path):
+    """M-4/B-6 (auditoría externa, 2026-09-27): el directorio en sí
+    (no solo el archivo de la clave) quedaba con lo que diera el umask
+    del proceso — otro usuario del mismo grupo podía reemplazar la
+    clave privada de un autor."""
+    key_dir = tmp_path / "keys"
+    SkillSigner(key_dir=key_dir)
+
+    assert oct(key_dir.stat().st_mode)[-3:] == "700"
+
+
 def test_signature_from_a_different_author_key_does_not_verify_someone_elses_content(tmp_path):
     """
     Dos autores distintos, cada uno con su propio keypair — la firma
@@ -191,3 +206,46 @@ def test_signature_from_a_different_author_key_does_not_verify_someone_elses_con
     sig = signer_2.sign_skill(skill_dir)
     assert sig["author_public_key"] == signer_2.public_key_hex()
     assert sig["author_public_key"] != signer_1.public_key_hex()
+
+
+# --- signer_fingerprint() (M-8, auditoría externa 2026-09-27): "verified"
+# prueba integridad, nunca autoría — el fingerprint es lo único que un
+# humano puede comparar contra lo que el autor real haya publicado ---
+
+
+def test_signer_fingerprint_matches_the_signing_key(tmp_path):
+    skill_dir = _make_skill_dir(tmp_path)
+    signer = SkillSigner(key_dir=tmp_path / "keys")
+    signer.write_signature(skill_dir)
+
+    assert signer_fingerprint(skill_dir) == signer.public_key_hex()
+
+
+def test_signer_fingerprint_is_none_for_an_unsigned_skill(tmp_path):
+    skill_dir = _make_skill_dir(tmp_path)
+
+    assert signer_fingerprint(skill_dir) is None
+
+
+def test_signer_fingerprint_is_none_for_a_corrupt_signature_file(tmp_path):
+    skill_dir = _make_skill_dir(tmp_path)
+    (skill_dir / "skill.sig").write_text("esto no es json valido", encoding="utf-8")
+
+    assert signer_fingerprint(skill_dir) is None
+
+
+def test_signer_fingerprint_identifies_a_forged_re_signature_as_a_different_key(tmp_path):
+    """Mismo escenario que M-8/A-1: alguien firma un paquete con SU
+    PROPIA clave — "verified" es cierto, pero el fingerprint expuesto
+    permite a un humano notar que NO es la clave del autor original."""
+    skill_dir = _make_skill_dir(tmp_path)
+    original_author = SkillSigner(key_dir=tmp_path / "original")
+    original_author.write_signature(skill_dir)
+    original_fingerprint = signer_fingerprint(skill_dir)
+
+    attacker = SkillSigner(key_dir=tmp_path / "attacker")
+    attacker.write_signature(skill_dir)
+
+    assert verify_skill_signature(skill_dir) == "verified"
+    assert signer_fingerprint(skill_dir) == attacker.public_key_hex()
+    assert signer_fingerprint(skill_dir) != original_fingerprint

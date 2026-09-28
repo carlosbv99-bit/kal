@@ -46,3 +46,49 @@ def test_run_rejects_an_output_dir_that_escapes_the_workdir(monkeypatch):
 
     assert result.status == "error"
     assert "fuera del workdir" in result.stderr
+
+
+# --- M-5 (auditoría externa, 2026-09-27): extra_mounts sin validar ---
+
+
+def test_extra_mounts_with_a_relative_host_path_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="host_path"):
+        DockerSandboxRunner._validate_extra_mounts({"relativo/no/absoluto": "/workspace/.kal"})
+
+
+def test_extra_mounts_with_a_nonexistent_host_path_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="host_path"):
+        DockerSandboxRunner._validate_extra_mounts({str(tmp_path / "no_existe"): "/workspace/.kal"})
+
+
+def test_extra_mounts_with_a_container_path_outside_workspace_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="container_path"):
+        DockerSandboxRunner._validate_extra_mounts({str(tmp_path): "/etc"})
+
+
+def test_extra_mounts_with_a_container_path_that_is_workspace_itself_is_allowed(tmp_path):
+    # No debería lanzar — /workspace en sí (no solo un subdirectorio) es válido.
+    DockerSandboxRunner._validate_extra_mounts({str(tmp_path): "/workspace"})
+
+
+def test_extra_mounts_matching_the_one_real_caller_is_allowed(tmp_path):
+    # Mismo patrón exacto que SandboxedSkillTool: tempdir real del host -> /workspace/.kal
+    DockerSandboxRunner._validate_extra_mounts({str(tmp_path): "/workspace/.kal"})
+
+
+def test_run_rejects_an_extra_mounts_with_an_invalid_host_path():
+    runner = DockerSandboxRunner()
+
+    result = runner.run("print('hola')", extra_mounts={"relativo": "/workspace/.kal"})
+
+    assert result.status == "error"
+    assert "host_path" in result.stderr
+
+
+def test_run_rejects_an_extra_mounts_with_a_container_path_outside_workspace(tmp_path):
+    runner = DockerSandboxRunner()
+
+    result = runner.run("print('hola')", extra_mounts={str(tmp_path): "/etc"})
+
+    assert result.status == "error"
+    assert "container_path" in result.stderr

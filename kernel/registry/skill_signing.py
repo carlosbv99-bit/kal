@@ -43,6 +43,8 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+from utils.secure_dir import ensure_private_dir
+
 SIGNATURE_FILENAME = "skill.sig"
 
 SignatureStatus = Literal["unsigned", "verified", "tampered"]
@@ -124,7 +126,7 @@ class SkillSigner:
 
     def __init__(self, key_dir: Path | str):
         self.key_dir = Path(key_dir)
-        self.key_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(self.key_dir)  # M-4/B-6: 0700, no lo que dé el umask del proceso
         self._private_key_path = self.key_dir / "skill_author_key"
         self._public_key_path = self.key_dir / "skill_author_key.pub"
         self._private_key = self._load_or_create_keypair()
@@ -204,3 +206,29 @@ def verify_skill_signature(skill_dir: Path) -> SignatureStatus:
     except InvalidSignature:
         return "tampered"
     return "verified"
+
+
+def signer_fingerprint(skill_dir: Path) -> str | None:
+    """
+    HALLAZGO REAL DE AUDITORÍA EXTERNA (M-8, 2026-09-27): "verified"
+    prueba integridad (el paquete no cambió desde que se firmó), NUNCA
+    autoría — cualquiera puede generar su propio keypair, firmar una
+    skill maliciosa, y obtener "verified" igual (verificado con un
+    PoC). El fingerprint de la clave es lo único que un humano puede
+    de verdad comparar contra lo que el autor real haya publicado en
+    otro lado (su README, un canal de confianza) — expuesto acá para
+    que los scripts de instalación/habilitación lo muestren en vez de
+    dar a entender que "verified" ya certificó al autor.
+
+    None si no hay skill.sig o si está corrupto (mismo criterio
+    fail-closed que verify_skill_signature: no reventar, solo no hay
+    fingerprint que mostrar).
+    """
+    sig_path = skill_dir / SIGNATURE_FILENAME
+    if not sig_path.exists():
+        return None
+    try:
+        data = json.loads(sig_path.read_text(encoding="utf-8"))
+        return str(data["author_public_key"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None

@@ -38,7 +38,7 @@ from kernel.registry.skill_market import (
     fetch_skill_from_market,
     list_market_skills,
 )
-from kernel.registry.skill_signing import verify_skill_signature
+from kernel.registry.skill_signing import signer_fingerprint, verify_skill_signature
 from kernel.registry.skills import (
     DEFAULT_SKILLS_DIR,
     audit_skill_enable_change,
@@ -121,7 +121,21 @@ def main() -> None:
             else:
                 print("Paquetes de pip: (ninguno, solo librería estándar)")
             print(f"Servicios del kernel permitidos: {manifest.kernel_services or '(ninguno)'}")
-            print("Firma: verificada (el paquete no cambió desde que su autor lo firmó)")
+            # HALLAZGO REAL DE AUDITORÍA EXTERNA (M-8, 2026-09-27): "Firma:
+            # verificada (... su autor lo firmó)" daba a entender que se
+            # verificó QUIÉN es el autor — falso. "verified" solo prueba
+            # que el paquete no cambió desde que ALGUIEN (cualquiera puede
+            # generar su propio keypair) lo firmó con ESA clave concreta.
+            # Se muestra el fingerprint para que un humano pueda comparar
+            # contra lo que el autor real haya publicado en otro lado —
+            # la firma en sí NUNCA prueba eso por su cuenta.
+            fingerprint = signer_fingerprint(staging_dir)
+            print(
+                f"Firma: integridad verificada — el paquete no cambió desde que se firmó con "
+                f"la clave {fingerprint}. Esto NO confirma quién es el autor: cualquiera puede "
+                f"firmar con su propia clave. Compará este fingerprint contra el que el autor "
+                f"real haya publicado en otro canal de confianza."
+            )
 
             if not args.yes:
                 answer = input("\n¿Confirmás instalar esta skill? [s/N]: ").strip().lower()

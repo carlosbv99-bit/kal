@@ -19,7 +19,7 @@ import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
@@ -93,6 +93,39 @@ class DockerSandboxRunner:
         if not joined.is_relative_to(base.resolve()):
             raise ValueError(f"'{relative}' resuelve fuera del workdir permitido — rechazado.")
         return joined
+
+    @staticmethod
+    def _validate_extra_mounts(extra_mounts: dict[str, str] | None) -> None:
+        """
+        VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (M-5,
+        2026-09-26): `extra_mounts` montaba `host_path` -> `container_path`
+        SIN NINGUNA validación — `_join_within()` de arriba cubre
+        `workspace_files`/`output_dir` (siempre dentro del workdir
+        temporal), pero `host_path` acá es, por diseño, una ruta del
+        HOST fuera de ese workdir (el caso real: el directorio del
+        socket del Kernel Service Bus). Hoy el único llamador real
+        (`SandboxedSkillTool`) siempre manda un `tempfile.mkdtemp()`
+        propio como `host_path` y `/workspace/.kal` como
+        `container_path` — no es explotable in situ — pero
+        `DockerSandboxRunner`/`SandboxExecutor` son la superficie
+        pública que consumen kal-in y Likay-OS, y la firma invita a
+        pasar mounts dinámicos sin querer. Se exige: `host_path`
+        absoluto y que exista de verdad (nunca una ruta relativa ni
+        inventada), `container_path` confinado a `/workspace/` (nunca
+        `/`, `/etc`, etc. — mismo alcance que ya usa el único llamador
+        real).
+        """
+        for host_path, container_path in (extra_mounts or {}).items():
+            resolved_host = Path(host_path)
+            if not resolved_host.is_absolute() or not resolved_host.exists():
+                raise ValueError(
+                    f"extra_mounts: host_path '{host_path}' debe ser una ruta absoluta que ya exista — rechazado."
+                )
+            container_posix = PurePosixPath(container_path)
+            if not container_posix.is_absolute() or not container_posix.is_relative_to("/workspace"):
+                raise ValueError(
+                    f"extra_mounts: container_path '{container_path}' debe estar dentro de /workspace — rechazado."
+                )
 
     @staticmethod
     def _prepare_workdir(
@@ -206,6 +239,7 @@ class DockerSandboxRunner:
             workdir = Path(tmp_dir)
             try:
                 self._prepare_workdir(workdir, source_code, workspace_files)
+                self._validate_extra_mounts(extra_mounts)
 
                 output_path = None
                 if output_dir:
@@ -213,11 +247,12 @@ class DockerSandboxRunner:
                     output_path.mkdir(parents=True, exist_ok=True)
             except ValueError as e:
                 # workspace_files/output_dir con una clave que escapa del
-                # workdir (ver _join_within) — error de programación del
+                # workdir (ver _join_within), o extra_mounts inválido (ver
+                # _validate_extra_mounts) — error de programación del
                 # LLAMADOR, no de la ejecución en sí, pero se devuelve
                 # como SandboxResult igual que ImageNotFound/APIError de
                 # abajo, en vez de propagar, por consistencia.
-                logger.error(f"Ruta de workspace_files/output_dir inválida: {e}")
+                logger.error(f"Ruta de workspace_files/output_dir/extra_mounts inválida: {e}")
                 return SandboxResult("error", "", str(e), None)
 
             volumes = {str(workdir): {"bind": "/workspace", "mode": "rw"}}

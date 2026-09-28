@@ -26,11 +26,12 @@ from typing import Any, Literal
 
 from utils.correlation import get_correlation_id
 from utils.logger import get_logger
+from utils.secure_dir import ensure_private_dir
 
 logger = get_logger(__name__)
 
 AUDIT_LOG_PATH = Path("logs/audit.log")
-AUDIT_LOG_PATH.parent.mkdir(exist_ok=True)
+ensure_private_dir(AUDIT_LOG_PATH.parent)  # M-4/B-6: 0700, no lo que dé el umask del proceso
 
 EventType = Literal[
     "error_repair",

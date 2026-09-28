@@ -29,3 +29,13 @@ def test_token_file_is_only_readable_by_owner(tmp_path):
 
     mode = stat.S_IMODE(token_path.stat().st_mode)
     assert mode == stat.S_IRUSR | stat.S_IWUSR
+
+
+def test_token_dir_has_restrictive_permissions(tmp_path):
+    """M-4/B-6 (auditoría externa, 2026-09-27): el directorio que
+    contiene el token admin (mismo data/keys/ que las claves de firma)
+    quedaba con lo que diera el umask del proceso."""
+    token_path = tmp_path / "keys" / "admin_token"
+    get_or_create_admin_token(token_path)
+
+    assert oct(token_path.parent.stat().st_mode)[-3:] == "700"

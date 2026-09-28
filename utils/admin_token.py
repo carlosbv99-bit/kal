@@ -22,6 +22,8 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
+from utils.secure_dir import ensure_private_dir
+
 _TOKEN_PATH = Path("data/keys/admin_token")
 
 
@@ -30,7 +32,7 @@ def get_or_create_admin_token(token_path: Path = _TOKEN_PATH) -> str:
         return token_path.read_text(encoding="utf-8").strip()
 
     token = secrets.token_urlsafe(32)
-    token_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(token_path.parent)  # M-4/B-6: 0700, no lo que dé el umask del proceso
     token_path.write_text(token, encoding="utf-8")
     token_path.chmod(0o600)
     return token
