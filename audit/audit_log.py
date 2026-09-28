@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import hmac
 import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from utils.admin_token import get_or_create_admin_token
 from utils.correlation import get_correlation_id
 from utils.logger import get_logger
 from utils.secure_dir import ensure_private_dir
@@ -32,6 +34,19 @@ logger = get_logger(__name__)
 
 AUDIT_LOG_PATH = Path("logs/audit.log")
 ensure_private_dir(AUDIT_LOG_PATH.parent)  # M-4/B-6: 0700, no lo que dé el umask del proceso
+
+# VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (M-12, segunda
+# ronda contra kal-in, 2026-09-26 — no formaba parte de los 19
+# hallazgos de docs/AUDITORIA-SEGURIDAD-2026-09-27.md de este repo):
+# el encadenamiento usaba SHA-256 SIN CLAVE — cualquiera con permiso de
+# escritura sobre logs/audit.log podía reescribir el archivo entero
+# recalculando la cadena de hashes desde cero, y verify_chain() seguía
+# diciendo "íntegra" (integridad accidental, nunca autenticidad real:
+# no probaba que este proceso escribió esas entradas). Reusa
+# get_or_create_admin_token() (mismo patrón get-or-create persistido en
+# data/keys/, ver utils/admin_token.py) apuntando a un archivo de clave
+# PROPIO — nunca el mismo secreto que el token admin.
+_HMAC_KEY_PATH = Path("data/keys/audit_hmac_key")
 
 EventType = Literal[
     "error_repair",
@@ -85,7 +100,7 @@ class AuditEvent:
     prev_hash: str = ""                # encadenado para detectar manipulación
     event_hash: str = ""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, key: bytes) -> str:
         payload = json.dumps(
             {
                 "event_type": self.event_type,
@@ -97,7 +112,7 @@ class AuditEvent:
             },
             sort_keys=True,
         ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+        return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
 @dataclass
@@ -158,8 +173,9 @@ class AuditLog:
     cadena.
     """
 
-    def __init__(self, path: Path = AUDIT_LOG_PATH):
+    def __init__(self, path: Path = AUDIT_LOG_PATH, hmac_key: bytes | None = None):
         self.path = path
+        self._hmac_key = hmac_key or get_or_create_admin_token(token_path=_HMAC_KEY_PATH).encode("utf-8")
 
     @staticmethod
     def _read_last_hash(f) -> str:
@@ -211,7 +227,7 @@ class AuditLog:
             try:
                 f.seek(0)
                 event.prev_hash = self._read_last_hash(f)
-                event.event_hash = event.compute_hash()
+                event.event_hash = event.compute_hash(self._hmac_key)
                 f.write(json.dumps(asdict(event)) + "\n")
                 f.flush()
             finally:
@@ -273,7 +289,7 @@ class AuditLog:
                     outcome=entry["outcome"],
                     timestamp=entry["timestamp"],
                     prev_hash=entry["prev_hash"],
-                ).compute_hash()
+                ).compute_hash(self._hmac_key)
                 hash_ok = recomputed == entry["event_hash"]
             except (json.JSONDecodeError, KeyError) as e:
                 # VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA

@@ -85,7 +85,7 @@ def test_inserting_forged_entry_breaks_chain(log):
     log.record(_event(summary="original"))
     forged = _event(summary="entrada forjada")
     forged.prev_hash = "genesis"  # no encadena con la entrada real anterior
-    forged.event_hash = forged.compute_hash()
+    forged.event_hash = forged.compute_hash(log._hmac_key)
 
     with open(log.path, "a", encoding="utf-8") as f:
         from dataclasses import asdict
@@ -321,6 +321,21 @@ def _reset_correlation_id():
     set_correlation_id(None)
     yield
     set_correlation_id(None)
+
+
+def test_hash_chain_is_keyed_not_plain_sha256(tmp_path):
+    """
+    M-12: sin clave, cualquiera con acceso de escritura al archivo podía
+    recalcular la cadena entera y verify_chain() seguía diciendo
+    "íntegra". Un atacante sin la clave HMAC no puede reconstruir un
+    event_hash válido aunque reescriba todo el archivo.
+    """
+    log_a = AuditLog(path=tmp_path / "audit.log", hmac_key=b"clave-uno")
+    log_b = AuditLog(path=tmp_path / "audit.log", hmac_key=b"clave-dos")
+
+    log_a.record(_event())
+    assert log_a.verify_chain() is True
+    assert log_b.verify_chain() is False  # misma cadena, clave distinta
 
 
 def test_record_injects_the_bound_correlation_id(log):
