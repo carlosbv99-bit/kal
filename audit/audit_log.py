@@ -89,6 +89,7 @@ EventType = Literal[
     "skill_execution_socket_error",
     "kernel_invalid_encoding",
     "epistemic_evidence_ingested",
+    "market_install_rejected",
 ]
 
 
