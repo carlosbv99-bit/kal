@@ -207,3 +207,145 @@ def test_verify_tool_integrity_is_true_for_static_tools(registry):
 
     registry.register_static_tool(DummyStaticTool())
     assert registry.verify_tool_integrity("estatica") is True
+
+
+# --- deny_pending_tool / deactivate_tool / auditoría de verify_tool_integrity
+# (hallazgo real en kal-in, 2026-09-29, portado acá vía
+# scripts/check_kernel_drift.py) ---------------------------------------------
+
+
+def test_verify_tool_integrity_audits_tampering_it_detects(registry, version_store, monkeypatch):
+    """
+    Antes, una manipulación detectada volvía True/False en silencio — la única
+    detección de manipulación del sistema que no dejaba rastro, contra un fondo
+    donde todas las demás (rollback_tool, install_from_market.py) sí auditan.
+    """
+    import kernel.registry.registry as modulo_registry
+
+    eventos = []
+    monkeypatch.setattr(modulo_registry.audit_log, "record", lambda evento: eventos.append(evento))
+
+    registry.propose_dynamic_tool(_manifest(), "print('v1')")
+    active_path = version_store.base_dir / "herramienta_de_prueba" / "herramienta_de_prueba_v1.py"
+    active_path.write_text("print('alguien lo edito a mano')", encoding="utf-8")
+
+    assert registry.verify_tool_integrity("herramienta_de_prueba") is False
+
+    evento = next(e for e in eventos if e.event_type == "tool_tamper_detected")
+    assert evento.context["tool_name"] == "herramienta_de_prueba"
+    assert evento.context["detected_by"] == "verify_tool_integrity"
+    assert evento.outcome == "failure"
+
+
+def test_verify_tool_integrity_does_not_audit_the_happy_path(registry, monkeypatch):
+    """Camino feliz sin ruido: nada que reportar cuando la firma verifica."""
+    import kernel.registry.registry as modulo_registry
+
+    registry.propose_dynamic_tool(_manifest(), "print('v1')")
+
+    eventos = []
+    monkeypatch.setattr(modulo_registry.audit_log, "record", lambda evento: eventos.append(evento))
+
+    assert registry.verify_tool_integrity("herramienta_de_prueba") is True
+    assert eventos == []
+
+
+def test_deny_pending_tool_removes_it_and_audits(registry, monkeypatch):
+    """
+    El espejo de approve_pending_tool(): antes la interfaz era asimétrica (solo
+    "sí"), y un pendiente rechazado se quedaba en _pending para siempre, sin
+    que la decisión quedara registrada.
+    """
+    import kernel.registry.registry as modulo_registry
+    from kernel.registry.registry import PendingTool
+
+    eventos = []
+    monkeypatch.setattr(modulo_registry.audit_log, "record", lambda evento: eventos.append(evento))
+    manifest = _manifest(name="pendiente_de_prueba")
+    registry._pending["pendiente_de_prueba"] = PendingTool(
+        manifest=manifest, source_code="x = 1", status="pending_approval"
+    )
+
+    registry.deny_pending_tool("pendiente_de_prueba", denied_by="kalin")
+
+    assert "pendiente_de_prueba" not in registry._pending
+    assert not any(p["name"] == "pendiente_de_prueba" for p in registry.list_pending())
+    evento = next(e for e in eventos if e.event_type == "tool_denied")
+    assert evento.context["tool_name"] == "pendiente_de_prueba"
+    assert "kalin" in evento.summary
+
+
+def test_deny_pending_tool_raises_for_unknown_name(registry):
+    with pytest.raises(ValueError, match="No hay herramienta pendiente"):
+        registry.deny_pending_tool("no-existe")
+
+
+def test_deny_pending_tool_rejects_something_not_actually_pending(registry):
+    """Mismo guarda que approve_pending_tool(): no se "rechaza" algo que ya no espera decisión."""
+    from kernel.registry.registry import PendingTool
+
+    manifest = _manifest(name="ya_activa")
+    registry._pending["ya_activa"] = PendingTool(
+        manifest=manifest, source_code="x = 1", status="active"
+    )
+
+    with pytest.raises(ValueError, match="no está pendiente"):
+        registry.deny_pending_tool("ya_activa")
+
+
+def test_deactivate_tool_removes_it_from_active_and_audits(registry, monkeypatch):
+    """
+    Antes no había forma de APAGAR una herramienta dinámica, solo de
+    reemplazarla vía rollback_tool() por otra versión. get()/active_tools()
+    resuelven contra _active_tools, así que borrar la entrada es lo que la
+    apaga de verdad: deja de ofrecerse y de poder invocarse.
+    """
+    import kernel.registry.registry as modulo_registry
+
+    eventos = []
+    monkeypatch.setattr(modulo_registry.audit_log, "record", lambda evento: eventos.append(evento))
+    registry.propose_dynamic_tool(_manifest(), "print('v1')")
+    assert registry.get("herramienta_de_prueba") is not None
+
+    registry.deactivate_tool("herramienta_de_prueba", deactivated_by="kalin", reason="comprometida")
+
+    assert registry.get("herramienta_de_prueba") is None
+    evento = next(e for e in eventos if e.event_type == "tool_deactivated")
+    assert evento.context["tool_name"] == "herramienta_de_prueba"
+    assert evento.context["reason"] == "comprometida"
+    assert "kalin" in evento.summary
+
+
+def test_deactivate_tool_raises_for_unknown_name(registry):
+    with pytest.raises(ValueError, match="No hay herramienta activa"):
+        registry.deactivate_tool("no-existe")
+
+
+def test_deactivate_tool_rejects_static_tools(registry):
+    """Las estáticas son del sistema: no se retiran por acá."""
+    from sdk.artifacts import Artifact
+    from sdk.skill import Tool
+
+    class DummyStaticTool(Tool):
+        manifest = _manifest(name="estatica", created_by="system")
+
+        def execute(self, **kwargs):
+            return Artifact(modality="text", uri="", metadata={})
+
+    registry.register_static_tool(DummyStaticTool())
+
+    with pytest.raises(ValueError, match="herramienta estática"):
+        registry.deactivate_tool("estatica")
+
+
+def test_deactivated_tool_cannot_be_rolled_back(registry):
+    """
+    Consecuencia deliberada: rollback_tool() exige que la herramienta esté
+    activa, así que una desactivada no se reactiva con un rollback — hay que
+    volver a proponerla y aprobarla.
+    """
+    registry.propose_dynamic_tool(_manifest(), "print('v1')")
+    registry.deactivate_tool("herramienta_de_prueba")
+
+    with pytest.raises(ValueError, match="No hay herramienta activa"):
+        registry.rollback_tool("herramienta_de_prueba", to_version=1, approved_by="kalin")

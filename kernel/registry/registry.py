@@ -298,6 +298,39 @@ class ToolRegistry:
         )
         logger.info(f"Herramienta '{name}' aprobada por {approved_by} y activada (v{version})")
 
+    def deny_pending_tool(self, name: str, denied_by: str = "") -> None:
+        """
+        Rechazo humano explícito de una herramienta pendiente: el espejo de
+        `approve_pending_tool()`.
+
+        Sin esto la interfaz era asimétrica: un humano podía decir "sí" pero no
+        "no". Una herramienta pendiente que se decidía no aprobar quedaba en
+        `_pending` **para siempre** —seguía apareciendo en `list_pending()` y
+        contando en `pending_tool_approvals` de `/status`— y la decisión no se
+        registraba en ningún lado. Ignorarla logra el efecto práctico de que nunca
+        se active, pero no deja constancia de quién la descartó ni saca la entrada
+        de en medio (hallazgo real en kal-in, 2026-09-29, portado acá vía
+        scripts/check_kernel_drift.py).
+        """
+        pending = self._pending.get(name)
+        if pending is None:
+            raise ValueError(f"No hay herramienta pendiente llamada {name}")
+        if pending.status != "pending_approval":
+            raise ValueError(
+                f"La herramienta '{name}' no está pendiente de aprobación (status actual: {pending.status})"
+            )
+
+        pending.status = "denied"
+        # Se saca de `_pending` igual que en la aprobación: es la lista de lo que
+        # espera una decisión humana, y esta ya está tomada.
+        del self._pending[name]
+
+        quien = denied_by or "un humano"
+        self._audit_tool_event(
+            "tool_denied", pending.manifest, "denied", f"Rechazada por {quien}"
+        )
+        logger.info(f"Herramienta '{name}' rechazada por {quien}; nunca se activa")
+
     def _activate(self, manifest: ToolManifest, source_code: str) -> int:
         """
         Registra la herramienta dinámica como ejecutable de verdad:
@@ -363,12 +396,100 @@ class ToolRegistry:
         la versión DESTINO), esto detecta si la versión ACTIVA fue
         editada en disco después de activarse — herramientas estáticas
         (sin versión) siempre verifican True, no están bajo este esquema.
+
+        **Audita lo que detecta**, con el mismo evento que `rollback_tool`
+        (`tool_tamper_detected`): antes devolvía True/False en silencio, así que una
+        edición en disco de la versión activa solo se veía si alguien pensaba en
+        pedir `GET /tools/{name}/verify` a mano — y nadie lo sondea periódicamente
+        (hallazgo real en kal-in, 2026-09-29, portado acá vía
+        scripts/check_kernel_drift.py). Era la única detección de manipulación del
+        sistema que no dejaba rastro, contra un fondo donde todas las demás sí.
+
+        El camino feliz NO audita: cuando la firma verifica no hay nada que
+        reportar, y llenar el log de "todo bien" es la forma de que nadie lo mire.
         """
         tool = self._active_tools.get(name)
         if not isinstance(tool, DynamicSandboxedTool) or tool.version is None:
             return True
         source_on_disk, sidecar = self.version_store.read_version(name, tool.version)
-        return self.signer.verify(name, tool.version, source_on_disk, sidecar.get("signature", ""))
+        verifica = self.signer.verify(
+            name, tool.version, source_on_disk, sidecar.get("signature", "")
+        )
+        if not verifica:
+            logger.error(
+                f"Manipulación detectada: la versión ACTIVA {tool.version} de '{name}' "
+                "no pasa la verificación de firma en disco"
+            )
+            audit_log.record(
+                AuditEvent(
+                    event_type="tool_tamper_detected",
+                    summary=(
+                        f"La versión ACTIVA {tool.version} de '{name}' no pasa la "
+                        "verificación de firma (source_code editado en disco)"
+                    ),
+                    context={
+                        "tool_name": name,
+                        "version": tool.version,
+                        "detected_by": "verify_tool_integrity",
+                    },
+                    outcome="failure",
+                )
+            )
+        return verifica
+
+    def deactivate_tool(
+        self, name: str, deactivated_by: str = "", reason: str = ""
+    ) -> None:
+        """
+        Retira una herramienta dinámica de circulación **sin reemplazarla**.
+
+        `_active_tools` solo se escribía (registro, activación, rollback): no había
+        forma de APAGAR una herramienta, solo de reemplazarla por otra versión con
+        `rollback_tool()`. Para una herramienta comprometida o que ya no se quiere,
+        "no hay forma de retirarla" es un hueco real (hallazgo en kal-in,
+        2026-09-29, portado acá vía scripts/check_kernel_drift.py) — las Skills sí
+        tenían el par completo (`set_skill_enabled()` +
+        `scripts/enable_skill.py --disable`), las tools dinámicas nunca recibieron
+        el equivalente.
+
+        Borrar la entrada es lo que la apaga de verdad: `get()` y `active_tools()`
+        resuelven contra este dict, así que el catálogo de herramientas del LLM
+        (armado por turno) deja de ofrecerla y no hay forma de invocarla.
+
+        Las estáticas se rechazan: son del sistema y no se retiran por acá.
+
+        Consecuencia deliberada: `rollback_tool()` exige que la herramienta esté
+        activa, así que una herramienta desactivada NO se reactiva con un rollback.
+        Volver a ponerla en circulación es el camino normal — proponerla y
+        aprobarla de nuevo.
+        """
+        tool = self._active_tools.get(name)
+        if tool is None:
+            raise ValueError(f"No hay herramienta activa llamada '{name}'")
+        if not isinstance(tool, DynamicSandboxedTool):
+            raise ValueError(
+                f"'{name}' es una herramienta estática del sistema: no se desactiva desde acá"
+            )
+
+        del self._active_tools[name]
+        quien = deactivated_by or "un humano"
+        detalle = f"Herramienta '{name}' retirada de circulación por {quien}"
+        if reason:
+            detalle += f": {reason}"
+        audit_log.record(
+            AuditEvent(
+                event_type="tool_deactivated",
+                summary=detalle,
+                context={
+                    "tool_name": name,
+                    "version": tool.version,
+                    "deactivated_by": deactivated_by,
+                    "reason": reason,
+                },
+                outcome="success",
+            )
+        )
+        logger.warning(detalle + " (ya no se ofrece ni se puede invocar)")
 
     def list_versions(self, name: str) -> list[int]:
         return self.version_store.list_versions(name)
