@@ -54,9 +54,18 @@ module_path = f"/workspace/skill/{module_part}.py"
 # todavía acá (kal no tiene skills que vendoricen nada), pero es el
 # mismo runner byte a byte — el bug es real acá también. Fix en la
 # raíz en vez de que cada skill lo resuelva por su cuenta.
+#
+# append(), NUNCA insert(0, ...) (corrección encontrada por kal-in
+# revisando este mismo fix): con insert(0, ...) la carpeta de la
+# skill queda POR DELANTE de la stdlib y de sdk/ en la resolución de
+# imports — una skill (no confiable) podría vendorizar un archivo
+# llamado, por ejemplo, `json.py` o una carpeta `sdk/` propia y
+# shadowear al real, silenciosamente. Con append() el import
+# vendorizado se sigue resolviendo igual (nada más lo provee), pero
+# shadowear algo que ya existe en sys.path es imposible.
 skill_dir = os.path.dirname(module_path)
 if skill_dir not in sys.path:
-    sys.path.insert(0, skill_dir)
+    sys.path.append(skill_dir)
 
 result = {}
 try:
