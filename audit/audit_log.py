@@ -64,6 +64,7 @@ EventType = Literal[
     "skill_loaded",
     "self_diagnosis_run",
     "permission_denied",
+    "tool_permission_denied",
     "kernel_service_call",
     "kernel_service_denied",
     "syscall_policy_violation",

@@ -92,3 +92,34 @@ def test_run_rejects_an_extra_mounts_with_a_container_path_outside_workspace(tmp
 
     assert result.status == "error"
     assert "container_path" in result.stderr
+
+
+def test_extra_mounts_container_path_with_dotdot_that_escapes_workspace_is_rejected(tmp_path):
+    """
+    BUG REAL ENCONTRADO EN LA RE-AUDITORÍA (2026-09-28) del propio fix
+    de M-5 de arriba: comparar
+    `PurePosixPath(container_path).is_relative_to("/workspace")` SIN
+    normalizar primero es una comparación LÉXICA de segmentos, no
+    resuelve `..` — verificado con un PoC real:
+    `PurePosixPath("/workspace/../etc/passwd").is_relative_to("/workspace")`
+    da `True` (los primeros dos segmentos coinciden), aunque la ruta
+    REAL resuelta esté fuera de /workspace por completo. Ahora se
+    normaliza con `posixpath.normpath()` ANTES de comparar — cierra
+    esta evasión específica sin tocar filesystem (container_path nunca
+    existe en el host, solo tiene sentido dentro del contenedor).
+    """
+    with pytest.raises(ValueError, match="container_path"):
+        DockerSandboxRunner._validate_extra_mounts({str(tmp_path): "/workspace/../etc/passwd"})
+
+
+def test_extra_mounts_container_path_with_a_workspace_prefix_trick_is_rejected(tmp_path):
+    """
+    Ancla adicional: "/workspace-evil" empieza con el string
+    "/workspace" pero NO es un descendiente real — is_relative_to()
+    sobre Path/PurePosixPath ya compara por SEGMENTOS (no por prefijo
+    de string), así que este caso ya estaba cubierto antes del fix de
+    normalización de arriba; se prueba igual como ancla contra una
+    futura regresión que cambiara la comparación a un prefijo de texto.
+    """
+    with pytest.raises(ValueError, match="container_path"):
+        DockerSandboxRunner._validate_extra_mounts({str(tmp_path): "/workspace-evil"})

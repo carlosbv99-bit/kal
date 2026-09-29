@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import posixpath
 import stat
 import tempfile
 import time
@@ -130,6 +131,15 @@ class DockerSandboxRunner:
         inventada), `container_path` confinado a `/workspace/` (nunca
         `/`, `/etc`, etc. — mismo alcance que ya usa el único llamador
         real).
+
+        FIX CORREGIDO (re-auditoría 2026-09-28): la versión original
+        comparaba `PurePosixPath(container_path).is_relative_to("/workspace")`
+        directo, SIN normalizar — verificado que
+        `/workspace/../etc/passwd` pasaba ese chequeo igual, porque
+        `is_relative_to` sobre un PurePosixPath es una comparación
+        LÉXICA de segmentos, nunca resuelve `..`. `posixpath.normpath()`
+        colapsa `..`/`.` ANTES de comparar — verificado con
+        `/workspace/../etc/passwd` -> `/etc/passwd`, ya rechazado.
         """
         for host_path, container_path in (extra_mounts or {}).items():
             resolved_host = Path(host_path)
@@ -137,8 +147,8 @@ class DockerSandboxRunner:
                 raise ValueError(
                     f"extra_mounts: host_path '{host_path}' debe ser una ruta absoluta que ya exista — rechazado."
                 )
-            container_posix = PurePosixPath(container_path)
-            if not container_posix.is_absolute() or not container_posix.is_relative_to("/workspace"):
+            normalized_container = PurePosixPath(posixpath.normpath(container_path))
+            if not normalized_container.is_absolute() or not normalized_container.is_relative_to("/workspace"):
                 raise ValueError(
                     f"extra_mounts: container_path '{container_path}' debe estar dentro de /workspace — rechazado."
                 )

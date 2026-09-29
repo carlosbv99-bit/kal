@@ -717,3 +717,36 @@ Suite completa: 447 passed, 0 failed. `ruff check .` limpio (mismo
 Con esto se agotan todos los hallazgos aplicables al kernel puro de
 `docs/AUDITORIA-SEGURIDAD-2026-09-27.md`, salvo B-8 (diferido,
 documentado arriba).
+
+## Dos bugs reales encontrados portando estos fixes a kal-in (2026-09-28)
+
+`scripts/check_kernel_drift.py` (del lado de `kal-in`) confirmó que
+los fixes de esta sesión (más M-1, ya portado antes) también aplicaban
+del otro lado — al portarlos, la propia suite de `kal-in` encontró dos
+problemas reales que la suite de acá nunca hubiera detectado (ninguno
+de los dos tiene equivalente en este repo, kernel puro):
+
+**M-5 (`docker_runner.py::_validate_extra_mounts`)**: comparar
+`PurePosixPath(container_path).is_relative_to("/workspace")` directo,
+SIN normalizar, es una comparación LÉXICA de segmentos — verificado con
+un PoC real que `/workspace/../etc/passwd` pasa ese chequeo igual
+(`is_relative_to` nunca resuelve `..`). Corregido acá con
+`posixpath.normpath()` antes de comparar, con dos tests de regresión
+nuevos (`test_extra_mounts_container_path_with_dotdot_that_escapes_workspace_is_rejected`
+y su ancla hermana contra el truco de prefijo `/workspace-evil`).
+
+**`container_path` hardcodeado a `/workspace` (sin bug acá, solo nota
+para explicar la divergencia)**: acá no hay ningún llamador real fuera
+de ese caso (kernel puro), así que el hardcodeo sigue siendo correcto
+— mencionado solo para que quede claro por qué `kal-in` necesitó
+`_ALLOWED_EXTRA_MOUNT_ROOTS = ("/workspace", "/project")` y este repo
+no: `agent_core/self_modification.py` (que monta la copia del proyecto
+propuesto en `/project` para correr su test suite dentro del sandbox,
+capacidad de agente, no de kernel) no existe acá. Rompió DE VERDAD 6
+tests reales del lado de `kal-in`
+(`test_self_modification.py`/`test_self_modification_versions.py`) al
+portar la primera versión (solo `/workspace`) sin este segundo caso —
+detectado corriendo la suite completa de `kal-in` antes de commitear
+ahí, no por ninguna auditoría.
+
+Suite completa re-verificada tras el fix de acá: sin regresiones.
