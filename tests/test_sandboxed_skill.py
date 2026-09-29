@@ -535,6 +535,49 @@ def test_end_to_end_text_artifact_with_real_docker(tmp_path):
 
 
 @requires_docker
+def test_end_to_end_skill_can_import_a_vendored_sibling_module_with_real_docker(tmp_path):
+    """
+    BUG REAL ENCONTRADO EN kal-in (2026-09-29, portado acá vía
+    scripts/check_kernel_drift.py): kernel/lifecycle/skill_runner.py
+    carga tool.py por RUTA DE ARCHIVO (spec_from_file_location) sin
+    agregar /workspace/skill/ a sys.path — una skill que vendoriza un
+    módulo hermano junto a tool.py (una carpeta propia copiada tal
+    cual, no una dependencia de sdk/) revienta con ModuleNotFoundError
+    DENTRO del sandbox, aunque un test en proceso pase limpio (ahí la
+    carpeta ya está en sys.path por otro motivo). No explotado antes
+    acá (kal no tenía ninguna skill que vendorizara nada), pero el
+    runner es byte a byte el mismo que en kal-in.
+    """
+    skill_dir = tmp_path / "con_modulo_vendorizado"
+    skill_dir.mkdir()
+    (skill_dir / "ayudante.py").write_text(
+        "def saludo(nombre):\n    return f'hola vendorizado {nombre}'\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "tool.py").write_text(
+        "from sdk.skill import Tool, ToolManifest\nfrom sdk.artifacts import Artifact\n"
+        "from ayudante import saludo\n\n\n"
+        "class VendoredTool(Tool):\n"
+        "    manifest = ToolManifest(name='vendorizado', description='usa un modulo hermano')\n\n"
+        "    def execute(self, **kwargs):\n"
+        "        return Artifact(modality='text', uri='', metadata={'summary': saludo(kwargs.get('name', ''))})\n",
+        encoding="utf-8",
+    )
+
+    manifest = ToolManifest(name="vendorizado", description="usa un modulo hermano", created_by="system")
+    real_sandbox = SandboxExecutor(runner=DockerSandboxRunner())
+    skill_tool = SandboxedSkillTool(
+        manifest=manifest, skill_dir=skill_dir, entry_point="tool:VendoredTool",
+        image="python:3.11-slim", sandbox=real_sandbox, artifacts_root=tmp_path / "artifacts",
+    )
+
+    artifact = skill_tool.execute(name="Kalin")
+
+    assert artifact.modality == "text"
+    assert artifact.metadata == {"summary": "hola vendorizado Kalin"}
+
+
+@requires_docker
 def test_end_to_end_file_artifact_with_real_docker(tmp_path):
     """
     Valida la convención KAL_SKILL_OUTPUT_DIR de punta a punta: la

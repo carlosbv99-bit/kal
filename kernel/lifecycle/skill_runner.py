@@ -33,6 +33,7 @@ una ruta fija) y escribir ahí.
 import importlib.util
 import json
 import os
+import sys
 
 with open("/workspace/_input.json", encoding="utf-8") as f:
     payload = json.load(f)
@@ -42,6 +43,20 @@ kwargs = payload.get("kwargs", {})
 
 module_part, _, class_name = entry_point.partition(":")
 module_path = f"/workspace/skill/{module_part}.py"
+
+# BUG REAL ENCONTRADO EN kal-in (2026-09-29, portado acá vía
+# scripts/check_kernel_drift.py): spec_from_file_location() carga
+# tool.py por RUTA DE ARCHIVO, pero nunca agrega /workspace/skill/ a
+# sys.path — cualquier skill que vendorice un módulo hermano junto a
+# tool.py (import de un paquete propio, no de sdk/) revienta acá con
+# ModuleNotFoundError, aunque un test en proceso (que sí tiene la
+# carpeta en sys.path por otro motivo) pase limpio. No explotado
+# todavía acá (kal no tiene skills que vendoricen nada), pero es el
+# mismo runner byte a byte — el bug es real acá también. Fix en la
+# raíz en vez de que cada skill lo resuelva por su cuenta.
+skill_dir = os.path.dirname(module_path)
+if skill_dir not in sys.path:
+    sys.path.insert(0, skill_dir)
 
 result = {}
 try:
