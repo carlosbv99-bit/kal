@@ -32,6 +32,17 @@ from utils.secure_dir import ensure_private_dir
 
 logger = get_logger(__name__)
 
+# HALLAZGO REAL (B-8, auditoría externa de kal 2026-09-27, diferido ahí
+# a propósito; confirmado con medición real en kal-epistemic —
+# proyecto que comparte este mismo archivo — el 2026-10-03):
+# _read_last_hash() releía TODO el archivo en cada record(), bajo lock
+# exclusivo. Medido en este repo: ~3ms a 5MB; en kal-epistemic, ~14.6ms
+# a 15.2MB — escala lineal con el tamaño del log, sin rotación, y la
+# ingesta epistémica lo paga varias veces por turno. Ver más abajo el
+# fix (leer solo la cola) y tests/test_audit_log.py::
+# test_read_last_hash_cost_is_bounded_not_proportional_to_file_size.
+_TAIL_SCAN_CHUNK_BYTES = 4096
+
 AUDIT_LOG_PATH = Path("logs/audit.log")
 ensure_private_dir(AUDIT_LOG_PATH.parent)  # M-4/B-6: 0700, no lo que dé el umask del proceso
 
@@ -183,16 +194,54 @@ class AuditLog:
         self._hmac_key = hmac_key or get_or_create_admin_token(token_path=_HMAC_KEY_PATH).encode("utf-8")
 
     @staticmethod
-    def _read_last_hash(f) -> str:
-        """Asume que `f` ya está posicionado al inicio y bajo lock exclusivo."""
-        content = f.read()
-        if not content.strip():
-            return "genesis"
-        last_line = content.strip().splitlines()[-1]
+    def _read_last_hash(path: Path) -> str:
+        """
+        Lee solo la COLA del archivo — no su contenido completo (ver
+        B-8 arriba) — buscando la última línea completa con un seek
+        hacia atrás en chunks de `_TAIL_SCAN_CHUNK_BYTES`. El costo
+        queda acotado por el tamaño de la ÚLTIMA LÍNEA (normalmente un
+        par de cientos de bytes), nunca por el tamaño total del
+        archivo.
+
+        Fd de solo lectura SEPARADO del `f` (modo texto "a+") que
+        record() mantiene bajo su lock exclusivo — no hace falta su
+        propio flock: ese lock exclusivo ya serializa a todos los
+        ESCRITORES cooperativos (los únicos que importan acá), igual
+        que ya pasa con las lecturas sin lock de tail()/diagnose_chain().
+        La búsqueda de la última línea se hace en BYTES, nunca
+        decodificando de a poco: "\\n" es un byte ASCII que jamás
+        aparece como byte de continuación de una secuencia UTF-8
+        multibyte, así que partir por "\\n" en crudo es seguro sin
+        decodificar primero (solo se decodifica, al final, la línea ya
+        aislada).
+        """
         try:
-            last_entry = json.loads(last_line)
+            size = path.stat().st_size
+        except OSError:
+            return "genesis"
+        if size == 0:
+            return "genesis"
+
+        with open(path, "rb") as rf:
+            buf = b""
+            pos = size
+            while True:
+                read_size = min(_TAIL_SCAN_CHUNK_BYTES, pos)
+                pos -= read_size
+                rf.seek(pos)
+                buf = rf.read(read_size) + buf
+                if b"\n" in buf.rstrip(b"\n") or pos == 0:
+                    break
+
+        stripped = buf.rstrip(b"\n")
+        if not stripped:
+            return "genesis"
+        last_line_bytes = stripped.rsplit(b"\n", 1)[-1]
+
+        try:
+            last_entry = json.loads(last_line_bytes.decode("utf-8"))
             return last_entry["event_hash"]
-        except (json.JSONDecodeError, KeyError) as e:
+        except (UnicodeDecodeError, json.JSONDecodeError, KeyError) as e:
             # VULNERABILIDAD REAL ENCONTRADA EN AUDITORÍA EXTERNA (A-10 #2,
             # 2026-09-26): sin este try/except, una última línea corrupta
             # (escritura parcial por un crash/kill -9 a mitad de record() —
@@ -207,10 +256,16 @@ class AuditLog:
             # continúa auditando con una cadena nueva a partir de acá.
             # Perder la continuidad de LA CADENA ante daño real en disco
             # es aceptable; perder TODA auditoría futura por ese mismo
-            # motivo no lo es.
+            # motivo no lo es. UnicodeDecodeError agregado acá (B-8): la
+            # versión anterior decodificaba el archivo ENTERO de una vez
+            # vía el `f` en modo texto, así que un byte no-UTF8 en
+            # CUALQUIER línea anterior ya tumbaba record() ANTES de
+            # llegar a este try/except — ahora solo la última línea se
+            # decodifica, así que ese mismo caso debe tratarse igual que
+            # un JSON corrupto, no dejarse sin atrapar.
             logger.error(
-                f"Última línea de {AUDIT_LOG_PATH} corrupta, no se pudo leer su hash "
-                f"({e}) — se reinicia la cadena desde acá. Línea cruda: {last_line!r}"
+                f"Última línea de {path} corrupta, no se pudo leer su hash "
+                f"({e}) — se reinicia la cadena desde acá. Línea cruda: {last_line_bytes!r}"
             )
             return "genesis_after_corruption"
 
@@ -230,8 +285,13 @@ class AuditLog:
         with open(self.path, "a+", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
-                f.seek(0)
-                event.prev_hash = self._read_last_hash(f)
+                # B-8: ya no se lee desde `f` (eso implicaba decodificar
+                # el archivo completo en modo texto) — _read_last_hash()
+                # abre su propio fd de solo lectura en binario y busca
+                # solo la cola. No hace falta f.seek(0): el write() de
+                # abajo va siempre al final real por O_APPEND, sin
+                # importar en qué posición haya quedado el cursor de `f`.
+                event.prev_hash = self._read_last_hash(self.path)
                 event.event_hash = event.compute_hash(self._hmac_key)
                 f.write(json.dumps(asdict(event)) + "\n")
                 f.flush()

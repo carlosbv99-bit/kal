@@ -750,3 +750,57 @@ detectado corriendo la suite completa de `kal-in` antes de commitear
 ahí, no por ninguna auditoría.
 
 Suite completa re-verificada tras el fix de acá: sin regresiones.
+
+## Fix: B-8 — costo O(n) por evento en el audit log (2026-10-03)
+
+B-8 (`docs/AUDITORIA-SEGURIDAD-2026-09-27.md`) había quedado diferido
+a propósito: severidad BAJA, no era un bug de correctitud, y tocar la
+cadena de hashes merecía su propia ronda medida, no un parche apurado
+en medio de la auditoría. Se retoma ahora porque un proyecto nuevo,
+"kal-epistemic" (comparte `audit/audit_log.py` con este repo, no una
+copia divergente), midió el mismo problema EN VIVO con datos reales:
+15.2 MB → ~14.6 ms por evento, con la ingesta epistémica pagando ese
+costo varias veces por turno.
+
+Medido en este repo antes de corregir: 5 MB → ~3 ms por `record()`
+(mismo orden de magnitud que kal-epistemic, escala con el tamaño
+del archivo — confirma que no era solo teórico).
+
+`_read_last_hash()` hacía `f.read()` del archivo COMPLETO (vía el
+mismo `f` en modo texto que `record()` ya tenía abierto bajo lock
+exclusivo) solo para quedarse con la ÚLTIMA línea. Reescrito para leer
+solo la cola: `seek` hacia atrás en chunks de 4096 bytes desde el
+final del archivo hasta encontrar un `\n` completo (o llegar al
+principio), todo en BYTES —`\n` es un byte ASCII que nunca aparece
+como continuación de una secuencia UTF-8 multibyte, así que partir por
+él en crudo es seguro sin decodificar primero; solo se decodifica,
+al final, la línea ya aislada. Fd de solo lectura separado del `f`
+de `record()` (no hace falta su propio `fcntl.flock`: el lock
+exclusivo que `record()` ya tiene sobre `f` sigue serializando a
+todos los escritores cooperativos, igual que ya pasa con las lecturas
+sin lock de `tail()`/`diagnose_chain()`, que no cambiaron). De paso,
+`f.seek(0)` en `record()` quedó innecesario (el `write()` que sigue va
+siempre al final real por `O_APPEND`) y se sacó.
+
+Efecto colateral positivo, no buscado: la rama de "última línea
+corrupta" (A-10 #2) ahora también atrapa `UnicodeDecodeError`, no solo
+`JSONDecodeError`/`KeyError` — antes, un byte no-UTF8 en CUALQUIER
+línea del archivo tumbaba `record()` entero sin atrapar (el `f.read()`
+viejo decodificaba TODO de una vez, antes de llegar al `try/except`);
+ahora solo la última línea se decodifica, así que ese mismo caso debe
+tratarse igual que un JSON corrupto — un gap preexistente que la
+auditoría original no había señalado, cerrado de pasada por el cambio
+de forma, no buscado a propósito.
+
+Verificado antes/después con medición real (no solo el test): a 5/20/50
+MB, `record()` da ~0.037 ms, plano — contra los ~3 ms a 5 MB de antes
+(que habría escalado a ~30 ms a 50 MB). Test nuevo
+(`test_read_last_hash_cost_is_bounded_not_proportional_to_file_size`)
+que cuenta bytes/caracteres leídos de audit.log durante un `record()`
+sobre un archivo de >200 KB — falla contra el código viejo (lee los
+~256 KB completos) y pasa con el nuevo (lee menos de 20 KB,
+independiente del tamaño total), confirmado con `git stash`/`stash pop`.
+Los 25 tests preexistentes de `audit_log.py` (líneas corruptas,
+interleaving entre dos instancias, tampering) siguen pasando sin
+cambios. Suite completa: 474 passed, 0 failed. `ruff check` de los
+archivos tocados, limpio.
