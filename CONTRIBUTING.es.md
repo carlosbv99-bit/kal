@@ -34,7 +34,7 @@
    ```
    python -m pytest tests/ -q
    ```
-   Es el mismo comando que corre la CI (480 tests hoy). Un puñado
+   Es el mismo comando que corre la CI (488 tests hoy). Un puñado
    necesita Docker corriendo (`requires_docker` en `tests/conftest.py`)
    — esos se saltan solos automáticamente cuando no está disponible.
 5. Lint (el mismo chequeo que aplica la CI — errores reales, no una

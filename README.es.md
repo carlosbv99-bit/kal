@@ -80,7 +80,7 @@ mismo kernel.
 
 Extraído preservando el historial de git de cada archivo que se movió
 aquí (`git log --follow` sobre cualquier ruta bajo `kernel/`/`sdk/`/
-`audit/` muestra su historia desde antes de la separación). 480 tests,
+`audit/` muestra su historia desde antes de la separación). 488 tests,
 autocontenido, instalando solo `requirements-core.txt` — sin código de
 agente, sin librerías de ML.
 
