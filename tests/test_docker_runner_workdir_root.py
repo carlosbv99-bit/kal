@@ -15,7 +15,7 @@ from __future__ import annotations
 import docker
 from docker.errors import DockerException
 
-from kernel.lifecycle.docker_runner import DockerSandboxRunner
+from kernel.lifecycle.docker_runner import DockerSandboxRunner, SandboxResult
 from tests.conftest import requires_docker
 
 
@@ -84,3 +84,59 @@ def test_real_docker_still_works_with_an_explicit_workdir_root(tmp_path, monkeyp
 
     assert result.status == "success"
     assert "funciona" in result.stdout
+
+
+def _resultado_workdir_vacio() -> SandboxResult:
+    return SandboxResult(
+        status="error",
+        stdout="",
+        stderr="python: can't open file '/workspace/main.py': [Errno 2] No such file or directory",
+        exit_code=2,
+    )
+
+
+def test_el_diagnostico_aparece_solo_si_la_prueba_confirma_que_el_daemon_no_ve_el_workdir(
+    tmp_path, monkeypatch
+):
+    """
+    B-3: el síntoma `can't open file '/workspace/main.py'` parece un bug de la
+    skill y en realidad es topología (el daemon no ve el workdir). El
+    diagnóstico solo se afirma si la prueba con centinela lo CONFIRMA.
+    """
+    runner = DockerSandboxRunner()
+    monkeypatch.setattr(runner.cfg, "workdir_root", str(tmp_path))
+    monkeypatch.setattr(runner, "_daemon_ve_el_workdir", lambda: False)
+    auditados = []
+    monkeypatch.setattr(
+        "kernel.lifecycle.docker_runner.audit_log.record",
+        lambda evento: auditados.append(evento),
+    )
+
+    resultado = runner._diagnosticar_workdir_invisible(_resultado_workdir_vacio(), tmp_path / "w")
+
+    assert "daemon de Docker NO ve el directorio de trabajo" in resultado.stderr
+    assert "sandbox.workdir_root" in resultado.stderr
+    assert "TMPDIR" in resultado.stderr
+    # La salida original se conserva: el diagnóstico se agrega, no reemplaza.
+    assert "can't open file" in resultado.stderr
+    assert auditados and auditados[0].event_type == "sandbox_workdir_no_visible"
+
+
+def test_sin_confirmacion_no_se_inventa_ningun_diagnostico(tmp_path, monkeypatch):
+    """La otra mitad, y la que más importa: si la prueba dice que el daemon SÍ
+    ve el workdir (o no se pudo determinar), el stderr queda INTACTO."""
+    runner = DockerSandboxRunner()
+
+    for veredicto in (True, None):
+        monkeypatch.setattr(runner, "_daemon_ve_el_workdir", lambda v=veredicto: v)
+        original = _resultado_workdir_vacio()
+        resultado = runner._diagnosticar_workdir_invisible(original, tmp_path / "w")
+        assert resultado.stderr == original.stderr
+
+
+def test_una_ejecucion_exitosa_no_se_toca(tmp_path, monkeypatch):
+    runner = DockerSandboxRunner()
+    monkeypatch.setattr(runner, "_daemon_ve_el_workdir", lambda: False)
+    original = SandboxResult(status="success", stdout="hola", stderr="", exit_code=0)
+
+    assert runner._diagnosticar_workdir_invisible(original, tmp_path / "w") is original

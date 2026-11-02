@@ -19,13 +19,14 @@ import posixpath
 import stat
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 from requests.exceptions import RequestException
 
+from audit.audit_log import AuditEvent, audit_log
 from utils.config import settings
 from utils.correlation import get_correlation_id
 from utils.logger import get_logger
@@ -68,6 +69,10 @@ class DockerSandboxRunner:
         # error en vez de propagar — la ausencia de Docker degrada ESA
         # llamada puntual, nunca el arranque de la aplicación.
         self._client: docker.DockerClient | None = None
+        # B-3: resultado de la prueba de visibilidad del workdir (None = todavía
+        # no se probó). Se cachea porque es una propiedad del ENTORNO, no de una
+        # ejecución concreta.
+        self._workdir_visible: bool | None = None
         self.cfg = settings.sandbox
         # HALLAZGO REAL DE AUDITORÍA EXTERNA (B-5, 2026-09-27): run()
         # fija user=f"{os.getuid()}:{os.getgid()}" (evita el chmod 0777
@@ -386,9 +391,115 @@ class DockerSandboxRunner:
                 return SandboxResult("error", "", f"docker error: {e}", None)
 
             result = self._wait_and_collect(container, start, target_timeout_seconds)
+            # B-3: si el bind mount del workdir llegó vacío, el stderr del
+            # contenedor es un síntoma de ENTORNO que parece un bug de la
+            # skill. Se reemplaza por un diagnóstico accionable.
+            result = self._diagnosticar_workdir_invisible(result, workdir)
             if output_path is not None and output_path.exists():
                 result.output_files = self._collect_output_files(output_path)
             return result
+
+    _MARCADOR_WORKDIR_VACIO = "can't open file '/workspace/main.py'"
+    """
+    Firma del síntoma cuando el bind mount del workdir llegó VACÍO al
+    contenedor: el contenedor arranca bien y el intérprete no encuentra el
+    script que este proceso acaba de escribir. Es un síntoma de ENTORNO, no de
+    la imagen ni del código del usuario.
+    """
+
+    def _diagnosticar_workdir_invisible(
+        self, result: SandboxResult, workdir: Path
+    ) -> SandboxResult:
+        """
+        Diagnóstico de B-3 (auditoría externa, 2026-09-27).
+
+        El problema real, en una frase: si el daemon de Docker vive en otro
+        mount namespace que este proceso (Docker rootless, Docker Desktop,
+        DOCKER_HOST remoto, o un /tmp PRIVADO por proceso), el bind mount apunta
+        a un directorio que el daemon no ve. La ejecución falla con
+        `can't open file '/workspace/main.py'`, que parece un bug de la skill y
+        en realidad es topología. Costó media hora de diagnóstico manual cuando
+        ocurrió: el dato estaba disponible —un bind desde `/tmp` llega vacío, el
+        mismo bind desde el repo funciona— pero no estaba en el mensaje.
+
+        Se diagnostica SOLO con evidencia: se monta un centinela desde el mismo
+        `workdir_root` y se comprueba si el contenedor lo ve. Si la prueba dice
+        que el daemon SÍ lo ve, no se afirma ninguna causa y el stderr original
+        queda intacto: no se inventa un diagnóstico no verificado.
+        """
+        if result.status == "success" or self._MARCADOR_WORKDIR_VACIO not in (result.stderr or ""):
+            return result
+
+        visible = self._daemon_ve_el_workdir()
+        if visible is not False:
+            return result
+
+        detalle = (
+            "El daemon de Docker NO ve el directorio de trabajo: el bind mount "
+            "llegó VACÍO al contenedor, así que arrancó sin el script a ejecutar.\n"
+            f"  workdir del host: {workdir}\n"
+            f"  workdir_root configurado: {self.cfg.workdir_root!r} "
+            "(None = tempdir del sistema)\n"
+            "  verificado: se montó un centinela desde esa misma raíz y el "
+            "contenedor no lo vio.\n"
+            "  Causas típicas: el daemon corre en otro contexto/VM (DOCKER_HOST "
+            "remoto) o el TMPDIR de ESTE proceso es privado y no lo comparte con "
+            "el daemon (pasa en entornos con /tmp por proceso, como un shell "
+            "sandboxeado).\n"
+            "  Arreglo: apuntá sandbox.workdir_root (config.yaml) o TMPDIR a una "
+            "ruta que el daemon sí vea — por ejemplo una dentro de $HOME."
+        )
+        logger.error(f"Sandbox: workdir no visible para el daemon ({workdir})")
+        try:
+            audit_log.record(
+                AuditEvent(
+                    event_type="sandbox_workdir_no_visible",
+                    summary="El daemon de Docker no ve el workdir del sandbox (bind vacío)",
+                    context={
+                        "workdir_root": str(self.cfg.workdir_root),
+                        "workdir": str(workdir),
+                    },
+                    outcome="failure",
+                )
+            )
+        except Exception:  # noqa: BLE001 — el diagnóstico no puede romper la ejecución
+            logger.exception("No se pudo auditar el diagnóstico de workdir no visible")
+        return replace(
+            result, stderr=f"{detalle}\n\nSalida original del contenedor:\n{result.stderr}"
+        )
+
+    def _daemon_ve_el_workdir(self) -> bool | None:
+        """
+        Prueba DEFINITIVA de si el daemon ve el `workdir_root` de este proceso:
+        escribe un centinela en un directorio temporal de ESA raíz, lo monta en
+        un contenedor mínimo y comprueba si lo lee. Cachea el resultado (una vez
+        por instancia) y devuelve `None` si no se pudo determinar — nunca se
+        afirma una causa sin evidencia.
+        """
+        if self._workdir_visible is not None:
+            return self._workdir_visible
+        contenedor = None
+        try:
+            with tempfile.TemporaryDirectory(dir=self.cfg.workdir_root) as tmp_dir:
+                ruta = Path(tmp_dir)
+                (ruta / "centinela").write_text("kal-probe", encoding="utf-8")
+                contenedor = self.client.containers.create(
+                    image=SANDBOX_IMAGE,
+                    command=["cat", "/probe/centinela"],
+                    volumes={str(ruta): {"bind": "/probe", "mode": "ro"}},
+                    network_mode="none",
+                    mem_limit="128m",
+                )
+                contenedor.start()
+                contenedor.wait(timeout=20)
+                salida = contenedor.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+                self._workdir_visible = "kal-probe" in salida
+        except Exception as e:  # noqa: BLE001 — no poder probarlo no es un diagnóstico
+            logger.warning(f"No se pudo determinar si el daemon ve el workdir: {e}")
+            return None
+        finally:
+            self._safe_remove(contenedor)
+        return self._workdir_visible
 
     @staticmethod
     def _collect_output_files(output_path: Path) -> dict[str, bytes]:

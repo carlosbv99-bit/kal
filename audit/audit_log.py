@@ -103,6 +103,9 @@ EventType = Literal[
     "kernel_invalid_encoding",
     "epistemic_evidence_ingested",
     "market_install_rejected",
+    "sandbox_workdir_no_visible",
+    "artifact_downloaded",
+    "skill_proposed",
 ]
 
 
