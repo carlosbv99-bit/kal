@@ -35,7 +35,7 @@
    ```
    python -m pytest tests/ -q
    ```
-   Same command CI runs (367 tests today). A handful need Docker
+   Same command CI runs (480 tests today). A handful need Docker
    running (`requires_docker` in `tests/conftest.py`) — those skip
    themselves automatically when it isn't available.
 5. Lint (same check CI enforces — real errors only, not a style
