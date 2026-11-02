@@ -55,5 +55,16 @@ jobs:
           pip install -q pip-audit
           pip-audit -r requirements-core.txt -r requirements-dev.txt || true
 
+      # Los tests de sandbox ejecutan contenedores REALES contra
+      # kal-sandbox-minimal:latest (ver kernel/lifecycle/skill_image_builder.py,
+      # MINIMAL_IMAGE). El runner ubuntu-latest trae Docker, pero NO la imagen:
+      # sin este paso, test_skills.py falla con "sandbox image not found:
+      # kal-sandbox-minimal:latest" y el CI quedaba en rojo por algo que no era
+      # el código. Los tests que SÍ saben saltearse cuando la imagen no está
+      # (test_sandbox_image_hardening.py) la usan si está, así que construyéndola
+      # se ejecutan también esos.
+      - name: Construir la imagen del sandbox
+        run: bash scripts/build_sandbox_image.sh
+
       - name: Tests
         run: python -m pytest tests/ -q
