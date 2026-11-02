@@ -58,6 +58,18 @@ del commit de acá, como pide `kal-in/CONTRIBUTING.es.md`.
    clave autofirmada. Acá va la primitiva (un conjunto de claves de autor confiables que el
    instalador exige) y el evento de auditoría del rechazo por clave desconocida; la
    **política** (qué claves) queda en cada consumidor — en `kal-in` primero.
+8. **`allowed_domains` se declara y nunca se aplica (M-6).**
+   `ToolManifest.allowed_domains` (y el campo equivalente en `skill.yaml`) promete
+   una restricción de destinos que hoy no existe: con `Permission.NETWORK`
+   concedido, el contenedor sale con `network_mode="bridge"` — internet completo,
+   sin allowlist ni proxy de egreso. El campo se serializa y viaja por todos lados
+   (`sdk/skill.py`, `kernel/registry/registry.py`), así que hoy es una promesa
+   falsa, que es peor que no tenerlo. Dos salidas, ninguna barata: implementarlo
+   de verdad (proxy de egreso, o `iptables`/`nft` dentro del contenedor) o sacarlo
+   del manifest y documentar que la red es todo-o-nada por nivel de confianza.
+   Mientras tanto, la única barrera real es el techo de `permission_cascade` en
+   `config.yaml` (tier `skill`, hoy solo con `filesystem_read`).
+
 7. **Tipo de evento de auditoría para la huella de la plantilla de chat** (si se decide
    hacerla): `audit/audit_log.py` es compartido, así que el tipo nuevo nace acá y después
    `kal-in` agrega la llamada a `/api/show` + hash por sesión.

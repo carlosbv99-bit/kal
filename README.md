@@ -71,7 +71,7 @@ built on top of this kernel instead.
 
 Extracted with git history preserved for every file that moved here
 (`git log --follow` on any path under `kernel/`/`sdk/`/`audit/` shows
-its history from before the split). 480 tests, standalone, installing
+its history from before the split). 488 tests, standalone, installing
 only `requirements-core.txt` — no agent code, no ML libraries.
 
 ## Get involved
