@@ -19,3 +19,9 @@ build/
 .env.*
 *.pem
 *.key
+
+# Fragmento de trabajo local, no es contenido del repo: controles de audio de
+# un reproductor Qt. kal es kernel puro (sin UI ni reproductor), así que este
+# código no tiene lugar acá — se conserva el archivo por comodidad, pero
+# fuera del árbol versionado.
+/audio_controls.py
